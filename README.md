@@ -42,7 +42,41 @@ python main.py video data_bersih/video/rekaman.mp4 --out hasil --min-dwell 10
 ```
 Keluaran: gambar/video beranotasi, `hasil_gambar.csv` / `*_hasil.csv`, dan `*_ringkasan.json` (daftar parkir terkonfirmasi).
 
+## Dasbor web (cara termudah)
+
+```bash
+python main.py            # sama dengan: python main.py ui   (juga bisa lewat tombol Run di VS Code)
+```
+Jendela dasbor terbuka sendiri (Edge/Chrome mode aplikasi; bila tak ada, browser biasa). Tanpa paket tambahan: servernya
+memakai pustaka standar Python. Model dimuat di latar belakang; saat chip di kanan atas berubah menjadi **Model siap**, kamu bisa mulai.
+
+| Tab | Untuk apa |
+|---|---|
+| **Kamera** | Kamera laptop atau HP lewat browser. Tekan *Nyalakan kamera*, izinkan, lalu *Mulai pantau*. |
+| **Stream** | Diisi indeks webcam (`0`), alamat kamera IP HP (`http://192.168.1.20:8080/video`), atau CCTV (`rtsp://...`). Server yang membuka sumbernya. |
+| **Video** | Pilih berkas video dari komputer; diputar di dasbor dan dianalisis sambil diputar. |
+
+- **Gambar trotoar**: klik titik-titik tepi trotoar langsung di atas video, lalu *Terapkan*. Paling stabil untuk kamera yang diam
+  (tersimpan juga di `live_hasil/trotoar_polygon.json`). *Pakai otomatis* mengembalikan ke segmentasi otomatis.
+- Saat kendaraan terkonfirmasi parkir: bingkai layar berubah jadi garis marka kuning-hitam, muncul banner, bunyi (bisa dimatikan),
+  dan foto bukti masuk ke daftar **Kejadian** (klik untuk memperbesar; *Unduh CSV* untuk log).
+- **Pengaturan** (panel kanan bawah): lama diam sebelum alert, ambang kontak trotoar, kompensasi gerak kamera. Berlaku langsung.
+- Opsi: `--port 8765`, `--out live_hasil`, `--min-dwell 10`, `--no-open`, serta `--weights`, `--polygon`, `--set`, dst. seperti perintah lain.
+
+### Kamera HP lewat browser (HTTPS)
+Browser hanya mengizinkan kamera di alamat `http://localhost` atau `https://`. Dari HP, pakai terowongan HTTPS, misalnya Cloudflare Tunnel:
+```bash
+python main.py ui --remote            # mencetak kunci akses acak
+cloudflared tunnel --url http://localhost:8765
+# di HP, buka:  https://<alamat-dari-cloudflared>/?key=<kunci-yang-dicetak>   -> tab Kamera
+```
+`--remote` mewajibkan kunci akses dan mematikan sumber di sisi server (tab Stream), supaya orang yang kebetulan tahu alamatnya
+tidak bisa menyuruh server membuka berkas/kamera di laptopmu. Frame dikirim dari HP ke laptop, jadi YOLO tetap jalan di laptop.
+Alternatif tanpa terowongan: aplikasi kamera IP di HP + tab **Stream** (Wi-Fi yang sama).
+
 ## Mode live (ala CCTV)
+
+*(Versi baris perintah dengan jendela OpenCV; dasbor di atas lebih nyaman.)*
 
 Memantau kamera secara real-time; saat ada kendaraan **diam di trotoar tanpa pengendara ≥ 10 detik** muncul tulisan
 `ALERT` merah di layar, gambar bukti disimpan, dan kejadian dicatat.
@@ -101,11 +135,15 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (54 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (73 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
-  CLI, evaluasi, penanganan EXIF/video. Jalankan: `pytest tests -q`.
+  CLI, evaluasi, penanganan EXIF/video, serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
+  pengaturan, kunci akses `--remote`). Jalankan: `pytest tests -q`.
+- **Tampilan dasbor** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan (alur tab Stream dan Kamera,
+  menggambar poligon, bingkai/banner alert, daftar kejadian, layout sempit) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari,
+  kamera HP sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
-  perintah `train`, `polygon` dan jendela `live` (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
+  perintah `train`, `polygon` dan jendela `live` OpenCV (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
   tes live memakai video sintetis sebagai sumber. Parser hasil Ultralytics diuji dengan objek tiruan; versi
   Ultralytics yang berbeda bisa mengubah detail API. Jika ada galat, mulai dari `parse_ultralytics_result`.
 - **Akurasi pada trotoar nyata belum diukur.** Angka pada data sintetis hanya membuktikan program berjalan sesuai desain.
@@ -118,6 +156,7 @@ dari data validasi Anda.
 
 ```
 main.py                 titik masuk CLI
-trotoar/                config, sidewalk, vehicles, geometry, decision, temporal, pipeline, visualize, media, metrics, cli
+trotoar/                config, sidewalk, vehicles, geometry, decision, temporal, pipeline, visualize, media, metrics, cli, webui
+trotoar/web/            antarmuka dasbor (index.html, app.css, app.js)
 tests/                  tes otomatis + generator adegan sintetis (synthetic.py)
 ```

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sidewalk Sentinel</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="sign" viewBox="0 0 48 48">
+    <circle cx="24" cy="24" r="22" fill="#d3302a"/>
+    <circle cx="24" cy="24" r="18" fill="#0a58b5"/>
+    <path fill="#fff" fill-rule="evenodd" d="M17.5 12h8.6a7 7 0 0 1 0 14H22.5v10h-5zM22.5 17v4.5h3.4a2.25 2.25 0 0 0 0-4.5z"/>
+    <path d="M10.5 10.5l27 27" stroke="#d3302a" stroke-width="4.6" fill="none"/>
+  </symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="sign" aria-hidden="true"><use href="#sign"/></svg>
+    <div>
+      <h1>Sidewalk Sentinel</h1>
+      <p>Pemantau kendaraan parkir di trotoar</p>
+    </div>
+  </div>
+  <div class="topbar-end">
+    <span id="metrics" class="metrics" hidden></span>
+    <span id="model-chip" class="chip" data-state="memuat" title="">
+      <i class="dot"></i><span id="model-text">Memuat model…</span>
+    </span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="work" aria-label="Pemantauan">
+
+    <div id="stage" class="stage" data-empty="true">
+      <video id="video" playsinline muted hidden></video>
+      <img id="stream" alt="Gambar dari kamera server" hidden>
+      <canvas id="overlay"></canvas>
+
+      <div id="empty" class="empty">
+        <svg class="sign big" aria-hidden="true"><use href="#sign"/></svg>
+        <h2>Pilih sumber gambar</h2>
+        <p>Nyalakan kamera laptop atau HP, sambungkan kamera IP, atau buka berkas video. Setelah gambar muncul, tekan <b>Mulai pantau</b>.</p>
+      </div>
+
+      <div class="hud hud-left">
+        <span id="live-chip" class="chip dark" data-state="idle"><i class="dot"></i><span id="live-text">Belum dimulai</span></span>
+        <span id="sw-chip" class="chip dark" hidden>
+          Trotoar manual
+          <button id="btn-auto" class="chip-btn" type="button">Pakai otomatis</button>
+        </span>
+      </div>
+      <button id="btn-full" class="icon-btn hud hud-right" type="button" aria-label="Layar penuh" title="Layar penuh">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+
+      <div id="banner" class="banner" role="alert" hidden>
+        <svg class="sign" aria-hidden="true"><use href="#sign"/></svg>
+        <span id="banner-text"></span>
+      </div>
+
+      <div id="draw-panel" class="draw-panel" hidden>
+        <p><b>Gambar area trotoar.</b> Klik titik-titik di sepanjang tepinya, searah. Klik titik pertama untuk menutup bentuk.</p>
+        <div class="row">
+          <button id="draw-undo" class="btn small" type="button">Urungkan</button>
+          <button id="draw-close" class="btn small" type="button">Tutup bentuk</button>
+          <button id="draw-cancel" class="btn small" type="button">Batal</button>
+          <button id="draw-apply" class="btn small primary" type="button">Terapkan</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="seg" role="tablist" aria-label="Sumber gambar">
+        <button role="tab" id="tab-camera" data-kind="camera" aria-selected="true" type="button">Kamera</button>
+        <button role="tab" id="tab-stream" data-kind="stream" aria-selected="false" type="button">Stream</button>
+        <button role="tab" id="tab-video" data-kind="video" aria-selected="false" type="button">Video</button>
+      </div>
+
+      <div class="source-input">
+        <div id="src-camera" class="src">
+          <select id="cam-select" aria-label="Pilih kamera"><option value="">Kamera bawaan</option></select>
+          <button id="cam-on" class="btn" type="button">Nyalakan kamera</button>
+        </div>
+        <div id="src-stream" class="src" hidden>
+          <input id="stream-url" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="0, rtsp://…, atau http://192.168.1.5:8080/video" aria-label="Alamat stream atau indeks webcam">
+        </div>
+        <div id="src-video" class="src" hidden>
+          <input id="video-file" type="file" accept="video/*" hidden>
+          <button id="video-pick" class="btn" type="button">Pilih berkas video</button>
+          <span id="video-name" class="muted">Belum ada berkas</span>
+        </div>
+      </div>
+
+      <div class="spacer"></div>
+      <button id="btn-draw" class="btn" type="button">Gambar trotoar</button>
+      <button id="btn-run" class="btn primary" type="button" disabled>Mulai pantau</button>
+    </div>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+  </section>
+
+  <aside class="side" aria-label="Ringkasan dan kejadian">
+    <section class="summary" aria-label="Ringkasan">
+      <div><b id="n-veh">0</b><span>Kendaraan</span></div>
+      <div><b id="n-side">0</b><span>Di trotoar</span></div>
+      <div class="warn"><b id="n-park">0</b><span>Parkir</span></div>
+    </section>
+
+    <section class="events" aria-label="Kejadian">
+      <div class="section-head">
+        <h2>Kejadian <span id="ev-count" class="count">0</span></h2>
+        <a id="csv-link" href="/kejadian.csv" download hidden>Unduh CSV</a>
+      </div>
+      <ol id="ev-list" class="ev-list"></ol>
+      <div id="ev-empty" class="ev-empty">
+        <p><b>Belum ada kejadian.</b></p>
+        <p>Foto bukti muncul di sini saat kendaraan diam di trotoar lebih dari <span id="ev-dwell">10</span> detik.</p>
+      </div>
+    </section>
+
+    <details class="settings">
+      <summary>Pengaturan</summary>
+      <label class="field">
+        <span>Lama diam sebelum alert <output id="o-dwell">10 dtk</output></span>
+        <input id="set-dwell" type="range" min="3" max="60" step="1" value="10">
+      </label>
+      <label class="field">
+        <span>Ambang kontak trotoar <output id="o-tau">0,50</output></span>
+        <input id="set-tau" type="range" min="0.3" max="0.8" step="0.05" value="0.5">
+        <small>Makin tinggi, makin ketat menilai kendaraan berada di trotoar.</small>
+      </label>
+      <label class="check"><input id="set-comp" type="checkbox" checked> Kompensasi gerak kamera</label>
+      <label class="check"><input id="set-sound" type="checkbox" checked> Bunyi saat ada alert</label>
+      <button id="btn-refresh" class="btn small" type="button">Hitung ulang trotoar</button>
+    </details>
+  </aside>
+</main>
+
+<dialog id="lightbox" aria-label="Foto bukti">
+  <img id="lightbox-img" alt="Foto bukti kejadian">
+  <form method="dialog"><button class="btn" autofocus>Tutup</button></form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
