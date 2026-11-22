@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="id">
+<html lang="id" data-state="idle">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070a14">
 <title>Sidewalk Sentinel</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
@@ -10,61 +11,92 @@
 <body>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="sign" viewBox="0 0 48 48">
-    <circle cx="24" cy="24" r="22" fill="#d3302a"/>
-    <circle cx="24" cy="24" r="18" fill="#0a58b5"/>
-    <path fill="#fff" fill-rule="evenodd" d="M17.5 12h8.6a7 7 0 0 1 0 14H22.5v10h-5zM22.5 17v4.5h3.4a2.25 2.25 0 0 0 0-4.5z"/>
-    <path d="M10.5 10.5l27 27" stroke="#d3302a" stroke-width="4.6" fill="none"/>
+  <defs>
+    <linearGradient id="grad-ion" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7b8cff"/><stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <linearGradient id="grad-spark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7b8cff" stop-opacity=".32"/><stop offset="1" stop-color="#7b8cff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="grad-spark-warn" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff3d6e" stop-opacity=".3"/><stop offset="1" stop-color="#ff3d6e" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <symbol id="mark" viewBox="0 0 48 48">
+    <circle cx="24" cy="24" r="14.5" fill="none" stroke="url(#grad-ion)" stroke-width="2.6"/>
+    <path d="M24 4v7M24 37v7M4 24h7M37 24h7" stroke="url(#grad-ion)" stroke-width="2.6" stroke-linecap="round"/>
+    <path fill="#e8ecff" fill-rule="evenodd" d="M20.2 17h5.6a4.6 4.6 0 0 1 0 9.2h-2.4v5.3h-3.2zM23.4 19.8v3.6h2.2a1.8 1.8 0 0 0 0-3.6z"/>
+    <path d="M15 15l18 18" stroke="#ff3d6e" stroke-width="3.2" stroke-linecap="round"/>
   </symbol>
 </svg>
 
-<header class="topbar">
+<div class="ambient" aria-hidden="true"><i class="calm"></i><i class="danger"></i></div>
+
+<header class="topbar glass">
   <div class="brand">
-    <svg class="sign" aria-hidden="true"><use href="#sign"/></svg>
-    <div>
+    <svg class="mark" aria-hidden="true"><use href="#mark"/></svg>
+    <div class="brand-text">
       <h1>Sidewalk Sentinel</h1>
-      <p>Pemantau kendaraan parkir di trotoar</p>
+      <p>Pemantau parkir di trotoar</p>
     </div>
   </div>
+
+  <span id="model-chip" class="pill" data-state="memuat" title="">
+    <i class="dot"></i><span id="model-text">Memuat model…</span>
+  </span>
+
   <div class="topbar-end">
-    <span id="metrics" class="metrics" hidden></span>
-    <span id="model-chip" class="chip" data-state="memuat" title="">
-      <i class="dot"></i><span id="model-text">Memuat model…</span>
-    </span>
+    <div id="metrics" class="perf" hidden>
+      <span><b id="perf-fps">0,0</b> fps</span>
+      <svg id="spark-fps" class="spark mini" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <span><b id="perf-lat">0</b> ms</span>
+    </div>
+    <button id="btn-help" class="icon-btn" type="button" aria-label="Pintasan papan ketik" title="Pintasan papan ketik (?)">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/></svg>
+    </button>
+    <button id="btn-settings" class="icon-btn" type="button" aria-label="Pengaturan" title="Pengaturan">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+    </button>
   </div>
 </header>
 
 <main class="layout">
-  <section class="work" aria-label="Pemantauan">
+  <section class="stage-col" aria-label="Pemantauan">
 
     <div id="stage" class="stage" data-empty="true">
+      <div id="view" class="view">
       <video id="video" playsinline muted hidden></video>
       <img id="stream" alt="Gambar dari kamera server" hidden>
       <canvas id="overlay"></canvas>
+      <div class="scan" aria-hidden="true"></div>
 
       <div id="empty" class="empty">
-        <svg class="sign big" aria-hidden="true"><use href="#sign"/></svg>
+        <svg class="radar" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="r1" cx="60" cy="60" r="52"/><circle class="r2" cx="60" cy="60" r="36"/>
+          <path d="M60 4v14M60 102v14M4 60h14M102 60h14"/>
+          <use href="#mark" x="36" y="36" width="48" height="48"/>
+        </svg>
         <h2>Pilih sumber gambar</h2>
-        <p>Nyalakan kamera laptop atau HP, sambungkan kamera IP, atau buka berkas video. Setelah gambar muncul, tekan <b>Mulai pantau</b>.</p>
+        <p></p>
       </div>
 
       <div class="hud hud-left">
-        <span id="live-chip" class="chip dark" data-state="idle"><i class="dot"></i><span id="live-text">Belum dimulai</span></span>
-        <span id="sw-chip" class="chip dark" hidden>
+        <span id="live-chip" class="pill glass dark" data-state="idle"><i class="dot"></i><span id="live-text">Belum dimulai</span></span>
+        <span id="sw-chip" class="pill glass dark" hidden>
           Trotoar manual
           <button id="btn-auto" class="chip-btn" type="button">Pakai otomatis</button>
         </span>
       </div>
-      <button id="btn-full" class="icon-btn hud hud-right" type="button" aria-label="Layar penuh" title="Layar penuh">
+      <button id="btn-full" class="icon-btn glass hud hud-right" type="button" aria-label="Layar penuh" title="Layar penuh (F)">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
       </button>
 
       <div id="banner" class="banner" role="alert" hidden>
-        <svg class="sign" aria-hidden="true"><use href="#sign"/></svg>
+        <svg class="mark" aria-hidden="true"><use href="#mark"/></svg>
         <span id="banner-text"></span>
       </div>
 
-      <div id="draw-panel" class="draw-panel" hidden>
+      <div id="draw-panel" class="draw-panel glass" hidden>
         <p><b>Gambar area trotoar.</b> Klik titik-titik di sepanjang tepinya, searah. Klik titik pertama untuk menutup bentuk.</p>
         <div class="row">
           <button id="draw-undo" class="btn small" type="button">Urungkan</button>
@@ -73,77 +105,147 @@
           <button id="draw-apply" class="btn small primary" type="button">Terapkan</button>
         </div>
       </div>
-    </div>
 
-    <div class="toolbar">
-      <div class="seg" role="tablist" aria-label="Sumber gambar">
-        <button role="tab" id="tab-camera" data-kind="camera" aria-selected="true" type="button">Kamera</button>
-        <button role="tab" id="tab-stream" data-kind="stream" aria-selected="false" type="button">Stream</button>
-        <button role="tab" id="tab-video" data-kind="video" aria-selected="false" type="button">Video</button>
       </div>
 
-      <div class="source-input">
-        <div id="src-camera" class="src">
-          <select id="cam-select" aria-label="Pilih kamera"><option value="">Kamera bawaan</option></select>
-          <button id="cam-on" class="btn" type="button">Nyalakan kamera</button>
+      <div id="dock" class="dock glass">
+        <div class="seg" role="tablist" aria-label="Sumber gambar">
+          <button role="tab" id="tab-camera" data-kind="camera" aria-selected="true" type="button">Kamera</button>
+          <button role="tab" id="tab-stream" data-kind="stream" aria-selected="false" type="button">Stream</button>
+          <button role="tab" id="tab-video" data-kind="video" aria-selected="false" type="button">Video</button>
         </div>
-        <div id="src-stream" class="src" hidden>
-          <input id="stream-url" type="text" spellcheck="false" autocomplete="off"
-                 placeholder="0, rtsp://…, atau http://192.168.1.5:8080/video" aria-label="Alamat stream atau indeks webcam">
-        </div>
-        <div id="src-video" class="src" hidden>
-          <input id="video-file" type="file" accept="video/*" hidden>
-          <button id="video-pick" class="btn" type="button">Pilih berkas video</button>
-          <span id="video-name" class="muted">Belum ada berkas</span>
-        </div>
-      </div>
 
-      <div class="spacer"></div>
-      <button id="btn-draw" class="btn" type="button">Gambar trotoar</button>
-      <button id="btn-run" class="btn primary" type="button" disabled>Mulai pantau</button>
+        <div class="source-input">
+          <div id="src-camera" class="src">
+            <select id="cam-select" aria-label="Pilih kamera"><option value="">Kamera bawaan</option></select>
+            <button id="cam-on" class="btn" type="button">Nyalakan kamera</button>
+          </div>
+          <div id="src-stream" class="src" hidden>
+            <input id="stream-url" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="0, rtsp://…, atau http://192.168.1.5:8080/video" aria-label="Alamat stream atau indeks webcam">
+          </div>
+          <div id="src-video" class="src" hidden>
+            <input id="video-file" type="file" accept="video/*" hidden>
+            <button id="video-pick" class="btn" type="button">Pilih berkas video</button>
+            <span id="video-name" class="muted">Belum ada berkas</span>
+          </div>
+        </div>
+
+        <div class="spacer"></div>
+
+        <div class="tools" role="group" aria-label="Alat">
+          <button id="btn-draw" class="tool" type="button" aria-pressed="false" title="Gambar area trotoar (D)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l4-12 8 3 4 9z"/><circle cx="4" cy="18" r="1.2"/><circle cx="8" cy="6" r="1.2"/><circle cx="16" cy="9" r="1.2"/><circle cx="20" cy="18" r="1.2"/></svg>
+            <span>Trotoar</span>
+          </button>
+          <button id="btn-heat" class="tool" type="button" aria-pressed="false" title="Peta panas posisi kendaraan di trotoar (H)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 4 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z"/></svg>
+            <span>Peta panas</span>
+          </button>
+          <button id="btn-trail" class="tool on" type="button" aria-pressed="true" title="Jejak gerak kendaraan (T)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18c4 0 4-6 8-6s4-6 10-6"/><circle cx="21" cy="6" r="1.5"/></svg>
+            <span>Jejak</span>
+          </button>
+          <button id="btn-shot" class="tool" type="button" title="Simpan gambar dengan overlay (S)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            <span>Foto</span>
+          </button>
+        </div>
+
+        <button id="btn-run" class="run" type="button" disabled>Mulai pantau</button>
+      </div>
     </div>
+
     <p id="notice" class="notice" role="status" aria-live="polite"></p>
   </section>
 
-  <aside class="side" aria-label="Ringkasan dan kejadian">
-    <section class="summary" aria-label="Ringkasan">
-      <div><b id="n-veh">0</b><span>Kendaraan</span></div>
-      <div><b id="n-side">0</b><span>Di trotoar</span></div>
-      <div class="warn"><b id="n-park">0</b><span>Parkir</span></div>
+  <aside class="rail" aria-label="Telemetri dan kejadian">
+    <section class="telemetry">
+      <div class="rail-head">
+        <h2>Telemetri</h2>
+        <span id="uptime" class="muted">00:00</span>
+      </div>
+      <div class="metric">
+        <div><b id="n-veh">0</b><span>Kendaraan</span></div>
+        <svg id="spark-veh" class="spark" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="metric">
+        <div><b id="n-side">0</b><span>Di trotoar</span></div>
+        <svg id="spark-side" class="spark" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="metric warn">
+        <div><b id="n-park">0</b><span>Parkir</span></div>
+        <svg id="spark-park" class="spark" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div id="mix" class="mix"></div>
     </section>
 
-    <section class="events" aria-label="Kejadian">
-      <div class="section-head">
+    <section class="events">
+      <div class="rail-head">
         <h2>Kejadian <span id="ev-count" class="count">0</span></h2>
-        <a id="csv-link" href="/kejadian.csv" download hidden>Unduh CSV</a>
+        <div class="links">
+          <a id="csv-link" href="/kejadian.csv" download hidden>Unduh CSV</a>
+          <a id="csv-review" href="/kejadian_tinjauan.csv" download hidden>CSV tinjauan</a>
+        </div>
       </div>
+      <p id="precision" class="precision" hidden></p>
       <ol id="ev-list" class="ev-list"></ol>
       <div id="ev-empty" class="ev-empty">
         <p><b>Belum ada kejadian.</b></p>
-        <p>Foto bukti muncul di sini saat kendaraan diam di trotoar lebih dari <span id="ev-dwell">10</span> detik.</p>
+        <p>Foto bukti muncul di sini saat kendaraan diam di trotoar lebih dari <span id="ev-dwell">10</span> detik. Tandai tiap kejadian <i>Benar</i> atau <i>Salah</i>, dan presisi alert dihitung otomatis.</p>
       </div>
     </section>
-
-    <details class="settings">
-      <summary>Pengaturan</summary>
-      <label class="field">
-        <span>Lama diam sebelum alert <output id="o-dwell">10 dtk</output></span>
-        <input id="set-dwell" type="range" min="3" max="60" step="1" value="10">
-      </label>
-      <label class="field">
-        <span>Ambang kontak trotoar <output id="o-tau">0,50</output></span>
-        <input id="set-tau" type="range" min="0.3" max="0.8" step="0.05" value="0.5">
-        <small>Makin tinggi, makin ketat menilai kendaraan berada di trotoar.</small>
-      </label>
-      <label class="check"><input id="set-comp" type="checkbox" checked> Kompensasi gerak kamera</label>
-      <label class="check"><input id="set-sound" type="checkbox" checked> Bunyi saat ada alert</label>
-      <button id="btn-refresh" class="btn small" type="button">Hitung ulang trotoar</button>
-    </details>
   </aside>
 </main>
 
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer glass" hidden aria-label="Pengaturan">
+  <div class="rail-head">
+    <h2>Pengaturan</h2>
+    <button id="drawer-close" class="icon-btn" type="button" aria-label="Tutup pengaturan">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+
+  <label class="field">
+    <span>Lama diam sebelum alert <output id="o-dwell">10 dtk</output></span>
+    <input id="set-dwell" type="range" min="3" max="60" step="1" value="10">
+  </label>
+  <label class="field">
+    <span>Ambang kontak trotoar <output id="o-tau">0,50</output></span>
+    <input id="set-tau" type="range" min="0.3" max="0.8" step="0.05" value="0.5">
+    <small>Makin tinggi, makin ketat menilai kendaraan berada di trotoar.</small>
+  </label>
+  <label class="field">
+    <span>Saat ada alert</span>
+    <select id="set-alert">
+      <option value="bip">Bunyi bip</option>
+      <option value="suara">Suara (Bahasa Indonesia)</option>
+      <option value="mati">Tanpa bunyi</option>
+    </select>
+  </label>
+  <label class="check"><input id="set-notify" type="checkbox"> Notifikasi browser saat tab di latar belakang</label>
+  <label class="check"><input id="set-comp" type="checkbox" checked> Kompensasi gerak kamera</label>
+  <button id="btn-refresh" class="btn small" type="button">Hitung ulang trotoar</button>
+  <p id="out-dir" class="muted small-print"></p>
+</aside>
+
 <dialog id="lightbox" aria-label="Foto bukti">
   <img id="lightbox-img" alt="Foto bukti kejadian">
+  <form method="dialog"><button class="btn" autofocus>Tutup</button></form>
+</dialog>
+
+<dialog id="help" aria-label="Pintasan papan ketik">
+  <h2>Pintasan papan ketik</h2>
+  <dl class="keys">
+    <dt><kbd>Spasi</kbd></dt><dd>Mulai / berhenti memantau</dd>
+    <dt><kbd>D</kbd></dt><dd>Gambar area trotoar</dd>
+    <dt><kbd>H</kbd></dt><dd>Peta panas</dd>
+    <dt><kbd>T</kbd></dt><dd>Jejak gerak</dd>
+    <dt><kbd>S</kbd></dt><dd>Simpan gambar dengan overlay</dd>
+    <dt><kbd>F</kbd></dt><dd>Layar penuh</dd>
+    <dt><kbd>Enter</kbd> <kbd>Backspace</kbd> <kbd>Esc</kbd></dt><dd>Saat menggambar: tutup bentuk, urungkan, batal</dd>
+  </dl>
   <form method="dialog"><button class="btn" autofocus>Tutup</button></form>
 </dialog>
 

@@ -14,6 +14,7 @@ gambar kamera tetap mulus walau YOLO hanya sempat memproses beberapa frame per d
 """
 from __future__ import annotations
 
+import csv
 import hmac
 import json
 import mimetypes
@@ -302,7 +303,8 @@ class Engine:
     def _write_summary(self) -> None:
         dur = time.monotonic() - self._t_start if self._t_start else 0.0
         summary = {"sumber": self.source_label, "frame_diproses": self.frames, "durasi_s": round(dur, 1),
-                   "alert": list(self.sink.events.values()), "config": self.cfg.to_dict()}
+                   "alert": list(self.sink.events.values()), "tinjauan": self.review_counts(),
+                   "config": self.cfg.to_dict()}
         try:
             (self.out_dir / "ringkasan_live.json").write_text(
                 json.dumps(summary, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
@@ -335,6 +337,7 @@ class Engine:
             for ev in new:
                 item = dict(ev)
                 item["id"] = len(self.alerts) + 1
+                item["label"] = None
                 item["foto"] = "/alerts/" + Path(ev["gambar"]).name
                 self.alerts.append(item)
             payload["alerts"] = len(self.alerts)
@@ -411,13 +414,54 @@ class Engine:
             if self._state is not None:
                 self._state.force_refresh = True
 
+    # ------------------------------------------------------------------ tinjauan kejadian (benar/salah)
+    def review_counts(self) -> dict:
+        n = {"benar": 0, "salah": 0}
+        for a in self.alerts:
+            if a.get("label") in n:
+                n[a["label"]] += 1
+        n["belum"] = len(self.alerts) - n["benar"] - n["salah"]
+        return n
+
+    def label_alert(self, alert_id, label) -> dict:
+        """Tandai satu kejadian ``benar`` (alert sah) / ``salah`` (alarm palsu) / ``None`` (hapus tanda).
+
+        Hasilnya ditulis ke ``kejadian_tinjauan.csv`` sehingga presisi alert bisa dihitung untuk laporan.
+        """
+        if label not in ("benar", "salah", None):
+            raise ValueError("Tinjauan harus 'benar', 'salah', atau kosong.")
+        try:
+            alert_id = int(alert_id)
+        except (TypeError, ValueError):
+            raise ValueError("ID kejadian harus berupa angka.")
+        with self._mut:
+            item = next((a for a in self.alerts if a["id"] == alert_id), None)
+            if item is None:
+                raise LookupError("Kejadian tidak ditemukan.")
+            item["label"] = label
+            rows = [dict(a) for a in self.alerts]
+            counts = self.review_counts()
+            result = dict(item)
+        fields = ["id", "waktu", "track_id", "kelas", "dwell_s", "tinjauan", "gambar"]
+        try:
+            with open(self.out_dir / "kejadian_tinjauan.csv", "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                for a in rows:
+                    w.writerow({"id": a["id"], "waktu": a["waktu"], "track_id": a["track_id"], "kelas": a["kelas"],
+                                "dwell_s": a["dwell_s"], "tinjauan": a.get("label") or "", "gambar": a["gambar"]})
+        except OSError:                                    # pragma: no cover
+            pass
+        return {"alert": result, "tinjauan": counts}
+
     # ------------------------------------------------------------------ status untuk UI
     def status(self) -> dict:
         with self._mut:
             return {"model": self.model_state, "model_error": self.model_error, "active": self.active,
                     "source": self.source_label if self.active else None, "message": self.message,
                     "trotoar": "manual" if self.polygon else "otomatis", "polygon": self.polygon or [],
-                    "settings": self.settings(), "alerts": len(self.alerts), "frames": self.frames,
+                    "settings": self.settings(), "alerts": len(self.alerts), "tinjauan": self.review_counts(),
+                    "frames": self.frames,
                     "fps": round(self.fps, 1), "out_dir": str(self.out_dir.resolve())}
 
 
@@ -570,6 +614,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/kejadian.csv":
             return self._file(self.engine.out_dir / "kejadian.csv", "text/csv; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="kejadian.csv"'})
+        if path == "/kejadian_tinjauan.csv":
+            return self._file(self.engine.out_dir / "kejadian_tinjauan.csv", "text/csv; charset=utf-8",
+                              {"Content-Disposition": 'attachment; filename="kejadian_tinjauan.csv"'})
         if path == "/stream.mjpg":
             return self._mjpeg()
         return self._error(404, "Halaman tidak ditemukan.")
@@ -653,6 +700,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             eng.update_settings(data)
             return self._json(eng.status())
+        if path == "/api/alerts/label":
+            return self._json(eng.label_alert(data.get("id"), data.get("label")))
         if path == "/api/refresh":
             eng.refresh_sidewalk()
             return self._json(eng.status())
@@ -665,6 +714,8 @@ class Handler(BaseHTTPRequestHandler):
                 fn()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             self.close_connection = True
+        except LookupError as e:
+            self._safe_error(404, str(e.args[0]) if e.args else "Tidak ditemukan.")
         except (ValueError, TypeError) as e:
             self._safe_error(400, str(e))
         except RuntimeError as e:

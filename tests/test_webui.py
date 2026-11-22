@@ -4,6 +4,7 @@ Yang diuji: jalur 'browser' (frame JPEG lewat POST /api/frame, seperti yang diki
 (server membuka berkas video sendiri + siaran MJPEG), poligon trotoar manual, pengaturan, penjaga keamanan.
 TIDAK diuji di sini: tampilan HTML/JS di browser, getUserMedia, YOLO asli.
 """
+import csv
 import http.client
 import json
 import threading
@@ -357,3 +358,30 @@ def test_remote_mode_requires_key_and_disables_server_sources(web, tmp_path):
 def test_local_mode_has_no_key(web):
     c, _ = web([])
     assert c.srv.token is None and c.req("GET", "/api/status")[0] == 200
+
+
+def test_review_alerts_label_counts_and_csv(web, tmp_path):
+    src = tmp_path / "in.mp4"
+    dets = build_video(src, lambda k: [PARKED_CAR])
+    c, eng = web(dets)
+    c.post_json("/api/start", {"kind": "browser"})
+    for k, f in enumerate(video_frames(src)):
+        c.post_frame(jpeg(f), k / FPS)
+    a = c.get_json("/api/alerts")[1]["alerts"][0]
+    assert a["label"] is None and c.get_json("/api/status")[1]["tinjauan"] == {"benar": 0, "salah": 0, "belum": 1}
+
+    st, body = c.post_json("/api/alerts/label", {"id": a["id"], "label": "benar"})
+    assert st == 200 and body["alert"]["label"] == "benar" and body["tinjauan"] == {"benar": 1, "salah": 0, "belum": 0}
+    rows = list(csv.DictReader(open(eng.out_dir / "kejadian_tinjauan.csv", encoding="utf-8")))
+    assert len(rows) == 1 and rows[0]["tinjauan"] == "benar" and rows[0]["kelas"] == "mobil"
+
+    assert c.post_json("/api/alerts/label", {"id": a["id"], "label": "salah"})[1]["tinjauan"]["salah"] == 1   # boleh diubah
+    assert c.post_json("/api/alerts/label", {"id": a["id"], "label": None})[1]["tinjauan"]["belum"] == 1      # boleh dihapus
+    assert c.get_json("/api/alerts")[1]["alerts"][0]["label"] is None
+
+    assert c.post_json("/api/alerts/label", {"id": a["id"], "label": "mungkin"})[0] == 400
+    assert c.post_json("/api/alerts/label", {"id": "x", "label": "benar"})[0] == 400
+    st, body = c.post_json("/api/alerts/label", {"id": 99, "label": "benar"})
+    assert st == 404 and "tidak ditemukan" in body["error"]
+    c.post_json("/api/stop", {})
+    assert json.loads((eng.out_dir / "ringkasan_live.json").read_text(encoding="utf-8"))["tinjauan"]["belum"] == 1
