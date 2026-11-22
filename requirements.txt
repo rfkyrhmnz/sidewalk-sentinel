@@ -1,0 +1,6 @@
+numpy
+opencv-python
+pillow
+pillow-heif        # hanya perlu bila foto iPhone masih berformat HEIC
+ultralytics        # model YOLO-seg + tracking (menarik torch); juga memasang lapx saat tracking dipakai
+pytest             # opsional, untuk menjalankan tests/
