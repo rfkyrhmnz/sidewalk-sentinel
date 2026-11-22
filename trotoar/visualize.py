@@ -74,3 +74,6 @@ def draw_frame(img_bgr: np.ndarray, sidewalk: np.ndarray, results: list[VehicleR
     head = banner if banner is not None else f"Kendaraan: {len(results)} | di trotoar: {n_side} | parkir di trotoar: {n_park}"
     _text(out, head, (8, int(26 * max(1.0, scale * 1.4))), scale * 0.9, (255, 255, 255), thick)
     return out
+
+
+draw_text = _text          # alias publik untuk teks berlatar hitam
