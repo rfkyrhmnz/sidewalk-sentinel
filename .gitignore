@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# keluaran program & data lokal
+hasil/
+runs/
+frames/
+data_bersih/
+
+# bobot model (diunduh otomatis oleh ultralytics)
+*.pt
