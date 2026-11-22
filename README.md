@@ -56,11 +56,20 @@ memakai pustaka standar Python. Model dimuat di latar belakang; saat chip di kan
 | **Stream** | Diisi indeks webcam (`0`), alamat kamera IP HP (`http://192.168.1.20:8080/video`), atau CCTV (`rtsp://...`). Server yang membuka sumbernya. |
 | **Video** | Pilih berkas video dari komputer; diputar di dasbor dan dianalisis sambil diputar. |
 
-- **Gambar trotoar**: klik titik-titik tepi trotoar langsung di atas video, lalu *Terapkan*. Paling stabil untuk kamera yang diam
+- **Gambar trotoar** (`D`): klik titik-titik tepi trotoar langsung di atas video, lalu *Terapkan*. Paling stabil untuk kamera yang diam
   (tersimpan juga di `live_hasil/trotoar_polygon.json`). *Pakai otomatis* mengembalikan ke segmentasi otomatis.
-- Saat kendaraan terkonfirmasi parkir: bingkai layar berubah jadi garis marka kuning-hitam, muncul banner, bunyi (bisa dimatikan),
-  dan foto bukti masuk ke daftar **Kejadian** (klik untuk memperbesar; *Unduh CSV* untuk log).
-- **Pengaturan** (panel kanan bawah): lama diam sebelum alert, ambang kontak trotoar, kompensasi gerak kamera. Berlaku langsung.
+- **Tampilan**: tema gelap ala pusat kendali. Tiap kendaraan diberi kurung sudut HUD yang bergerak mulus, cincin kemajuan lama diam
+  (penuh = alert), dan jejak gerak (`T`). **Peta panas** (`H`) menumpuk posisi kendaraan di trotoar selama sesi. **Foto** (`S`) menyimpan
+  gambar lengkap dengan overlay. Dok kendali melebur saat memantau; gerakkan pointer atau sentuh layar untuk memunculkannya lagi.
+- **Telemetri**: jumlah kendaraan / di trotoar / parkir dengan grafik mini, fps dan latensi, serta rincian jenis kendaraan.
+- Saat kendaraan terkonfirmasi parkir: seluruh antarmuka berpendar merah, muncul banner, dan foto bukti masuk ke daftar **Kejadian**
+  (klik untuk memperbesar; *Unduh CSV* untuk log). Pilihan peringatan di **Pengaturan**: bip, suara Bahasa Indonesia, atau senyap,
+  plus notifikasi browser bila tab sedang di latar belakang.
+- **Tinjau kejadian**: tandai tiap kejadian *Benar* atau *Salah*. Presisi alert dihitung otomatis dan hasilnya tersimpan di
+  `live_hasil/kejadian_tinjauan.csv` (juga ada di `ringkasan_live.json`), bahan langsung untuk tabel hasil pengujian di laporan.
+- **Pengaturan** (ikon kanan atas): lama diam sebelum alert, ambang kontak trotoar, kompensasi gerak kamera. Berlaku langsung.
+- **Di HP**: tata letak menyesuaikan layar tegak, dan layar dijaga tetap menyala selama memantau (bila browser mendukung).
+- Pintasan papan ketik: `Spasi` mulai/berhenti, `D`, `H`, `T`, `S`, `F` layar penuh, `?` daftar pintasan.
 - Opsi: `--port 8765`, `--out live_hasil`, `--min-dwell 10`, `--no-open`, serta `--weights`, `--polygon`, `--set`, dst. seperti perintah lain.
 
 ### Kamera HP lewat browser (HTTPS)
@@ -135,13 +144,15 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (73 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (74 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
   CLI, evaluasi, penanganan EXIF/video, serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
-  pengaturan, kunci akses `--remote`). Jalankan: `pytest tests -q`.
+  pengaturan, tinjauan benar/salah dan CSV-nya, kunci akses `--remote`). Jalankan: `pytest tests -q`.
 - **Tampilan dasbor** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan (alur tab Stream dan Kamera,
-  menggambar poligon, bingkai/banner alert, daftar kejadian, layout sempit) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari,
-  kamera HP sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli.
+  menggambar poligon, kurung HUD/banner/peta panas, tinjauan Benar/Salah, laci pengaturan, pintasan papan ketik, tata letak
+  layar HP 390 px) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari, kamera HP sungguhan, notifikasi dan suara di browser
+  sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli. Font memakai yang ada di sistem (Bahnschrift/Segoe UI di Windows),
+  jadi tampilan sedikit berbeda antar-OS.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
   perintah `train`, `polygon` dan jendela `live` OpenCV (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
   tes live memakai video sintetis sebagai sumber. Parser hasil Ultralytics diuji dengan objek tiruan; versi
