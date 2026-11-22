@@ -145,6 +145,7 @@ html[data-state="alert"] .scan { background: linear-gradient(to bottom, transpar
 .empty h2 { margin: 0; font: 600 20px/1.2 var(--display); }
 .empty p { margin: 0; max-width: 46ch; color: var(--muted); }
 .empty p b { color: var(--text); }
+.empty .btn { margin-top: 10px; height: 42px; padding: 0 20px; }
 
 .hud { position: absolute; top: 14px; z-index: 2; display: flex; gap: 8px; align-items: center; }
 .hud-left { left: 14px; }
