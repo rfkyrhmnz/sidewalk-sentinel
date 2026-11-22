@@ -140,6 +140,28 @@ def cmd_video(args, segmenter_factory=None):
     print(f"Hasil -> {out}")
 
 
+def cmd_live(args, segmenter_factory=None):
+    cfg = _make_cfg(args)
+    if args.min_dwell is not None:
+        cfg.min_dwell_s = args.min_dwell
+    if args.no_camera_comp:
+        cfg.compensate_camera = False
+    an = _make_analyzer(args, cfg, segmenter_factory)
+    print("Memantau kamera... tekan [q] atau [Esc] di jendela untuk berhenti ([s] simpan gambar, [r] hitung ulang trotoar)."
+          if not args.no_window else "Memantau kamera tanpa jendela... tekan Ctrl+C untuk berhenti.")
+    s = an.run_live(args.source, args.out, show=not args.no_window, record=args.record, beep=args.beep,
+                    max_frames=args.max_frames)
+    print(f"Selesai: {s['frame_diproses']} frame dalam {s['durasi_s']} detik; alert: {len(s['alert'])}")
+    for e in s["alert"]:
+        print(f"  [{e['waktu']}] {e['kelas']} #{e['track_id']} parkir di trotoar >= {e['dwell_s']} s -> {e['gambar']}")
+    print(f"Hasil -> {args.out}")
+
+
+def cmd_snapshot(args, **_):
+    p = media.grab_snapshot(args.source, args.out, args.warmup)
+    print(f"Gambar disimpan: {p}\nLanjut: python main.py polygon {p} --out trotoar_polygon.json")
+
+
 def cmd_eval_seg(args, **_):
     rows = eval_seg_dirs(args.pred, args.gt, args.suffix)
     if not rows:
@@ -282,6 +304,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-camera-comp", action="store_true", help="matikan kompensasi gerak kamera")
     sp.add_argument("--no-h264", action="store_true"); sp.add_argument("--max-frames", type=int)
     _add_common(sp); sp.set_defaults(func=cmd_video)
+
+    sp = sub.add_parser("live", help="pantau kamera secara real-time (webcam / kamera IP HP / CCTV RTSP)")
+    sp.add_argument("--source", default="0",
+                    help="0 = webcam bawaan; 1,2.. = kamera lain; URL kamera IP (http://IP:8080/video, rtsp://...); atau path video")
+    sp.add_argument("--out", default="live_hasil")
+    sp.add_argument("--min-dwell", type=float, help="detik diam minimal sebelum ALERT (default 10)")
+    sp.add_argument("--no-window", action="store_true", help="tanpa jendela tampilan (mis. di server)")
+    sp.add_argument("--record", action="store_true", help="rekam tampilan beranotasi ke live_hasil/rekaman.mp4")
+    sp.add_argument("--beep", action="store_true", help="bunyi beep saat ALERT")
+    sp.add_argument("--no-camera-comp", action="store_true", help="matikan kompensasi gerak kamera (kamera tetap/tripod)")
+    sp.add_argument("--max-frames", type=int, help="berhenti setelah N frame (untuk uji coba)")
+    _add_common(sp); sp.set_defaults(func=cmd_live)
+
+    sp = sub.add_parser("snapshot", help="ambil satu gambar dari kamera (untuk menggambar poligon trotoar)")
+    sp.add_argument("--source", default="0"); sp.add_argument("--out", default="frame.jpg")
+    sp.add_argument("--warmup", type=int, default=15, help="buang N frame pertama agar eksposur stabil")
+    sp.set_defaults(func=cmd_snapshot)
 
     sp = sub.add_parser("eval-seg", help="IoU/Dice mask trotoar prediksi vs ground truth")
     sp.add_argument("--pred", required=True); sp.add_argument("--gt", required=True)

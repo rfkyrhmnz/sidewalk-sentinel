@@ -42,6 +42,33 @@ python main.py video data_bersih/video/rekaman.mp4 --out hasil --min-dwell 10
 ```
 Keluaran: gambar/video beranotasi, `hasil_gambar.csv` / `*_hasil.csv`, dan `*_ringkasan.json` (daftar parkir terkonfirmasi).
 
+## Mode live (ala CCTV)
+
+Memantau kamera secara real-time; saat ada kendaraan **diam di trotoar tanpa pengendara ≥ 10 detik** muncul tulisan
+`ALERT` merah di layar, gambar bukti disimpan, dan kejadian dicatat.
+
+```bash
+python main.py live --source 0 --beep --record
+```
+
+| Sumber (`--source`) | Contoh |
+|---|---|
+| Webcam laptop | `0` (kamera lain: `1`, `2`) |
+| HP sebagai kamera IP (Android, aplikasi sejenis *IP Webcam*) | `http://192.168.1.20:8080/video` — HP dan laptop harus di Wi-Fi yang sama; alamat persisnya ditampilkan aplikasinya |
+| HP sebagai webcam (aplikasi sejenis DroidCam/EpocCam) | biasanya muncul sebagai `1` atau `2` |
+| CCTV / kamera IP RTSP | `rtsp://user:pass@192.168.1.30:554/stream` |
+
+Untuk kamera yang **tetap** (tripod/ditempel), hasil paling stabil memakai poligon trotoar:
+```bash
+python main.py snapshot --source 0 --out frame.jpg          # ambil satu gambar dari kamera
+python main.py polygon frame.jpg --out poligon.json         # klik tepi trotoar, tekan Enter
+python main.py live --source 0 --polygon poligon.json --no-camera-comp --beep
+```
+Tombol di jendela: **q / Esc** keluar, **s** simpan gambar, **r** hitung ulang mask trotoar.
+Keluaran di `live_hasil/`: `alerts/*.jpg` (bukti), `kejadian.csv` (log), `ringkasan_live.json`, dan `rekaman.mp4` bila `--record`.
+Satu kendaraan hanya memicu satu ALERT. Bila CPU lambat (FPS rendah), turunkan resolusi model: `--set imgsz=640`.
+Tanpa layar (server): tambahkan `--no-window`.
+
 ### Sumber mask trotoar (`--sidewalk`)
 
 | Mode | Kapan dipakai |
@@ -74,10 +101,12 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (44 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
-  dwell time, kompensasi gerak kamera, pipeline video, CLI, evaluasi, penanganan EXIF/video. Jalankan: `pytest tests -q`.
+- **Teruji (54 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+  dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
+  CLI, evaluasi, penanganan EXIF/video. Jalankan: `pytest tests -q`.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
-  perintah `train`, dan `polygon` (butuh layar). Parser hasil Ultralytics diuji dengan objek tiruan; versi
+  perintah `train`, `polygon` dan jendela `live` (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
+  tes live memakai video sintetis sebagai sumber. Parser hasil Ultralytics diuji dengan objek tiruan; versi
   Ultralytics yang berbeda bisa mengubah detail API. Jika ada galat, mulai dari `parse_ultralytics_result`.
 - **Akurasi pada trotoar nyata belum diukur.** Angka pada data sintetis hanya membuktikan program berjalan sesuai desain.
 - Keterbatasan yang diketahui: segmentasi klasik rapuh terhadap bayangan dan trotoar yang warnanya mirip jalan;

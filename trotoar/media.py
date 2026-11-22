@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -113,3 +116,103 @@ def extract_frames(video, out_dir, fps: float = 1.0, prefix: str | None = None, 
         i += 1
     cap.release()
     return n
+
+
+# ----------------------------------------------------------------------------- kamera langsung (live)
+LIVE_SCHEMES = ("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")
+
+
+def parse_source(s):
+    """'0' -> 0 (webcam indeks 0); selain itu dibiarkan (URL kamera IP atau path berkas video)."""
+    s = str(s).strip()
+    return int(s) if s.isdigit() else s
+
+
+def is_live_source(source) -> bool:
+    """Webcam (angka) dan URL jaringan dianggap aliran langsung; path berkas dibaca berurutan."""
+    return isinstance(source, int) or str(source).lower().startswith(LIVE_SCHEMES)
+
+
+def open_capture(source) -> "cv2.VideoCapture":
+    """Buka kamera/aliran/berkas. Di Windows webcam dicoba lewat DirectShow dulu (jauh lebih cepat terbuka)."""
+    if isinstance(source, int):
+        if sys.platform.startswith("win"):
+            cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        return cv2.VideoCapture(source)
+    return cv2.VideoCapture(str(source))
+
+
+class LatestFrameReader:
+    """Membaca kamera di thread terpisah dan selalu menyerahkan frame TERBARU.
+
+    Tanpa ini, bila pemrosesan (YOLO) lebih lambat daripada kamera, frame menumpuk di buffer dan tampilan
+    makin tertinggal dari kenyataan (lag bisa berdetik-detik pada kamera IP). Frame yang tak sempat
+    diproses dibuang. ``cap`` boleh objek apa pun yang punya ``read() -> (ok, frame)`` dan ``release()``.
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self._cond = threading.Condition()
+        self._frame = None
+        self._seq = 0
+        self._read_seq = 0
+        self._alive = True
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop:
+            ok, frame = self.cap.read()
+            with self._cond:
+                if not ok:
+                    self._alive = False
+                    self._cond.notify_all()
+                    return
+                self._frame, self._seq = frame, self._seq + 1
+                self._cond.notify_all()
+
+    def read(self, timeout: float = 5.0):
+        """(True, frame_terbaru) / (False, None) bila kamera berhenti atau tak ada frame baru dalam ``timeout`` detik."""
+        end = time.monotonic() + timeout
+        with self._cond:
+            while self._seq == self._read_seq and self._alive:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False, None
+                self._cond.wait(left)
+            if self._seq == self._read_seq:
+                return False, None
+            self._read_seq = self._seq
+            return True, self._frame
+
+    def stop(self) -> None:
+        self._stop = True
+        self._thread.join(timeout=2.0)
+        try:
+            self.cap.release()
+        except Exception:                                      # pragma: no cover
+            pass
+
+
+def grab_snapshot(source, out_path, warmup: int = 15) -> Path:
+    """Ambil satu gambar dari kamera/aliran/berkas (buang ``warmup`` frame pertama agar eksposur stabil)."""
+    cap = open_capture(parse_source(source))
+    if not cap.isOpened():
+        raise RuntimeError(f"Tidak bisa membuka sumber: {source}")
+    frame = None
+    for _ in range(max(1, warmup)):
+        ok, f = cap.read()
+        if not ok:
+            break
+        frame = f
+    cap.release()
+    if frame is None:
+        raise RuntimeError("Sumber terbuka tetapi tidak mengirim gambar.")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return out_path
