@@ -25,7 +25,7 @@ const el = {
   scrim: $("scrim"), drawer: $("drawer"), drawerClose: $("drawer-close"),
   setDwell: $("set-dwell"), oDwell: $("o-dwell"), setTau: $("set-tau"), oTau: $("o-tau"),
   setAlert: $("set-alert"), setNotify: $("set-notify"), setComp: $("set-comp"),
-  btnRefresh: $("btn-refresh"), outDir: $("out-dir"),
+  btnRefresh: $("btn-refresh"), outDir: $("out-dir"), emptyRetry: $("empty-retry"), setAuto: $("set-auto"),
   lightbox: $("lightbox"), lightboxImg: $("lightbox-img"),
 };
 const ctx = el.canvas.getContext("2d");
@@ -48,6 +48,26 @@ const EMPTY_COPY = {
   video:  ["Buka berkas video", "Pilih video dari komputer. Video diputar di sini dan dianalisis sambil diputar."],
 };
 
+/* Teks keadaan kosong. Saat mode langsung aktif, pengguna cukup menunggu: kamera menyala dan deteksi mulai sendiri. */
+function emptyCopy() {
+  if (S.kind === "camera") {
+    if (S.camError) return [ "Kamera belum bisa dipakai", S.camError, true, true ];
+    if (pref.auto && !S.manual) return [ "Menyalakan kamera…", "Izinkan akses kamera saat browser bertanya. Deteksi mulai sendiri setelah gambar muncul.", false, true ];
+  }
+  return [...EMPTY_COPY[S.kind], false, false];
+}
+
+function idleLabel() {
+  if (S.kind === "camera" && pref.auto && !S.manual) {
+    if (S.camError) return "Kamera belum aktif";
+    if (!S.camReady) return "Menyalakan kamera…";
+    if (S.model === "memuat") return "Menyiapkan model…";
+    if (S.model === "galat") return "Model gagal dimuat";
+    return "Memulai…";
+  }
+  return "Belum dimulai";
+}
+
 const S = {
   kind: "camera",                    // camera | stream | video
   running: false, alerting: false, token: 0, t0: 0, startedAt: 0,
@@ -61,8 +81,9 @@ const S = {
   vis: new Map(), trails: new Map(), frameNo: 0, lastFrameT: 0,
   hist: { veh: [], side: [], park: [], fps: [] }, histT: 0, mixKey: "",
   wake: null, idleTimer: 0, lastState: "",
+  camError: "", camBusy: false, manual: false, starting: false, payloadSeen: false,
 };
-const pref = { alert: "bip", notify: false, trail: true };
+const pref = { alert: "bip", notify: false, trail: true, auto: true };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt1 = (n) => Number(n).toLocaleString("id-ID", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -95,11 +116,12 @@ function hasPicture() {
 
 function updateState() {
   const st = !S.running ? "idle" : S.alerting ? "alert" : "live";
-  if (st === S.lastState) return;
-  S.lastState = st;
+  const label = st === "idle" ? idleLabel() : st === "alert" ? "Peringatan parkir" : "Memantau langsung";
+  if (st + "|" + label === S.lastState) return;
+  S.lastState = st + "|" + label;
   document.documentElement.dataset.state = st;
   el.liveChip.dataset.state = st;
-  el.liveText.textContent = st === "idle" ? "Belum dimulai" : st === "alert" ? "Peringatan parkir" : "Memantau langsung";
+  el.liveText.textContent = label;
   document.title = st === "alert" ? "⚠ Parkir di trotoar · Sidewalk Sentinel" : "Sidewalk Sentinel";
 }
 
@@ -108,9 +130,10 @@ function refreshUI() {
   el.video.hidden = !usesVideo;
   el.stream.hidden = !(S.kind === "stream" && S.running);
   el.stage.dataset.empty = String(!hasPicture());
-  const [title, body] = EMPTY_COPY[S.kind];
+  const [title, body, retry, plain] = emptyCopy();
   el.empty.querySelector("h2").textContent = title;
-  el.empty.querySelector("p").innerHTML = body;
+  el.empty.querySelector("p")[plain ? "textContent" : "innerHTML"] = body;
+  el.emptyRetry.hidden = !retry;
 
   el.tabs.forEach((b) => b.setAttribute("aria-selected", String(b.dataset.kind === S.kind)));
   el.seg.classList.toggle("locked", S.running);
@@ -148,10 +171,12 @@ function selectKind(kind) {
   if (S.running || kind === S.kind) return;
   detachVideo();
   S.kind = kind;
+  S.manual = kind !== "camera";                           // kembali ke tab Kamera = mode langsung aktif lagi
   if (kind === "video" && S.videoUrl) attachVideo();      // berkas yang dipilih sebelumnya dipasang lagi
   notify("");
   fitView();
   refreshUI();
+  if (kind === "camera" && pref.auto) recover();
 }
 
 /* ------------------------------------------------------------------ kamera browser */
@@ -185,26 +210,59 @@ function stopCamera() {
   S.camReady = false;
 }
 
+function watchTrack(stream) {
+  const t = stream.getVideoTracks()[0];
+  if (t) t.addEventListener("ended", onCameraLost);       // kamera dicabut, atau HP mematikannya saat tab di latar belakang
+}
+
 async function startCamera() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    notify("Browser tidak mengizinkan kamera di alamat ini. Buka lewat http://localhost:8765 di laptop, atau pakai HTTPS (lihat README).", true);
-    return;
-  }
-  stopCamera();
-  notify("");
-  const id = el.camSelect.value;
-  const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
-  if (id) video.deviceId = { exact: id };
+  if (S.camBusy) return;
+  S.camBusy = true; S.camError = "";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-    el.video.srcObject = stream;
-    await el.video.play();
-    S.camReady = true;
-    await listCameras(stream.getVideoTracks()[0].getSettings().deviceId);
-  } catch (e) {
-    notify(cameraError(e), true);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      S.camError = "Browser tidak mengizinkan kamera di alamat ini. Buka lewat http://localhost:8765 di laptop, atau pakai HTTPS (lihat README).";
+      return;
+    }
+    stopCamera();
+    notify("");
+    refreshUI();
+    const id = el.camSelect.value;
+    const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    if (id) video.deviceId = { exact: id };
+    else video.facingMode = { ideal: "environment" };     // di HP, kamera belakang lebih dulu
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      el.video.srcObject = stream;
+      await el.video.play();
+      S.camReady = true;
+      watchTrack(stream);
+      fitView();
+      await listCameras(stream.getVideoTracks()[0].getSettings().deviceId);
+    } catch (e) {
+      S.camError = cameraError(e);
+    }
+  } finally {
+    S.camBusy = false;
+    refreshUI();
   }
+}
+
+/* mode langsung: setelah kamera menyala dan model siap, pemantauan mulai sendiri */
+function maybeAutoStart() {
+  if (!pref.auto || S.manual || S.running || S.starting || S.kind !== "camera" || !S.camReady || S.model !== "siap") return;
+  start();
+}
+async function recover() {
+  if (!pref.auto || S.manual || S.kind !== "camera" || S.running || S.camReady || S.camBusy) { maybeAutoStart(); return; }
+  await startCamera();
+  maybeAutoStart();
+}
+async function onCameraLost() {
+  if (S.kind !== "camera") return;
+  S.camReady = false;
+  if (S.running) await stop("Kamera terputus. Mencoba menyalakan ulang…");
   refreshUI();
+  if (pref.auto && !S.manual) setTimeout(recover, 1500);
 }
 
 /* ------------------------------------------------------------------ berkas video */
@@ -272,7 +330,7 @@ async function keepAwake(on) {
     } else if (!on && S.wake) { await S.wake.release(); S.wake = null; }
   } catch (_) { /* layar boleh padam */ }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && S.running) keepAwake(true); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) return; if (S.running) keepAwake(true); else recover(); });
 
 /* ------------------------------------------------------------------ mulai & berhenti */
 function resetTelemetry() {
@@ -285,6 +343,12 @@ function resetTelemetry() {
 }
 
 async function start() {
+  if (S.starting) return;
+  S.starting = true; S.manual = false;
+  try { await startNow(); } finally { S.starting = false; }
+}
+
+async function startNow() {
   notify("");
   unlockAudio();
   resetTelemetry();
@@ -310,11 +374,13 @@ async function start() {
     keepAwake(true);
     poke();
   } catch (e) {
-    S.running = false;
+    S.running = false; S.manual = true;                  // gagal mulai: jangan dicoba ulang terus-menerus
     notify(e.message, true);
   }
   refreshUI();
 }
+
+function userStop() { S.manual = true; return stop(); }
 
 async function stop(msg) {
   const wasStream = S.kind === "stream";
@@ -352,7 +418,7 @@ async function analyseLoop(token) {
       if (token !== S.token) return;
       onPayload(data);
     } catch (e) {
-      if (token === S.token) { await stop(null); notify(e.message, true); }
+      if (token === S.token) { S.manual = true; await stop(null); notify(e.message, true); }
       return;
     }
     const spent = performance.now() - t1;
@@ -864,6 +930,7 @@ function applyStatus(st) {
   if (S.running && S.kind === "stream" && st.active !== "server") stop(st.message || "Sumber berhenti mengirim gambar.");
   if (st.alerts !== S.alertCount && !S.running) loadAlerts(false);
   refreshUI();
+  maybeAutoStart();
 }
 
 async function pollStatus() {
@@ -879,12 +946,13 @@ el.seg.addEventListener("keydown", (e) => {
   const next = el.tabs[(i + (e.key === "ArrowRight" ? 1 : el.tabs.length - 1)) % el.tabs.length];
   selectKind(next.dataset.kind); next.focus();
 });
-el.camOn.addEventListener("click", startCamera);
+el.camOn.addEventListener("click", () => { S.manual = false; startCamera().then(maybeAutoStart); });
 el.streamUrl.addEventListener("input", refreshUI);
 el.streamUrl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !el.btnRun.disabled) start(); });
+el.emptyRetry.addEventListener("click", () => { S.manual = false; recover(); });
 el.videoPick.addEventListener("click", () => el.videoFile.click());
 el.videoFile.addEventListener("change", () => openVideoFile(el.videoFile.files[0]));
-el.btnRun.addEventListener("click", () => (S.running ? stop() : start()));
+el.btnRun.addEventListener("click", () => (S.running ? userStop() : start()));
 el.btnDraw.addEventListener("click", toggleDraw);
 el.btnHeat.addEventListener("click", toggleHeat);
 el.btnTrail.addEventListener("click", toggleTrail);
@@ -902,6 +970,11 @@ el.scrim.addEventListener("click", closeDrawer);
 el.setDwell.addEventListener("input", () => { el.oDwell.textContent = `${el.setDwell.value} dtk`; sendSettings(); });
 el.setTau.addEventListener("input", () => { el.oTau.textContent = fmt2(el.setTau.value); sendSettings(); });
 el.setComp.addEventListener("change", sendSettings);
+el.setAuto.addEventListener("change", () => {
+  pref.auto = el.setAuto.checked; savePrefs();
+  if (pref.auto && S.kind === "camera") { S.manual = false; recover(); }
+  refreshUI();
+});
 el.setAlert.addEventListener("change", () => {
   pref.alert = el.setAlert.value; savePrefs(); unlockAudio();
   if (pref.alert === "bip") beep(); else if (pref.alert === "suara") speak("Suara peringatan aktif.");
@@ -929,7 +1002,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { cancelDraw(); return; }
   }
   const k = e.key.toLowerCase();
-  if (k === " " && tag !== "BUTTON") { if (!el.btnRun.disabled) (S.running ? stop() : start()); e.preventDefault(); }
+  if (k === " " && tag !== "BUTTON") { if (!el.btnRun.disabled) (S.running ? userStop() : start()); e.preventDefault(); }
   else if (k === "d") toggleDraw();
   else if (k === "h") toggleHeat();
   else if (k === "t") toggleTrail();
@@ -942,6 +1015,7 @@ document.addEventListener("keydown", (e) => {
   loadPrefs();
   S.trail = pref.trail;
   el.setAlert.value = pref.alert;
+  el.setAuto.checked = pref.auto;
   el.setNotify.checked = pref.notify && "Notification" in window && Notification.permission === "granted";
   if (!el.stage.requestFullscreen && !el.stage.webkitRequestFullscreen) el.btnFull.hidden = true;
   sizeCanvas();
@@ -957,4 +1031,7 @@ document.addEventListener("keydown", (e) => {
   } catch (_) { /* tampilan awal tetap dipakai */ }
   loadAlerts(false);
   pollStatus();
+  // Bunyi baru boleh diputar setelah pengguna menyentuh halaman sekali; pasang pembuka itu diam-diam.
+  ["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, unlockAudio, { once: true, passive: true }));
+  if (!S.running && pref.auto) { await startCamera(); maybeAutoStart(); }
 })();

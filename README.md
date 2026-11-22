@@ -47,12 +47,14 @@ Keluaran: gambar/video beranotasi, `hasil_gambar.csv` / `*_hasil.csv`, dan `*_ri
 ```bash
 python main.py            # sama dengan: python main.py ui   (juga bisa lewat tombol Run di VS Code)
 ```
+**Langsung jalan tanpa setelan**: begitu jendela terbuka, kamera menyala (di HP: kamera belakang) dan pemantauan mulai sendiri setelah model siap. Satu-satunya yang perlu kamu lakukan adalah menekan *Izinkan* saat browser meminta akses kamera. Trotoar dideteksi otomatis. Kalau kamera terputus (dicabut, atau HP mematikannya saat tab di latar belakang), dasbor menyalakannya lagi sendiri. Tombol *Berhenti* menghentikan mode langsung sampai kamu menekan *Mulai pantau*; matikan di Pengaturan bila tidak mau kamera menyala otomatis.
+
 Jendela dasbor terbuka sendiri (Edge/Chrome mode aplikasi; bila tak ada, browser biasa). Tanpa paket tambahan: servernya
 memakai pustaka standar Python. Model dimuat di latar belakang; saat chip di kanan atas berubah menjadi **Model siap**, kamu bisa mulai.
 
 | Tab | Untuk apa |
 |---|---|
-| **Kamera** | Kamera laptop atau HP lewat browser. Tekan *Nyalakan kamera*, izinkan, lalu *Mulai pantau*. |
+| **Kamera** | Kamera laptop atau HP lewat browser. Menyala dan memantau otomatis; tombolnya hanya dipakai bila izin sempat ditolak. |
 | **Stream** | Diisi indeks webcam (`0`), alamat kamera IP HP (`http://192.168.1.20:8080/video`), atau CCTV (`rtsp://...`). Server yang membuka sumbernya. |
 | **Video** | Pilih berkas video dari komputer; diputar di dasbor dan dianalisis sambil diputar. |
 
@@ -150,7 +152,7 @@ dari data validasi Anda.
   pengaturan, tinjauan benar/salah dan CSV-nya, kunci akses `--remote`). Jalankan: `pytest tests -q`.
 - **Tampilan dasbor** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan (alur tab Stream dan Kamera,
   menggambar poligon, kurung HUD/banner/peta panas, tinjauan Benar/Salah, laci pengaturan, pintasan papan ketik, tata letak
-  layar HP 390 px) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari, kamera HP sungguhan, notifikasi dan suara di browser
+  layar HP 390 px, serta alur tanpa klik: kamera menyala dan pemantauan mulai sendiri, Berhenti manual tidak memulai ulang, galat izin kamera + tombol coba lagi) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari, kamera HP sungguhan, notifikasi dan suara di browser
   sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli. Font memakai yang ada di sistem (Bahnschrift/Segoe UI di Windows),
   jadi tampilan sedikit berbeda antar-OS.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
