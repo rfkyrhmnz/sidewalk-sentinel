@@ -59,6 +59,50 @@ class StreamState:
         self.force_refresh = False       # True -> hitung ulang mask trotoar pada frame berikutnya
 
 
+class AlertSink:
+    """ALERT satu kali per kendaraan (track ID): gambar bukti, baris CSV, dan (opsional) bunyi beep.
+
+    Dipakai bersama oleh ``Analyzer.run_live`` (jendela OpenCV) dan dasbor web.
+    """
+
+    def __init__(self, out_dir, beep: bool = False, verbose: bool = True):
+        self.out_dir = Path(out_dir)
+        (self.out_dir / "alerts").mkdir(parents=True, exist_ok=True)
+        self.csv_path = self.out_dir / "kejadian.csv"
+        self.beep, self.verbose = beep, verbose
+        self.events: dict[int, dict] = {}
+
+    def reset(self) -> None:
+        """Mulai sesi baru: ID tracker diulang dari awal, jadi kendaraan boleh memicu alert lagi."""
+        self.events.clear()
+
+    def submit(self, results: list, t: float, make_vis) -> list[dict]:
+        """Catat alert baru dari ``results``. ``make_vis()`` -> gambar beranotasi, hanya dipanggil bila ada alert baru."""
+        new = []
+        for r in results:
+            if r.status != STATUS_CONFIRMED or r.track_id is None or r.track_id in self.events:
+                continue
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = self.out_dir / "alerts" / f"alert_{stamp}_id{r.track_id}.jpg"
+            cv2.imwrite(str(path), make_vis(), [cv2.IMWRITE_JPEG_QUALITY, 92])
+            ev = {"waktu": datetime.now().isoformat(timespec="seconds"), "t_s": round(t, 1),
+                  "track_id": r.track_id, "kelas": r.obj.label, "dwell_s": round(r.dwell_s, 1), "gambar": str(path)}
+            self.events[r.track_id] = ev
+            write_header = not self.csv_path.exists()
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                wr = csv.DictWriter(f, fieldnames=list(ev))
+                if write_header:
+                    wr.writeheader()
+                wr.writerow(ev)
+            if self.verbose:
+                print(f"[ALERT {ev['waktu']}] {r.obj.label} #{r.track_id} parkir di trotoar "
+                      f">= {r.dwell_s:.0f} s -> {path}", file=sys.stderr)
+            if self.beep:
+                _beep()
+            new.append(ev)
+        return new
+
+
 class Analyzer:
     """Menggabungkan segmenter kendaraan, sumber mask trotoar, geometri, dan logika temporal.
 
@@ -76,6 +120,18 @@ class Analyzer:
             raise ValueError("Mode 'polygon' membutuhkan poligon (--polygon file.json)")
         self.cfg, self.seg, self.mode = cfg, segmenter, sidewalk_mode
         self.polygon, self.sw_model = polygon, sidewalk_model
+        self._base_mode = sidewalk_mode if sidewalk_mode != "polygon" else "auto"
+
+    def set_polygon(self, polygon) -> None:
+        """Pasang poligon trotoar manual (daftar poligon ternormalisasi); ``None`` = kembali ke mode sebelumnya.
+
+        Dipakai dasbor web saat pengguna menggambar trotoar. Pemanggil perlu menyetel
+        ``StreamState.force_refresh = True`` agar mask cadangan langsung dihitung ulang.
+        """
+        if polygon:
+            self.mode, self.polygon = "polygon", polygon
+        elif self.mode == "polygon":
+            self.mode, self.polygon = self._base_mode, None
 
     # ------------------------------------------------------------------ mask trotoar
     def compute_sidewalk(self, img, dets: Detections, exclude):
@@ -215,7 +271,7 @@ class Analyzer:
         source = parse_source(source)
         live = is_live_source(source)
         out_dir = Path(out_dir)
-        (out_dir / "alerts").mkdir(parents=True, exist_ok=True)
+        sink = AlertSink(out_dir, beep=beep, verbose=verbose)
 
         cap = open_capture(source)
         if not cap.isOpened():
@@ -226,18 +282,10 @@ class Analyzer:
 
         self.seg.reset_tracking()
         state = StreamState(cfg)
-        alerts: dict[int, dict] = {}
-        events_csv = out_dir / "kejadian.csv"
-        write_header = not events_csv.exists()
+        alerts = sink.events
         writer, raw_path, rec_path = None, out_dir / "rekaman.raw.mp4", out_dir / "rekaman.mp4"
         t0 = time.monotonic()
         last_tick, fps_ema, idx, n = t0, 0.0, -1, 0
-
-        def save_alert(vis, r, t) -> Path:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            p = out_dir / "alerts" / f"alert_{stamp}_id{r.track_id}.jpg"
-            cv2.imwrite(str(p), vis, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            return p
 
         try:
             while True:
@@ -265,24 +313,7 @@ class Analyzer:
                     draw_text(vis, f"ALERT: {len(active)} kendaraan parkir di trotoar", (8, int(60 * scale)), scale * 1.1,
                               (0, 0, 255), max(2, int(scale * 2)))
 
-                for r in active:
-                    if r.track_id is not None and r.track_id not in alerts:
-                        path = save_alert(vis, r, t)
-                        ev = {"waktu": datetime.now().isoformat(timespec="seconds"), "t_s": round(t, 1),
-                              "track_id": r.track_id, "kelas": r.obj.label, "dwell_s": round(r.dwell_s, 1),
-                              "gambar": str(path)}
-                        alerts[r.track_id] = ev
-                        with open(events_csv, "a", newline="", encoding="utf-8") as f:
-                            wr = csv.DictWriter(f, fieldnames=list(ev))
-                            if write_header:
-                                wr.writeheader()
-                                write_header = False
-                            wr.writerow(ev)
-                        if verbose:
-                            print(f"[ALERT {ev['waktu']}] {r.obj.label} #{r.track_id} parkir di trotoar "
-                                  f">= {r.dwell_s:.0f} s -> {path}", file=sys.stderr)
-                        if beep:
-                            _beep()
+                sink.submit(results, t, lambda: vis)
 
                 if record and writer is None and (n >= 10 or not live):
                     rec_fps = file_fps if not live else max(1.0, n / max(1e-6, now - t0))

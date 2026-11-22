@@ -157,6 +157,16 @@ def cmd_live(args, segmenter_factory=None):
     print(f"Hasil -> {args.out}")
 
 
+def cmd_ui(args, segmenter_factory=None):
+    from . import webui
+    cfg = _make_cfg(args)
+    if args.min_dwell is not None:
+        cfg.min_dwell_s = args.min_dwell
+    polygon = load_polygon_file(args.polygon) if args.polygon else None
+    engine = webui.Engine(cfg, lambda c: _make_analyzer(args, c, segmenter_factory), out_dir=args.out, polygon=polygon)
+    webui.serve(engine, args.host, args.port, open_browser=not args.no_open, remote=args.remote)
+
+
 def cmd_snapshot(args, **_):
     p = media.grab_snapshot(args.source, args.out, args.warmup)
     print(f"Gambar disimpan: {p}\nLanjut: python main.py polygon {p} --out trotoar_polygon.json")
@@ -317,6 +327,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-frames", type=int, help="berhenti setelah N frame (untuk uji coba)")
     _add_common(sp); sp.set_defaults(func=cmd_live)
 
+    sp = sub.add_parser("ui", help="dasbor web: kamera langsung + deteksi + panel kejadian (disarankan)")
+    sp.add_argument("--host", default="127.0.0.1",
+                    help="alamat server (default 127.0.0.1 = hanya laptop ini; 0.0.0.0 = bisa dibuka dari HP di Wi-Fi yang sama)")
+    sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--no-open", action="store_true", help="jangan buka jendela otomatis")
+    sp.add_argument("--remote", action="store_true",
+                    help="untuk dibuka lewat terowongan HTTPS (kamera HP): wajib kunci akses, sumber di sisi server dimatikan")
+    sp.add_argument("--out", default="live_hasil", help="folder foto bukti, kejadian.csv, dan poligon trotoar")
+    sp.add_argument("--min-dwell", type=float, help="detik diam minimal sebelum ALERT (default 10; bisa diubah di UI)")
+    _add_common(sp); sp.set_defaults(func=cmd_ui)
+
     sp = sub.add_parser("snapshot", help="ambil satu gambar dari kamera (untuk menggambar poligon trotoar)")
     sp.add_argument("--source", default="0"); sp.add_argument("--out", default="frame.jpg")
     sp.add_argument("--warmup", type=int, default=15, help="buang N frame pertama agar eksposur stabil")
@@ -350,6 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None, segmenter_factory=None) -> None:
+    if argv is None and len(sys.argv) <= 1:
+        argv = ["ui"]                      # dijalankan tanpa argumen (mis. tombol Run di VS Code): buka dasbor
     args = build_parser().parse_args(argv)
     try:
         args.func(args, segmenter_factory=segmenter_factory)

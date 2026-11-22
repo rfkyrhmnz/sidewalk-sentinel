@@ -12,3 +12,6 @@ data_bersih/
 
 # bobot model (diunduh otomatis oleh ultralytics)
 *.pt
+
+# keluaran mode live / dasbor
+live_hasil/
