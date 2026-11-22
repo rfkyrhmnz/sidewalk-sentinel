@@ -756,6 +756,13 @@ def make_server(engine: Engine, host: str = "127.0.0.1", port: int = 8765, tries
     raise RuntimeError(f"Tidak ada port kosong mulai dari {port}: {last}")
 
 
+def _phone_missing(phone) -> str:
+    from .phone import INSTALL_HINT
+    if phone.cloudflared:
+        return f"cloudflared tidak ditemukan di '{phone.cloudflared}'.\n" + INSTALL_HINT
+    return INSTALL_HINT
+
+
 def open_window(url: str) -> None:
     """Buka dasbor sebagai jendela aplikasi (Edge/Chrome mode --app, tanpa bilah alamat); cadangan: browser biasa."""
     cands: list[str] = []
@@ -794,14 +801,25 @@ def _lan_ip() -> str | None:
 
 
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
-          remote: bool = False) -> None:
-    server = make_server(engine, host, port, remote=remote)
+          remote: bool = False, phone=None) -> None:
+    """``phone``: objek ``phone.PhoneOptions`` (implies ``remote``): nyalakan terowongan HTTPS dan cetak QR untuk HP."""
+    server = make_server(engine, host, port, remote=remote or phone is not None)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0", "") else host
     key = f"/?key={server.token}" if server.token else ""
     url = f"http://{shown}:{server.server_port}{key}"
     engine.load_async()
     print(f"Sidewalk Sentinel berjalan di {url}   (hentikan dengan Ctrl+C)")
-    if remote:
+    session = None
+    if phone is not None:
+        from .phone import PhoneSession, find_cloudflared
+        exe = find_cloudflared(phone.cloudflared)
+        if exe is None:
+            server.server_close()
+            raise RuntimeError(_phone_missing(phone))
+        session = PhoneSession(server.server_port, server.token, engine.out_dir, phone, [exe],
+                               on_fail=lambda: threading.Thread(target=server.shutdown, daemon=True).start())
+        session.start()
+    elif remote:
         print(f"Mode --remote: sambungkan terowongan HTTPS ke port {server.server_port}, mis.\n"
               f"    cloudflared tunnel --url http://localhost:{server.server_port}\n"
               f"lalu buka alamat https yang diberikan, ditambah  /?key={server.token}  di HP.\n"
@@ -819,5 +837,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8765, open_browse
     except KeyboardInterrupt:
         print("\nDihentikan.")
     finally:
+        if session is not None:
+            session.close()
         engine.stop()
         server.server_close()

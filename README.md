@@ -74,16 +74,24 @@ memakai pustaka standar Python. Model dimuat di latar belakang; saat chip di kan
 - Pintasan papan ketik: `Spasi` mulai/berhenti, `D`, `H`, `T`, `S`, `F` layar penuh, `?` daftar pintasan.
 - Opsi: `--port 8765`, `--out live_hasil`, `--min-dwell 10`, `--no-open`, serta `--weights`, `--polygon`, `--set`, dst. seperti perintah lain.
 
-### Kamera HP lewat browser (HTTPS)
-Browser hanya mengizinkan kamera di alamat `http://localhost` atau `https://`. Dari HP, pakai terowongan HTTPS, misalnya Cloudflare Tunnel:
+### Testing dengan kamera HP (iPhone atau Android)
+Browser hanya mengizinkan kamera di `http://localhost` atau `https://`, jadi dari HP dasbor harus dibuka lewat terowongan HTTPS.
+Semuanya sudah diotomatiskan:
 ```bash
-python main.py ui --remote            # mencetak kunci akses acak
-cloudflared tunnel --url http://localhost:8765
-# di HP, buka:  https://<alamat-dari-cloudflared>/?key=<kunci-yang-dicetak>   -> tab Kamera
+winget install --id Cloudflare.cloudflared    # sekali saja (Windows; macOS: brew install cloudflared), lalu buka ulang terminal
+python main.py phone
 ```
-`--remote` mewajibkan kunci akses dan mematikan sumber di sisi server (tab Stream), supaya orang yang kebetulan tahu alamatnya
-tidak bisa menyuruh server membuka berkas/kamera di laptopmu. Frame dikirim dari HP ke laptop, jadi YOLO tetap jalan di laptop.
-Alternatif tanpa terowongan: aplikasi kamera IP di HP + tab **Stream** (Wi-Fi yang sama).
+Terminal mencetak **kode QR** (dan menyimpannya sebagai `live_hasil/qr_iphone.png`, yang dibuka otomatis di laptop). Di iPhone:
+buka aplikasi **Kamera**, arahkan ke kode, ketuk tautan yang muncul, ketuk **Izinkan** di Safari. Deteksi langsung berjalan; hasilnya
+(banner, foto bukti, tinjauan Benar/Salah) tampil di layar iPhone. Frame dikirim dari HP ke laptop, jadi YOLO tetap dijalankan di laptop.
+
+- Biarkan layar iPhone menyala dan Safari tetap di depan: iOS menghentikan kamera saat Safari di latar belakang atau layar terkunci.
+- Kamera belakang dipakai lebih dulu. Notifikasi browser tidak tersedia di Safari biasa; bunyi/suara baru aktif setelah layar disentuh sekali.
+- Tautan berisi kunci acak dan berubah tiap `python main.py phone`; sumber di sisi server (tab Stream) dimatikan pada mode ini.
+- Bila tautan belum terbuka, tunggu beberapa detik lalu muat ulang (alamat baru perlu waktu agar bisa dijangkau). Jaringan kampus kadang memblokir terowongan; coba hotspot HP.
+- Tanpa terowongan: aplikasi yang menjadikan HP sebagai webcam laptop (misalnya Iriun Webcam atau Camo) membuat HP muncul di daftar kamera tab **Kamera**,
+  atau pakai aplikasi kamera IP di HP dengan tab **Stream** (Wi-Fi yang sama).
+- Manual (tanpa `phone`): `python main.py ui --remote`, lalu `cloudflared tunnel --url http://127.0.0.1:8765` dan buka `https://<alamat>/?key=<kunci>`.
 
 ## Mode live (ala CCTV)
 
@@ -146,15 +154,16 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (74 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (87 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
   CLI, evaluasi, penanganan EXIF/video, serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
-  pengaturan, tinjauan benar/salah dan CSV-nya, kunci akses `--remote`). Jalankan: `pytest tests -q`.
+  pengaturan, tinjauan benar/salah dan CSV-nya, kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.
 - **Tampilan dasbor** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan (alur tab Stream dan Kamera,
   menggambar poligon, kurung HUD/banner/peta panas, tinjauan Benar/Salah, laci pengaturan, pintasan papan ketik, tata letak
   layar HP 390 px, serta alur tanpa klik: kamera menyala dan pemantauan mulai sendiri, Berhenti manual tidak memulai ulang, galat izin kamera + tombol coba lagi) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari, kamera HP sungguhan, notifikasi dan suara di browser
   sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli. Font memakai yang ada di sistem (Bahnschrift/Segoe UI di Windows),
   jadi tampilan sedikit berbeda antar-OS.
+- **Tautan HP (`python main.py phone`)** diuji dengan `cloudflared` tiruan (skrip yang mencetak log mirip aslinya) dan QR yang tercetak di terminal di-decode kembali menjadi alamat yang benar. **`cloudflared` asli dan iPhone sungguhan belum dicoba**: format log Cloudflare bisa berubah, dan jaringan kampus/kantor kadang memblokir terowongan.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
   perintah `train`, `polygon` dan jendela `live` OpenCV (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
   tes live memakai video sintetis sebagai sumber. Parser hasil Ultralytics diuji dengan objek tiruan; versi
