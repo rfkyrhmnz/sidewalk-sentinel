@@ -394,7 +394,7 @@ class Engine:
             if "camera_comp" in changes:
                 self.cfg.compensate_camera = changes["camera_comp"]
                 if self._state is not None:
-                    self._state.cam = CameraMotion() if changes["camera_comp"] else None
+                    self._state.cam = CameraMotion(homography=self.cfg.camera_homography) if changes["camera_comp"] else None
         return self.settings()
 
     def set_polygon(self, polys) -> list | None:

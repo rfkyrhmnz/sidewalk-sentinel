@@ -157,7 +157,7 @@ python main.py eval-decision --images data_uji --labels labels.csv --sweep-tau 0
 
 `tau_contact`, `tau_ring` (ambang keputusan; `--tau` mengatur keduanya), `maha_thresh` (kelonggaran segmentasi klasik),
 `min_dwell_s`, `max_move_frac`, `stationary_window_s`, `vote_window`, `footprint_frac`, `ring_scale`, `ring_below_frac`,
-`compensate_camera`, `video_stride`. Semua ada di `trotoar/config.py`. **Nilai default hanyalah titik awal**; tetapkan
+`compensate_camera`, `camera_homography`, `video_stride`. Semua ada di `trotoar/config.py`. **Nilai default hanyalah titik awal**; tetapkan
 dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
@@ -177,10 +177,11 @@ dari data validasi Anda.
   perintah `train`, `polygon` dan jendela `live` OpenCV (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
   tes live memakai video sintetis sebagai sumber. Parser hasil Ultralytics diuji dengan objek tiruan; versi
   Ultralytics yang berbeda bisa mengubah detail API. Jika ada galat, mulai dari `parse_ultralytics_result`.
+- **Kamera yang bergerak (HP dibawa berjalan).** `CameraMotion` menghitung homografi kumulatif dari titik fitur, diutamakan yang jatuh pada mask trotoar (bidang tanah); `DwellTracker` memetakan titik kontak dan lebar kendaraan dalam jendela 3 detik ke koordinat frame sekarang (`camera_homography=False` mengembalikan perilaku lama, translasi saja). Pada adegan SINTETIS (kamera mendekat dengan zoom sampai 2,5x) mobil diam terkonfirmasi parkir, gerak semu turun lebih dari 4x dibanding translasi, dan mobil yang benar-benar bergerak tetap terbaca bergerak. Pada satu video lapangan genggam (taksi, 11 detik; kotak diambil kasar dari warna, tanpa YOLO) frame berstatus "bergerak" turun dari 157 menjadi 53 dari 206, tetapi taksi hanya diam sekitar 3 detik di klip itu sehingga parkir belum terkonfirmasi. **Belum diuji dengan YOLO asli.** Kendaraan yang kotaknya terpotong tepi frame punya titik kontak yang tidak benar, dan kamera yang diam tetap cara pengujian paling andal (rekam minimal 12 detik).
 - **Akurasi pada trotoar nyata belum diukur.** Angka pada data sintetis hanya membuktikan program berjalan sesuai desain.
 - Keterbatasan yang diketahui: segmentasi klasik rapuh terhadap bayangan dan trotoar yang warnanya mirip jalan;
   heuristik pengendara bisa keliru bila pejalan kaki berdiri tepat di belakang motor; "parkir" pada foto hanyalah
-  *indikasi* (tidak ada dimensi waktu); kompensasi kamera hanya translasi (bukan rotasi/zoom); tracker yang kehilangan
+  *indikasi* (tidak ada dimensi waktu); kompensasi kamera memakai homografi bidang trotoar (zoom dan perspektif saat HP berjalan mendekat ikut dikompensasi, lihat di bawah) dan hanya benar untuk titik di tanah; tracker yang kehilangan
   ID mereset hitungan durasi; kendaraan yang separuh di trotoar berada dekat ambang sehingga sensitif terhadap `tau`.
 
 ## Struktur

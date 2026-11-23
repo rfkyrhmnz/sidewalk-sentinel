@@ -52,7 +52,7 @@ class StreamState:
 
     def __init__(self, cfg: Config):
         self.tracker = DwellTracker(cfg)
-        self.cam = CameraMotion() if cfg.compensate_camera else None
+        self.cam = CameraMotion(homography=cfg.camera_homography) if cfg.compensate_camera else None
         self.sw_ref = None
         self.sw_ref_cam = np.zeros(2)
         self.n = 0                       # jumlah frame yang sudah diproses
@@ -167,7 +167,8 @@ class Analyzer:
         cfg = self.cfg
         dets = self.seg.detect(frame, track=True)
         exclude = union_masks(dets, frame.shape)
-        cam_off = state.cam.update(frame, exclude) if state.cam is not None else np.zeros(2)
+        cam_off = state.cam.update(frame, exclude, region=state.sw_ref) if state.cam is not None else np.zeros(2)
+        cam_pose = state.cam.H if (state.cam is not None and cfg.camera_homography) else cam_off
 
         refresh = (state.sw_ref is None or state.force_refresh
                    or (self.mode != "polygon" and state.n % max(1, cfg.sidewalk_refresh) == 0))
@@ -178,7 +179,7 @@ class Analyzer:
         sidewalk = shift_mask(state.sw_ref, cam_off - state.sw_ref_cam)
 
         results = decide_frame(dets, sidewalk, cfg, frame.shape)
-        state.tracker.update(t, results, cam_off)
+        state.tracker.update(t, results, cam_pose)
         state.n += 1
         return sidewalk, results
 

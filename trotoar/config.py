@@ -63,6 +63,7 @@ class Config:
     vote_window: int = 9
     vote_ratio: float = 0.6
     compensate_camera: bool = True           # kompensasi gerak kamera (translasi) pada video HP
+    camera_homography: bool = True           # kompensasi zoom/perspektif lewat homografi bidang trotoar (False = translasi saja)
     sidewalk_refresh: int = 10               # hitung ulang mask trotoar tiap N frame (mode klasik)
     video_stride: int = 1                    # proses tiap N frame
 
