@@ -470,7 +470,10 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _LOOPBACK = ("localhost", "127.0.0.1", "::1")
 _TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
           ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
-          ".ico": "image/x-icon", ".jpg": "image/jpeg"}
+          ".ico": "image/x-icon", ".jpg": "image/jpeg", ".webmanifest": "application/manifest+json"}
+# Ikon aplikasi dibaca browser/OS tanpa cookie (mis. ikon layar utama iPhone), jadi terbuka walau mode --remote.
+_PUBLIC_ASSETS = frozenset({"/static/icon-192.png", "/static/icon-512.png", "/static/icon-maskable.png",
+                            "/static/apple-touch-icon.png", "/static/favicon.svg", "/favicon.ico"})
 
 
 def _host_name(header: str) -> str:
@@ -526,6 +529,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(403, "Alamat tidak diizinkan. Buka lewat http://localhost.")
             return False
         token = self.server.token
+        if token and self.command in ("GET", "HEAD") and urlparse(self.path).path in _PUBLIC_ASSETS:
+            return True
         if token:
             jar = SimpleCookie(self.headers.get("Cookie", ""))
             have = jar["ss_key"].value if "ss_key" in jar else ""
@@ -573,6 +578,16 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return data
 
+    def _manifest(self) -> dict:
+        """Manifes PWA. Pada mode --remote, aplikasi terpasang membuka alamat berkunci supaya cookie akses terpasang lagi."""
+        token = self.server.token
+        icons = [{"src": f"/static/icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png", "purpose": "any"} for n in (192, 512)]
+        icons.append({"src": "/static/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"})
+        return {"id": "/", "name": "Sidewalk Sentinel", "short_name": "Sentinel", "lang": "id",
+                "description": "Deteksi kendaraan yang parkir di trotoar langsung dari kamera.",
+                "start_url": f"/?key={token}" if token else "/", "scope": "/", "display": "standalone",
+                "orientation": "any", "background_color": "#05070d", "theme_color": "#05070d", "icons": icons}
+
     # ---- GET
     def do_GET(self) -> None:
         self._dispatch(self._get)
@@ -591,6 +606,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "Berkas tidak ditemukan.")
         if path == "/favicon.ico":
             return self._file(WEB_DIR / "favicon.svg", "image/svg+xml")
+        if path == "/manifest.webmanifest":
+            return self._send(200, json.dumps(self._manifest(), ensure_ascii=False).encode("utf-8"),
+                              "application/manifest+json; charset=utf-8")
+        if path == "/sw.js":
+            return self._file(WEB_DIR / "sw.js", "text/javascript; charset=utf-8", {"Service-Worker-Allowed": "/"})
         if path == "/api/status":
             return self._json(self.engine.status())
         if path == "/api/alerts":

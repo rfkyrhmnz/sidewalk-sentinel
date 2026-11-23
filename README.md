@@ -42,37 +42,45 @@ python main.py video data_bersih/video/rekaman.mp4 --out hasil --min-dwell 10
 ```
 Keluaran: gambar/video beranotasi, `hasil_gambar.csv` / `*_hasil.csv`, dan `*_ringkasan.json` (daftar parkir terkonfirmasi).
 
-## Dasbor web (cara termudah)
+## Aplikasi (laptop dan HP)
 
 ```bash
 python main.py            # sama dengan: python main.py ui   (juga bisa lewat tombol Run di VS Code)
 ```
-**Langsung jalan tanpa setelan**: begitu jendela terbuka, kamera menyala (di HP: kamera belakang) dan pemantauan mulai sendiri setelah model siap. Satu-satunya yang perlu kamu lakukan adalah menekan *Izinkan* saat browser meminta akses kamera. Trotoar dideteksi otomatis. Kalau kamera terputus (dicabut, atau HP mematikannya saat tab di latar belakang), dasbor menyalakannya lagi sendiri. Tombol *Berhenti* menghentikan mode langsung sampai kamu menekan *Mulai pantau*; matikan di Pengaturan bila tidak mau kamera menyala otomatis.
+**Buka, lalu langsung mendeteksi.** Layarnya hanya kamera. Begitu jendela terbuka, kamera menyala (di HP: kamera belakang) dan
+pemantauan mulai sendiri setelah model siap; satu-satunya yang perlu kamu lakukan adalah menekan *Izinkan* saat browser meminta akses
+kamera. Trotoar dideteksi otomatis. Satu kapsul di bawah selalu menjawab satu pertanyaan: *ada kendaraan di atas trotoar atau tidak?*
 
-Jendela dasbor terbuka sendiri (Edge/Chrome mode aplikasi; bila tak ada, browser biasa). Tanpa paket tambahan: servernya
-memakai pustaka standar Python. Model dimuat di latar belakang; saat chip di kanan atas berubah menjadi **Model siap**, kamu bisa mulai.
-
-| Tab | Untuk apa |
+| Kapsul | Artinya |
 |---|---|
-| **Kamera** | Kamera laptop atau HP lewat browser. Menyala dan memantau otomatis; tombolnya hanya dipakai bila izin sempat ditolak. |
-| **Stream** | Diisi indeks webcam (`0`), alamat kamera IP HP (`http://192.168.1.20:8080/video`), atau CCTV (`rtsp://...`). Server yang membuka sumbernya. |
-| **Video** | Pilih berkas video dari komputer; diputar di dasbor dan dianalisis sambil diputar. |
+| Hijau, **Trotoar aman** | Tidak ada kendaraan di trotoar |
+| Kuning, **Mobil berhenti di trotoar** | Sedang dipastikan; cincin terisi sampai lama diam tercapai |
+| Merah, **Mobil parkir di trotoar** | Terkonfirmasi: layar berpendar, bunyi dan getar, foto bukti tersimpan |
 
-- **Gambar trotoar** (`D`): klik titik-titik tepi trotoar langsung di atas video, lalu *Terapkan*. Paling stabil untuk kamera yang diam
-  (tersimpan juga di `live_hasil/trotoar_polygon.json`). *Pakai otomatis* mengembalikan ke segmentasi otomatis.
-- **Tampilan**: tema gelap ala pusat kendali. Tiap kendaraan diberi kurung sudut HUD yang bergerak mulus, cincin kemajuan lama diam
-  (penuh = alert), dan jejak gerak (`T`). **Peta panas** (`H`) menumpuk posisi kendaraan di trotoar selama sesi. **Foto** (`S`) menyimpan
-  gambar lengkap dengan overlay. Dok kendali melebur saat memantau; gerakkan pointer atau sentuh layar untuk memunculkannya lagi.
-- **Telemetri**: jumlah kendaraan / di trotoar / parkir dengan grafik mini, fps dan latensi, serta rincian jenis kendaraan.
-- Saat kendaraan terkonfirmasi parkir: seluruh antarmuka berpendar merah, muncul banner, dan foto bukti masuk ke daftar **Kejadian**
-  (klik untuk memperbesar; *Unduh CSV* untuk log). Pilihan peringatan di **Pengaturan**: bip, suara Bahasa Indonesia, atau senyap,
-  plus notifikasi browser bila tab sedang di latar belakang.
-- **Tinjau kejadian**: tandai tiap kejadian *Benar* atau *Salah*. Presisi alert dihitung otomatis dan hasilnya tersimpan di
-  `live_hasil/kejadian_tinjauan.csv` (juga ada di `ringkasan_live.json`), bahan langsung untuk tabel hasil pengujian di laporan.
-- **Pengaturan** (ikon kanan atas): lama diam sebelum alert, ambang kontak trotoar, kompensasi gerak kamera. Berlaku langsung.
-- **Di HP**: tata letak menyesuaikan layar tegak, dan layar dijaga tetap menyala selama memantau (bila browser mendukung).
-- Pintasan papan ketik: `Spasi` mulai/berhenti, `D`, `H`, `T`, `S`, `F` layar penuh, `?` daftar pintasan.
+Hanya yang relevan yang tampil: ikon jeda dan pengaturan di kanan atas, serta penghitung **Kejadian** di bawah. Semuanya melebur saat
+memantau supaya gambar tampil penuh; gerakkan pointer atau sentuh layar untuk memunculkannya lagi.
+
+- **Kejadian** (`E`): foto bukti terbaru lebih dulu, klik untuk memperbesar. Tandai tiap kejadian *Benar* atau *Salah*; presisi alert
+  dihitung otomatis dan tersimpan di `live_hasil/kejadian_tinjauan.csv` (juga di `ringkasan_live.json`), bahan langsung untuk tabel hasil pengujian di laporan.
+- **Pengaturan** (ikon kanan atas): sumber gambar (kamera, video, atau stream), lama diam sebelum alert, gambar area trotoar manual (`D`),
+  jenis peringatan (bip, suara Bahasa Indonesia, atau senyap), notifikasi saat di latar belakang, simpan foto layar, layar penuh (`F`).
+  Pintasan lain: `Spasi` jeda atau lanjut. Di HP layar dijaga tetap menyala selama memantau (bila browser mendukung).
+- **Sumber gambar**: *Kamera* (otomatis), *Video* (pilih berkas, langsung dianalisis; gunakan `.mp4` H.264, kodek lain sering tidak bisa
+  diputar browser), *Stream* (indeks webcam `0`, kamera IP HP `http://192.168.1.20:8080/video`, atau CCTV `rtsp://...`; server yang membuka sumbernya).
+- **Kamera terputus** (dicabut, atau HP mematikannya saat di latar belakang): dinyalakan lagi sendiri. Menjeda memberhentikan mode langsung
+  sampai kamu menekan lanjut; matikan *Langsung memantau saat dibuka* di Pengaturan bila tidak mau kamera menyala otomatis.
+- Jendela terbuka sendiri (Edge/Chrome mode aplikasi; bila tak ada, browser biasa). Tanpa paket tambahan: servernya memakai pustaka standar Python.
+  Model dimuat di latar belakang; kapsul menampilkan *Menyiapkan model…* sampai siap.
 - Opsi: `--port 8765`, `--out live_hasil`, `--min-dwell 10`, `--no-open`, serta `--weights`, `--polygon`, `--set`, dst. seperti perintah lain.
+
+### Pasang sebagai aplikasi
+Antarmukanya adalah aplikasi web yang bisa dipasang (PWA): ikon sendiri, tanpa bilah alamat, layar penuh.
+
+- **Laptop (Chrome atau Edge)**: jalankan `python main.py`, lalu klik *Pasang aplikasi* di Pengaturan (atau ikon pasang di bilah alamat).
+  Aplikasi terpasang membuka `http://localhost:8765`, jadi **servernya tetap harus menyala** (`python main.py`); bila belum, aplikasi menampilkan pesan itu.
+- **HP**: pemasangan hanya bermakna bila alamatnya tetap. Alamat dari `python main.py phone` berganti tiap dijalankan, jadi untuk uji coba cukup
+  buka tautannya di browser (lihat di bawah). Di iPhone: Safari → *Bagikan* → *Tambah ke Layar Utama* bila alamatnya tetap. Memasang di Android lewat Chrome → *Pasang aplikasi*.
+- Yang **belum** dilakukan aplikasi ini: berjalan sepenuhnya di dalam HP tanpa laptop. Deteksi (YOLO) dijalankan di server, bukan di HP.
 
 ### Testing dengan kamera HP (iPhone atau Android)
 Browser hanya mengizinkan kamera di `http://localhost` atau `https://`, jadi dari HP dasbor harus dibuka lewat terowongan HTTPS.
@@ -83,14 +91,14 @@ python main.py phone
 ```
 Terminal mencetak **kode QR** (dan menyimpannya sebagai `live_hasil/qr_iphone.png`, yang dibuka otomatis di laptop). Di iPhone:
 buka aplikasi **Kamera**, arahkan ke kode, ketuk tautan yang muncul, ketuk **Izinkan** di Safari. Deteksi langsung berjalan; hasilnya
-(banner, foto bukti, tinjauan Benar/Salah) tampil di layar iPhone. Frame dikirim dari HP ke laptop, jadi YOLO tetap dijalankan di laptop.
+(kapsul status, foto bukti, tinjauan Benar/Salah) tampil di layar iPhone. Frame dikirim dari HP ke laptop, jadi YOLO tetap dijalankan di laptop.
 
 - Biarkan layar iPhone menyala dan Safari tetap di depan: iOS menghentikan kamera saat Safari di latar belakang atau layar terkunci.
 - Kamera belakang dipakai lebih dulu. Notifikasi browser tidak tersedia di Safari biasa; bunyi/suara baru aktif setelah layar disentuh sekali.
-- Tautan berisi kunci acak dan berubah tiap `python main.py phone`; sumber di sisi server (tab Stream) dimatikan pada mode ini.
+- Tautan berisi kunci acak dan berubah tiap `python main.py phone`; sumber di sisi server (Stream) dimatikan pada mode ini.
 - Bila tautan belum terbuka, tunggu beberapa detik lalu muat ulang (alamat baru perlu waktu agar bisa dijangkau). Jaringan kampus kadang memblokir terowongan; coba hotspot HP.
-- Tanpa terowongan: aplikasi yang menjadikan HP sebagai webcam laptop (misalnya Iriun Webcam atau Camo) membuat HP muncul di daftar kamera tab **Kamera**,
-  atau pakai aplikasi kamera IP di HP dengan tab **Stream** (Wi-Fi yang sama).
+- Tanpa terowongan: aplikasi yang menjadikan HP sebagai webcam laptop (misalnya Iriun Webcam atau Camo) membuat HP muncul di daftar kamera di Pengaturan,
+  atau pakai aplikasi kamera IP di HP dengan sumber **Stream** (Wi-Fi yang sama).
 - Manual (tanpa `phone`): `python main.py ui --remote`, lalu `cloudflared tunnel --url http://127.0.0.1:8765` dan buka `https://<alamat>/?key=<kunci>`.
 
 ## Mode live (ala CCTV)
@@ -154,15 +162,16 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (87 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (89 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
   CLI, evaluasi, penanganan EXIF/video, serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
-  pengaturan, tinjauan benar/salah dan CSV-nya, kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.
-- **Tampilan dasbor** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan (alur tab Stream dan Kamera,
-  menggambar poligon, kurung HUD/banner/peta panas, tinjauan Benar/Salah, laci pengaturan, pintasan papan ketik, tata letak
-  layar HP 390 px, serta alur tanpa klik: kamera menyala dan pemantauan mulai sendiri, Berhenti manual tidak memulai ulang, galat izin kamera + tombol coba lagi) tanpa galat konsol. Belum dicoba: Edge/Firefox/Safari, kamera HP sungguhan, notifikasi dan suara di browser
-  sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli. Font memakai yang ada di sistem (Bahnschrift/Segoe UI di Windows),
-  jadi tampilan sedikit berbeda antar-OS.
+  pengaturan, tinjauan benar/salah dan CSV-nya, manifes aplikasi, service worker, dan ikon (termasuk di mode `--remote`), kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.
+- **Tampilan aplikasi** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan, di layar laptop (1440×900) dan HP (390×844):
+  buka halaman tanpa klik apa pun lalu kamera menyala dan pemantauan mulai sendiri, kapsul berganti aman/memastikan/parkir, daftar kejadian dan tinjauan
+  Benar/Salah, pengaturan, gambar trotoar manual, sumber Stream dan Video (`.mp4` H.264), jeda lalu lanjut, kamera ditolak (pesan + tombol coba lagi),
+  tanpa galat konsol. Chrome melaporkan manifes tanpa galat, tanpa hambatan pemasangan, dan service worker aktif. Belum dicoba: Edge/Firefox/Safari,
+  kamera HP sungguhan, pemasangan sungguhan ke laptop/HP, notifikasi dan suara di browser sungguhan, terowongan HTTPS, dan memutar video dengan model YOLO asli.
+  Font memakai yang ada di sistem (Bahnschrift/Segoe UI di Windows), jadi tampilan sedikit berbeda antar-OS.
 - **Tautan HP (`python main.py phone`)** diuji dengan `cloudflared` tiruan (skrip yang mencetak log mirip aslinya) dan QR yang tercetak di terminal di-decode kembali menjadi alamat yang benar. **`cloudflared` asli dan iPhone sungguhan belum dicoba**: format log Cloudflare bisa berubah, dan jaringan kampus/kantor kadang memblokir terowongan.
 - **Belum teruji dengan model asli**: pemanggilan YOLO sebenarnya (`vehicles.py`: `YoloSegmenter`, `YoloSidewalkSegmenter`),
   perintah `train`, `polygon` dan jendela `live` OpenCV (butuh layar), serta kamera sungguhan (webcam, kamera IP HP, RTSP):
@@ -179,6 +188,6 @@ dari data validasi Anda.
 ```
 main.py                 titik masuk CLI
 trotoar/                config, sidewalk, vehicles, geometry, decision, temporal, pipeline, visualize, media, metrics, cli, webui
-trotoar/web/            antarmuka dasbor (index.html, app.css, app.js)
+trotoar/web/            antarmuka aplikasi (index.html, app.css, app.js, sw.js, ikon PNG)
 tests/                  tes otomatis + generator adegan sintetis (synthetic.py)
 ```

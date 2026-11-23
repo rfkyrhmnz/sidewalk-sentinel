@@ -308,8 +308,9 @@ def test_guards_content_type_host_and_paths(web):
 
 def test_static_files_exist_and_reference_each_other():
     html = (webui.WEB_DIR / "index.html").read_text(encoding="utf-8")
-    for name in ("app.css", "app.js", "favicon.svg"):
+    for name in ("app.css", "app.js", "favicon.svg", "apple-touch-icon.png"):
         assert (webui.WEB_DIR / name).is_file() and f"/static/{name}" in html
+    assert 'rel="manifest"' in html and "/manifest.webmanifest" in html
     js = (webui.WEB_DIR / "app.js").read_text(encoding="utf-8")
     import re
     ids = set(re.findall(r'\$\("([\w-]+)"\)', js))
@@ -385,3 +386,44 @@ def test_review_alerts_label_counts_and_csv(web, tmp_path):
     assert st == 404 and "tidak ditemukan" in body["error"]
     c.post_json("/api/stop", {})
     assert json.loads((eng.out_dir / "ringkasan_live.json").read_text(encoding="utf-8"))["tinjauan"]["belum"] == 1
+
+
+def _png_size(data):
+    arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+    assert arr is not None, "bukan PNG yang valid"
+    return arr.shape[1], arr.shape[0]
+
+
+def test_pwa_manifest_service_worker_and_icons(web):
+    c, _ = web([])
+    st, resp, body = c.req("GET", "/manifest.webmanifest")
+    assert st == 200 and "manifest+json" in resp.getheader("Content-Type")
+    m = json.loads(body)
+    assert m["display"] == "standalone" and m["start_url"] == "/" and m["scope"] == "/" and m["name"] == "Sidewalk Sentinel"
+    assert {i["sizes"] for i in m["icons"]} >= {"192x192", "512x512"}
+    assert any(i["purpose"] == "maskable" for i in m["icons"])
+    for icon in m["icons"]:                                                   # tiap ikon yang dijanjikan benar-benar ada & berukuran sesuai
+        st, resp, data = c.req("GET", icon["src"])
+        assert st == 200 and resp.getheader("Content-Type") == "image/png", icon["src"]
+        w, h = icon["sizes"].split("x")
+        assert _png_size(data) == (int(w), int(h)), icon["src"]
+    st, resp, data = c.req("GET", "/static/apple-touch-icon.png")
+    assert st == 200 and _png_size(data) == (180, 180)
+    st, resp, body = c.req("GET", "/sw.js")
+    assert st == 200 and "javascript" in resp.getheader("Content-Type") and resp.getheader("Service-Worker-Allowed") == "/"
+    assert b"fetch" in body and b"caches" not in body                         # sengaja tanpa cache berkas
+    assert c.req("GET", "/static/%2e%2e/cli.py")[0] == 404
+
+
+def test_pwa_in_remote_mode_keeps_app_private_but_icons_public(web):
+    c, _ = web([], remote=True)
+    key = c.srv.token
+    for path in ("/manifest.webmanifest", "/sw.js", "/api/status"):
+        assert c.req("GET", path)[0] == 401, path                             # manifes memuat kunci: hanya untuk yang sudah masuk
+    for path in ("/static/icon-192.png", "/static/icon-512.png", "/static/icon-maskable.png", "/static/apple-touch-icon.png"):
+        assert c.req("GET", path)[0] == 200, path                             # ikon dibaca OS tanpa cookie
+    assert c.req("POST", "/static/icon-192.png", b"{}", {"Content-Type": "application/json"})[0] == 401
+    cookie = c.req("GET", f"/?key={key}")[1].getheader("Set-Cookie").split(";")[0]
+    st, _, body = c.req("GET", "/manifest.webmanifest", headers={"Cookie": cookie})
+    assert st == 200 and json.loads(body)["start_url"] == f"/?key={key}"     # aplikasi terpasang membuka alamat berkunci
+    assert c.req("GET", "/sw.js", headers={"Cookie": cookie})[0] == 200
