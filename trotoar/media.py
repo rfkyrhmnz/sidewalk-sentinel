@@ -95,11 +95,28 @@ def normalize_dir(src_dir, out_dir, max_side_img: int | None = None, fps: float 
     return done
 
 
+def open_video(path) -> "cv2.VideoCapture":
+    """Buka berkas video; bedakan 'berkas tidak ada' dari 'berkas ada tetapi tidak terbaca'.
+
+    OpenCV hanya mengembalikan isOpened()=False untuk keduanya, padahal perbaikannya berbeda:
+    yang pertama salah nama/folder, yang kedua biasanya kodek HEVC/H.265 dari iPhone.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise RuntimeError(f"Berkas video tidak ditemukan: {p.resolve()} (folder kerja: {Path.cwd()}). "
+                           "Periksa nama dan lokasi berkas, atau tulis path lengkapnya.")
+    cap = cv2.VideoCapture(str(p))
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError(f"Berkas ada tetapi OpenCV tidak bisa membukanya: {p}. Kemungkinan kodek HEVC/H.265 (iPhone). "
+                           f'Ubah ke H.264 dulu: python main.py prepare "{p}" --out video_h264 (butuh ffmpeg), '
+                           "lalu pakai berkas di folder video_h264.")
+    return cap
+
+
 def extract_frames(video, out_dir, fps: float = 1.0, prefix: str | None = None, quality: int = 95) -> int:
     """Ambil frame dari video dengan laju ``fps`` (disarankan 1-2 fps untuk anotasi)."""
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        raise RuntimeError(f"Tidak bisa membuka video: {video}")
+    cap = open_video(video)
     vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(vfps / fps)))
     out_dir = Path(out_dir)
