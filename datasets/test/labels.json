@@ -56,5 +56,5 @@
       ]
     }
   ],
-  "peringatan_uji": "min_dwell_s bawaan 10 detik lebih panjang dari mobil yang terlihat di klip ini; uji dengan --set min_dwell_s=4"
+  "peringatan_uji": "min_dwell_s bawaan 10 detik lebih panjang dari mobil yang terlihat di klip ini. Simulasi logika dwell pada jalur kotak taksi IMG_4984 (kotak dari warna, CameraMotion dan DwellTracker asli, asumsi tiap frame sudah 'di trotoar tanpa pengendara'): 157 dari 206 frame berstatus DI_TROTOAR_BERGERAK dan tidak pernah terkonfirmasi, bahkan dengan min_dwell_s=4, karena kamera berjalan mendekat (lebar taksi 359 sampai 720 px) dan kompensasi hanya translasi. Untuk uji parkir rekam dengan HP diam minimal 12 detik."
 }
