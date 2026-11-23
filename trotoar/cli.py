@@ -157,14 +157,25 @@ def cmd_live(args, segmenter_factory=None):
     print(f"Hasil -> {args.out}")
 
 
-def cmd_ui(args, segmenter_factory=None):
+def cmd_ui(args, segmenter_factory=None, phone=None):
     from . import webui
     cfg = _make_cfg(args)
     if args.min_dwell is not None:
         cfg.min_dwell_s = args.min_dwell
     polygon = load_polygon_file(args.polygon) if args.polygon else None
     engine = webui.Engine(cfg, lambda c: _make_analyzer(args, c, segmenter_factory), out_dir=args.out, polygon=polygon)
-    webui.serve(engine, args.host, args.port, open_browser=not args.no_open, remote=args.remote)
+    webui.serve(engine, args.host, args.port, open_browser=not args.no_open, remote=args.remote, phone=phone)
+
+
+def cmd_phone(args, segmenter_factory=None):
+    """Dasbor untuk kamera HP: server mode remote + terowongan HTTPS + QR (tidak membuka jendela di laptop)."""
+    from . import phone as phonemod
+    from .webui import _phone_missing
+    opts = phonemod.PhoneOptions(cloudflared=args.cloudflared, open_image=not args.no_open)
+    if phonemod.find_cloudflared(args.cloudflared) is None:
+        raise RuntimeError(_phone_missing(opts))             # cek sebelum memuat model yang makan waktu
+    args.host, args.remote, args.no_open = "127.0.0.1", True, True
+    cmd_ui(args, segmenter_factory, phone=opts)
 
 
 def cmd_snapshot(args, **_):
@@ -337,6 +348,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default="live_hasil", help="folder foto bukti, kejadian.csv, dan poligon trotoar")
     sp.add_argument("--min-dwell", type=float, help="detik diam minimal sebelum ALERT (default 10; bisa diubah di UI)")
     _add_common(sp); sp.set_defaults(func=cmd_ui)
+
+    sp = sub.add_parser("phone", help="pakai kamera HP (iPhone/Android): tautan HTTPS + kode QR untuk dipindai")
+    sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--no-open", action="store_true", help="jangan membuka gambar QR otomatis di laptop")
+    sp.add_argument("--cloudflared", help="path cloudflared bila tidak ada di PATH")
+    sp.add_argument("--out", default="live_hasil", help="folder foto bukti, kejadian.csv, dan qr_iphone.png")
+    sp.add_argument("--min-dwell", type=float, help="detik diam minimal sebelum ALERT (default 10)")
+    _add_common(sp); sp.set_defaults(func=cmd_phone)
 
     sp = sub.add_parser("snapshot", help="ambil satu gambar dari kamera (untuk menggambar poligon trotoar)")
     sp.add_argument("--source", default="0"); sp.add_argument("--out", default="frame.jpg")

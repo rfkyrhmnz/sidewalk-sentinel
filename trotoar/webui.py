@@ -470,7 +470,10 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _LOOPBACK = ("localhost", "127.0.0.1", "::1")
 _TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
           ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
-          ".ico": "image/x-icon", ".jpg": "image/jpeg"}
+          ".ico": "image/x-icon", ".jpg": "image/jpeg", ".webmanifest": "application/manifest+json"}
+# Ikon aplikasi dibaca browser/OS tanpa cookie (mis. ikon layar utama iPhone), jadi terbuka walau mode --remote.
+_PUBLIC_ASSETS = frozenset({"/static/icon-192.png", "/static/icon-512.png", "/static/icon-maskable.png",
+                            "/static/apple-touch-icon.png", "/static/favicon.svg", "/favicon.ico"})
 
 
 def _host_name(header: str) -> str:
@@ -526,6 +529,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(403, "Alamat tidak diizinkan. Buka lewat http://localhost.")
             return False
         token = self.server.token
+        if token and self.command in ("GET", "HEAD") and urlparse(self.path).path in _PUBLIC_ASSETS:
+            return True
         if token:
             jar = SimpleCookie(self.headers.get("Cookie", ""))
             have = jar["ss_key"].value if "ss_key" in jar else ""
@@ -573,6 +578,16 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return data
 
+    def _manifest(self) -> dict:
+        """Manifes PWA. Pada mode --remote, aplikasi terpasang membuka alamat berkunci supaya cookie akses terpasang lagi."""
+        token = self.server.token
+        icons = [{"src": f"/static/icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png", "purpose": "any"} for n in (192, 512)]
+        icons.append({"src": "/static/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"})
+        return {"id": "/", "name": "Sidewalk Sentinel", "short_name": "Sentinel", "lang": "id",
+                "description": "Deteksi kendaraan yang parkir di trotoar langsung dari kamera.",
+                "start_url": f"/?key={token}" if token else "/", "scope": "/", "display": "standalone",
+                "orientation": "any", "background_color": "#05070d", "theme_color": "#05070d", "icons": icons}
+
     # ---- GET
     def do_GET(self) -> None:
         self._dispatch(self._get)
@@ -591,6 +606,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "Berkas tidak ditemukan.")
         if path == "/favicon.ico":
             return self._file(WEB_DIR / "favicon.svg", "image/svg+xml")
+        if path == "/manifest.webmanifest":
+            return self._send(200, json.dumps(self._manifest(), ensure_ascii=False).encode("utf-8"),
+                              "application/manifest+json; charset=utf-8")
+        if path == "/sw.js":
+            return self._file(WEB_DIR / "sw.js", "text/javascript; charset=utf-8", {"Service-Worker-Allowed": "/"})
         if path == "/api/status":
             return self._json(self.engine.status())
         if path == "/api/alerts":
@@ -756,6 +776,13 @@ def make_server(engine: Engine, host: str = "127.0.0.1", port: int = 8765, tries
     raise RuntimeError(f"Tidak ada port kosong mulai dari {port}: {last}")
 
 
+def _phone_missing(phone) -> str:
+    from .phone import INSTALL_HINT
+    if phone.cloudflared:
+        return f"cloudflared tidak ditemukan di '{phone.cloudflared}'.\n" + INSTALL_HINT
+    return INSTALL_HINT
+
+
 def open_window(url: str) -> None:
     """Buka dasbor sebagai jendela aplikasi (Edge/Chrome mode --app, tanpa bilah alamat); cadangan: browser biasa."""
     cands: list[str] = []
@@ -794,14 +821,25 @@ def _lan_ip() -> str | None:
 
 
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
-          remote: bool = False) -> None:
-    server = make_server(engine, host, port, remote=remote)
+          remote: bool = False, phone=None) -> None:
+    """``phone``: objek ``phone.PhoneOptions`` (implies ``remote``): nyalakan terowongan HTTPS dan cetak QR untuk HP."""
+    server = make_server(engine, host, port, remote=remote or phone is not None)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0", "") else host
     key = f"/?key={server.token}" if server.token else ""
     url = f"http://{shown}:{server.server_port}{key}"
     engine.load_async()
     print(f"Sidewalk Sentinel berjalan di {url}   (hentikan dengan Ctrl+C)")
-    if remote:
+    session = None
+    if phone is not None:
+        from .phone import PhoneSession, find_cloudflared
+        exe = find_cloudflared(phone.cloudflared)
+        if exe is None:
+            server.server_close()
+            raise RuntimeError(_phone_missing(phone))
+        session = PhoneSession(server.server_port, server.token, engine.out_dir, phone, [exe],
+                               on_fail=lambda: threading.Thread(target=server.shutdown, daemon=True).start())
+        session.start()
+    elif remote:
         print(f"Mode --remote: sambungkan terowongan HTTPS ke port {server.server_port}, mis.\n"
               f"    cloudflared tunnel --url http://localhost:{server.server_port}\n"
               f"lalu buka alamat https yang diberikan, ditambah  /?key={server.token}  di HP.\n"
@@ -819,5 +857,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8765, open_browse
     except KeyboardInterrupt:
         print("\nDihentikan.")
     finally:
+        if session is not None:
+            session.close()
         engine.stop()
         server.server_close()

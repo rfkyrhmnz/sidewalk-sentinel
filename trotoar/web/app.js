@@ -1,36 +1,32 @@
 "use strict";
-/* Sidewalk Sentinel: antarmuka dasbor. Tanpa pustaka luar. Semua koordinat deteksi dari server
-   berupa pecahan 0-1 terhadap gambar, jadi overlay ikut ukuran layar berapa pun. */
+/* Sidewalk Sentinel: antarmuka. Tanpa pustaka luar. Semua koordinat deteksi dari server berupa pecahan 0-1
+   terhadap gambar, jadi overlay ikut ukuran layar berapa pun. Alur utama: buka -> kamera menyala -> pemantauan mulai sendiri. */
 
 const $ = (id) => document.getElementById(id);
 const el = {
-  stage: $("stage"), view: $("view"), video: $("video"), stream: $("stream"), canvas: $("overlay"), empty: $("empty"),
-  liveChip: $("live-chip"), liveText: $("live-text"), swChip: $("sw-chip"), btnAuto: $("btn-auto"),
-  btnFull: $("btn-full"), banner: $("banner"), bannerText: $("banner-text"),
-  drawPanel: $("draw-panel"), drawUndo: $("draw-undo"), drawClose: $("draw-close"),
-  drawCancel: $("draw-cancel"), drawApply: $("draw-apply"),
-  dock: $("dock"), tabs: document.querySelectorAll(".seg button"), seg: document.querySelector(".seg"),
-  srcCamera: $("src-camera"), srcStream: $("src-stream"), srcVideo: $("src-video"),
-  camSelect: $("cam-select"), camOn: $("cam-on"), streamUrl: $("stream-url"),
-  videoFile: $("video-file"), videoPick: $("video-pick"), videoName: $("video-name"),
-  btnDraw: $("btn-draw"), btnHeat: $("btn-heat"), btnTrail: $("btn-trail"), btnShot: $("btn-shot"),
-  btnRun: $("btn-run"), notice: $("notice"),
-  modelChip: $("model-chip"), modelText: $("model-text"), metrics: $("metrics"),
-  perfFps: $("perf-fps"), perfLat: $("perf-lat"), sparkFps: $("spark-fps"),
-  btnHelp: $("btn-help"), btnSettings: $("btn-settings"), help: $("help"),
-  uptime: $("uptime"), nVeh: $("n-veh"), nSide: $("n-side"), nPark: $("n-park"), warn: document.querySelector(".metric.warn"),
-  sparkVeh: $("spark-veh"), sparkSide: $("spark-side"), sparkPark: $("spark-park"), mix: $("mix"),
-  evList: $("ev-list"), evEmpty: $("ev-empty"), evCount: $("ev-count"), evDwell: $("ev-dwell"),
-  csv: $("csv-link"), csvReview: $("csv-review"), precision: $("precision"),
-  scrim: $("scrim"), drawer: $("drawer"), drawerClose: $("drawer-close"),
-  setDwell: $("set-dwell"), oDwell: $("o-dwell"), setTau: $("set-tau"), oTau: $("o-tau"),
-  setAlert: $("set-alert"), setNotify: $("set-notify"), setComp: $("set-comp"),
-  btnRefresh: $("btn-refresh"), outDir: $("out-dir"), emptyRetry: $("empty-retry"), setAuto: $("set-auto"),
-  lightbox: $("lightbox"), lightboxImg: $("lightbox-img"),
+  stage: $("stage"), view: $("view"), video: $("video"), stream: $("stream"), canvas: $("overlay"),
+  empty: $("empty"), emptyRetry: $("empty-retry"),
+  btnFlip: $("btn-flip"), btnPause: $("btn-pause"), icoPause: $("ico-pause"), icoPlay: $("ico-play"), btnSettings: $("btn-settings"),
+  drawPanel: $("draw-panel"), drawUndo: $("draw-undo"), drawClose: $("draw-close"), drawCancel: $("draw-cancel"), drawApply: $("draw-apply"),
+  status: $("status"), ring: $("ring-arc"), statusMain: $("status-main"), statusSub: $("status-sub"),
+  btnEvents: $("btn-events"), evCount: $("ev-count"), notice: $("notice"), scrim: $("scrim"),
+  sheetEvents: $("sheet-events"), closeEvents: $("close-events"), csv: $("csv-link"), csvReview: $("csv-review"),
+  precision: $("precision"), evList: $("ev-list"), evEmpty: $("ev-empty"), evDwell: $("ev-dwell"),
+  sheetSettings: $("sheet-settings"), closeSettings: $("close-settings"), tabs: document.querySelectorAll(".seg button"),
+  srcCamera: $("src-camera"), srcVideo: $("src-video"), srcStream: $("src-stream"),
+  camSelect: $("cam-select"), videoFile: $("video-file"), videoPick: $("video-pick"), videoName: $("video-name"),
+  streamUrl: $("stream-url"), streamGo: $("stream-go"),
+  setDwell: $("set-dwell"), oDwell: $("o-dwell"), setTau: $("set-tau"), oTau: $("o-tau"), setComp: $("set-comp"),
+  btnDraw: $("btn-draw"), btnAuto: $("btn-auto"), btnRefresh: $("btn-refresh"),
+  setAlert: $("set-alert"), setNotify: $("set-notify"), setAuto: $("set-auto"),
+  btnInstall: $("btn-install"), btnShot: $("btn-shot"), btnFull: $("btn-full"), installHint: $("install-hint"),
+  modelChip: $("model-chip"), modelText: $("model-text"), metrics: $("metrics"), perfFps: $("perf-fps"), perfLat: $("perf-lat"),
+  outDir: $("out-dir"), lightbox: $("lightbox"), lightboxImg: $("lightbox-img"),
 };
 const ctx = el.canvas.getContext("2d");
 const FONT = getComputedStyle(document.body).fontFamily;
 const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const NARROW = window.matchMedia("(max-width: 860px)");      // layar sempit: gambar memenuhi layar (cover), selain itu utuh (contain)
 
 const C = { mint: "#3df2c0", amber: "#ffc24b", orange: "#ff9a3c", plasma: "#ff3d6e", ion: "#7b8cff" };
 const STATUS = {
@@ -41,49 +37,26 @@ const STATUS = {
   TERINDIKASI_PARKIR:        { text: "parkir di trotoar",          color: C.plasma },
   PARKIR_TERKONFIRMASI:      { text: "parkir terkonfirmasi",       color: C.plasma },
 };
-
 const EMPTY_COPY = {
-  camera: ["Nyalakan kamera", "Pilih kamera lalu tekan <b>Nyalakan kamera</b>. Browser meminta izin satu kali. Setelah gambar muncul, tekan <b>Mulai pantau</b>."],
-  stream: ["Sambungkan kamera IP", "Isi indeks webcam (<b>0</b>) atau alamat stream kamera IP/CCTV, lalu tekan <b>Mulai pantau</b>. Gambar muncul setelah pemantauan dimulai."],
-  video:  ["Buka berkas video", "Pilih video dari komputer. Video diputar di sini dan dianalisis sambil diputar."],
+  camera: ["Nyalakan kamera", "Pilih kamera di pengaturan, atau tekan tombol di bawah. Deteksi mulai sendiri setelah gambar muncul."],
+  video:  ["Buka berkas video", "Buka pengaturan di kanan atas, pilih <b>Video</b>, lalu pilih berkasnya. Video langsung dianalisis sambil diputar."],
+  stream: ["Sambungkan kamera IP", "Buka pengaturan di kanan atas, pilih <b>Stream</b>, isi indeks webcam (<b>0</b>) atau alamat kamera IP/CCTV, lalu tekan Mulai."],
 };
-
-/* Teks keadaan kosong. Saat mode langsung aktif, pengguna cukup menunggu: kamera menyala dan deteksi mulai sendiri. */
-function emptyCopy() {
-  if (S.kind === "camera") {
-    if (S.camError) return [ "Kamera belum bisa dipakai", S.camError, true, true ];
-    if (pref.auto && !S.manual) return [ "Menyalakan kamera…", "Izinkan akses kamera saat browser bertanya. Deteksi mulai sendiri setelah gambar muncul.", false, true ];
-  }
-  return [...EMPTY_COPY[S.kind], false, false];
-}
-
-function idleLabel() {
-  if (S.kind === "camera" && pref.auto && !S.manual) {
-    if (S.camError) return "Kamera belum aktif";
-    if (!S.camReady) return "Menyalakan kamera…";
-    if (S.model === "memuat") return "Menyiapkan model…";
-    if (S.model === "galat") return "Model gagal dimuat";
-    return "Memulai…";
-  }
-  return "Belum dimulai";
-}
 
 const S = {
   kind: "camera",                    // camera | stream | video
-  running: false, alerting: false, token: 0, t0: 0, startedAt: 0,
+  running: false, alerting: false, token: 0, startedAt: 0, t0: 0,
   model: "memuat", modelNotified: false,
-  payload: null, lastSeq: 0,
-  items: [], alertCount: 0, seenAlerts: new Set(),
-  polys: [],                         // trotoar manual yang tersimpan di server
-  drawing: false, draft: [], shapes: [],
-  camReady: false, videoReady: false, videoUrl: null, settingsLoaded: false,
-  heat: false, trail: true,
-  vis: new Map(), trails: new Map(), frameNo: 0, lastFrameT: 0,
-  hist: { veh: [], side: [], park: [], fps: [] }, histT: 0, mixKey: "",
-  wake: null, idleTimer: 0, lastState: "",
-  camError: "", camBusy: false, manual: false, starting: false, payloadSeen: false,
+  payload: null, lastSeq: 0, lastState: "", lastStatus: "",
+  items: [], alertCount: 0, seenAlerts: new Set(), seenCount: 0, firstAlerts: true,
+  polys: [], drawing: false, draft: [], shapes: [],
+  camReady: false, camError: "", camBusy: false, camCount: 0, facing: "environment",
+  videoReady: false, videoUrl: null, settingsLoaded: false,
+  manual: false, go: false, starting: false,
+  vis: new Map(), frameNo: 0, lastFrameT: 0,
+  wake: null, idleTimer: 0, sheet: null,
 };
-const pref = { alert: "bip", notify: false, trail: true, auto: true };
+const pref = { alert: "bip", notify: false, auto: true };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt1 = (n) => Number(n).toLocaleString("id-ID", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -95,9 +68,12 @@ const hexA = (h, a) => { const n = parseInt(h.slice(1), 16); return `rgba(${(n >
 function loadPrefs() { try { Object.assign(pref, JSON.parse(localStorage.getItem("ss-prefs") || "{}")); } catch (_) { /* default */ } }
 function savePrefs() { try { localStorage.setItem("ss-prefs", JSON.stringify(pref)); } catch (_) { /* penyimpanan tidak tersedia */ } }
 
+let noticeTimer = 0;
 function notify(msg, isError = false) {
   el.notice.textContent = msg || "";
   el.notice.classList.toggle("error", !!isError);
+  clearTimeout(noticeTimer);
+  if (msg && !isError) noticeTimer = setTimeout(() => { el.notice.textContent = ""; }, 4500);
 }
 
 async function api(path, body) {
@@ -108,55 +84,91 @@ async function api(path, body) {
   return data;
 }
 
-/* ------------------------------------------------------------------ keadaan tampilan */
+/* ------------------------------------------------------------------ kapsul status: satu kalimat tentang keadaan sekarang */
 function hasPicture() {
   if (S.running) return true;
   return (S.kind === "camera" && S.camReady) || (S.kind === "video" && S.videoReady);
 }
+function sourceReady() {
+  return (S.kind === "camera" && S.camReady) || (S.kind === "video" && S.videoReady) || (S.kind === "stream" && el.streamUrl.value.trim() !== "");
+}
+
+function computeStatus() {
+  const p = S.payload;
+  if (S.running) {
+    if (!p) return { tone: "boot", main: "Memantau…", sub: "Menunggu hasil pertama", p: null };
+    const conf = p.vehicles.filter((v) => v.status === "PARKIR_TERKONFIRMASI");
+    if (conf.length) {
+      const v = conf[0];
+      return { tone: "alert", p: 100, sub: `diam ${Math.round(v.dwell)} dtk · foto bukti tersimpan`,
+               main: conf.length === 1 ? `${cap(v.kelas)} parkir di trotoar` : `${conf.length} kendaraan parkir di trotoar` };
+    }
+    const cand = p.vehicles.filter((v) => v.status === "KANDIDAT_PARKIR" || v.status === "TERINDIKASI_PARKIR");
+    if (cand.length) {
+      const v = cand.reduce((a, b) => (b.dwell > a.dwell ? b : a));
+      return { tone: "watch", main: `${cap(v.kelas)} berhenti di trotoar`, p: clamp((v.dwell / p.min_dwell) * 100, 4, 100),
+               sub: `Memastikan… ${Math.round(v.dwell)}/${Math.round(p.min_dwell)} dtk` };
+    }
+    if (p.vehicles.some((v) => v.di_trotoar)) return { tone: "watch", main: "Ada kendaraan di trotoar", sub: "Masih bergerak atau ada pengendara", p: 100 };
+    const n = p.summary.kendaraan;
+    return { tone: "clear", main: "Trotoar aman", p: 100, sub: n ? `${n} kendaraan terpantau, tak ada di trotoar` : "Belum ada kendaraan terlihat" };
+  }
+  if (S.model === "galat") return { tone: "error", main: "Model gagal dimuat", sub: "Lihat pesan di atas", p: 100 };
+  if (S.kind === "camera" && pref.auto && !S.manual) {
+    if (S.camError) return { tone: "error", main: "Kamera belum aktif", sub: "Izinkan akses kamera untuk memulai", p: 100 };
+    if (!S.camReady) return { tone: "boot", main: "Menyalakan kamera…", sub: "Izinkan akses kamera bila diminta", p: null };
+    if (S.model === "memuat") return { tone: "boot", main: "Menyiapkan model…", sub: "Pertama kali bisa lebih lama (mengunduh bobot)", p: null };
+    return { tone: "boot", main: "Memulai…", sub: "", p: null };
+  }
+  if (hasPicture()) return { tone: "idle", main: "Dijeda", sub: "Ketuk ▶ untuk melanjutkan", p: 100 };
+  return { tone: "idle", main: "Pilih sumber gambar", sub: "Buka pengaturan di kanan atas", p: 100 };
+}
+
+function renderStatus() {
+  const s = computeStatus();
+  const key = `${s.tone}|${s.main}|${s.sub}|${s.p === null ? "" : Math.round(s.p)}`;
+  if (key === S.lastStatus) return;
+  S.lastStatus = key;
+  el.status.dataset.tone = s.tone;
+  el.statusMain.textContent = s.main;
+  el.statusSub.textContent = s.sub;
+  el.status.style.setProperty("--p", s.p === null ? 100 : Math.round(s.p));
+}
 
 function updateState() {
   const st = !S.running ? "idle" : S.alerting ? "alert" : "live";
-  const label = st === "idle" ? idleLabel() : st === "alert" ? "Peringatan parkir" : "Memantau langsung";
-  if (st + "|" + label === S.lastState) return;
-  S.lastState = st + "|" + label;
-  document.documentElement.dataset.state = st;
-  el.liveChip.dataset.state = st;
-  el.liveText.textContent = label;
-  document.title = st === "alert" ? "⚠ Parkir di trotoar · Sidewalk Sentinel" : "Sidewalk Sentinel";
+  if (document.documentElement.dataset.state !== st) {
+    document.documentElement.dataset.state = st;
+    document.title = st === "alert" ? "⚠ Parkir di trotoar · Sidewalk Sentinel" : "Sidewalk Sentinel";
+  }
 }
 
 function refreshUI() {
-  const usesVideo = S.kind !== "stream";
-  el.video.hidden = !usesVideo;
+  el.video.hidden = S.kind === "stream";
   el.stream.hidden = !(S.kind === "stream" && S.running);
   el.stage.dataset.empty = String(!hasPicture());
-  const [title, body, retry, plain] = emptyCopy();
+  const showRetry = S.kind === "camera" && !!S.camError;
+  const [title, body] = S.kind === "camera" && pref.auto && !S.manual && !S.camError
+    ? ["Menyalakan kamera…", "Izinkan akses kamera saat browser bertanya. Deteksi mulai sendiri setelah gambar muncul."]
+    : S.camError && S.kind === "camera" ? ["Kamera belum bisa dipakai", S.camError] : EMPTY_COPY[S.kind];
   el.empty.querySelector("h2").textContent = title;
-  el.empty.querySelector("p")[plain ? "textContent" : "innerHTML"] = body;
-  el.emptyRetry.hidden = !retry;
+  el.empty.querySelector("p")[S.camError && S.kind === "camera" ? "textContent" : "innerHTML"] = body;
+  el.emptyRetry.hidden = !showRetry;
 
   el.tabs.forEach((b) => b.setAttribute("aria-selected", String(b.dataset.kind === S.kind)));
-  el.seg.classList.toggle("locked", S.running);
   el.srcCamera.hidden = S.kind !== "camera";
-  el.srcStream.hidden = S.kind !== "stream";
   el.srcVideo.hidden = S.kind !== "video";
-  [el.camSelect, el.camOn, el.streamUrl, el.videoPick].forEach((n) => { n.disabled = S.running; });
+  el.srcStream.hidden = S.kind !== "stream";
 
-  const ready = S.model === "siap" && (S.running || (S.kind === "camera" && S.camReady) ||
-    (S.kind === "stream" && el.streamUrl.value.trim() !== "") || (S.kind === "video" && S.videoReady));
-  el.btnRun.disabled = !ready;
-  el.btnRun.textContent = S.running ? "Berhenti" : "Mulai pantau";
-  el.btnRun.classList.toggle("stop", S.running);
-
-  el.btnDraw.setAttribute("aria-pressed", String(S.drawing));
-  el.btnDraw.querySelector("span").textContent = S.drawing ? "Selesai" : "Trotoar";
-  el.btnHeat.setAttribute("aria-pressed", String(S.heat));
-  el.btnTrail.setAttribute("aria-pressed", String(S.trail));
+  el.btnPause.disabled = !(S.running || (S.model === "siap" && sourceReady()));
+  el.icoPause.hidden = !S.running; el.icoPlay.hidden = S.running;
+  el.btnPause.setAttribute("aria-label", S.running ? "Jeda" : "Lanjutkan");
+  el.btnFlip.hidden = !(S.kind === "camera" && S.camReady && S.camCount > 1);
+  el.btnAuto.hidden = !S.polys.length;
+  el.btnDraw.textContent = S.drawing ? "Batalkan gambar" : "Gambar area trotoar";
   el.stage.classList.toggle("drawing", S.drawing);
   el.drawPanel.hidden = !S.drawing;
-  syncBanner();
-  el.swChip.hidden = !S.polys.length;
-  updateState();
+  renderStatus(); updateState();
 }
 
 function detachVideo() {
@@ -167,22 +179,22 @@ function detachVideo() {
   S.camReady = false; S.videoReady = false;
 }
 
-function selectKind(kind) {
-  if (S.running || kind === S.kind) return;
+async function selectKind(kind) {
+  if (kind === S.kind) return;
+  if (S.running) await stop();
   detachVideo();
-  S.kind = kind;
+  S.kind = kind; S.go = false;
   S.manual = kind !== "camera";                           // kembali ke tab Kamera = mode langsung aktif lagi
   if (kind === "video" && S.videoUrl) attachVideo();      // berkas yang dipilih sebelumnya dipasang lagi
   notify("");
-  fitView();
   refreshUI();
   if (kind === "camera" && pref.auto) recover();
 }
 
-/* ------------------------------------------------------------------ kamera browser */
+/* ------------------------------------------------------------------ kamera */
 function cameraError(e) {
   switch (e && e.name) {
-    case "NotAllowedError": return "Izin kamera ditolak. Izinkan kamera untuk alamat ini di pengaturan browser, lalu tekan Nyalakan kamera lagi.";
+    case "NotAllowedError": return "Izin kamera ditolak. Izinkan kamera untuk alamat ini di pengaturan browser, lalu coba lagi.";
     case "NotFoundError": return "Tidak ada kamera yang terdeteksi di perangkat ini.";
     case "NotReadableError": return "Kamera sedang dipakai aplikasi lain. Tutup aplikasi itu, lalu coba lagi.";
     case "OverconstrainedError": return "Kamera yang dipilih tidak tersedia. Pilih kamera lain.";
@@ -193,13 +205,17 @@ function cameraError(e) {
 async function listCameras(currentId) {
   try {
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    S.camCount = devs.length;
     el.camSelect.innerHTML = "";
+    const auto = document.createElement("option");
+    auto.value = ""; auto.textContent = "Otomatis (kamera belakang bila ada)";
+    el.camSelect.appendChild(auto);
     devs.forEach((d, i) => {
       const o = document.createElement("option");
       o.value = d.deviceId; o.textContent = d.label || `Kamera ${i + 1}`;
       el.camSelect.appendChild(o);
     });
-    if (currentId) el.camSelect.value = currentId;
+    if (currentId && el.camSelect.dataset.picked === "1") el.camSelect.value = currentId;
   } catch (_) { /* daftar kamera tidak wajib */ }
 }
 
@@ -212,7 +228,7 @@ function stopCamera() {
 
 function watchTrack(stream) {
   const t = stream.getVideoTracks()[0];
-  if (t) t.addEventListener("ended", onCameraLost);       // kamera dicabut, atau HP mematikannya saat tab di latar belakang
+  if (t) t.addEventListener("ended", onCameraLost);       // kamera dicabut, atau HP mematikannya saat aplikasi di latar belakang
 }
 
 async function startCamera() {
@@ -220,7 +236,7 @@ async function startCamera() {
   S.camBusy = true; S.camError = "";
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      S.camError = "Browser tidak mengizinkan kamera di alamat ini. Buka lewat http://localhost:8765 di laptop, atau pakai HTTPS (lihat README).";
+      S.camError = "Browser tidak mengizinkan kamera di alamat ini. Buka lewat http://localhost:8765 di laptop, atau lewat HTTPS (lihat README).";
       return;
     }
     stopCamera();
@@ -229,14 +245,13 @@ async function startCamera() {
     const id = el.camSelect.value;
     const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
     if (id) video.deviceId = { exact: id };
-    else video.facingMode = { ideal: "environment" };     // di HP, kamera belakang lebih dulu
+    else video.facingMode = { ideal: S.facing };           // di HP, kamera belakang lebih dulu
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
       el.video.srcObject = stream;
       await el.video.play();
       S.camReady = true;
       watchTrack(stream);
-      fitView();
       await listCameras(stream.getVideoTracks()[0].getSettings().deviceId);
     } catch (e) {
       S.camError = cameraError(e);
@@ -247,10 +262,25 @@ async function startCamera() {
   }
 }
 
-/* mode langsung: setelah kamera menyala dan model siap, pemantauan mulai sendiri */
+async function restartCamera() {                           // ganti kamera / balik kamera: hentikan dulu bila sedang memantau
+  if (S.running) await stop();
+  S.manual = false;
+  await startCamera();
+  maybeAutoStart();
+}
+function flipCamera() {
+  S.facing = S.facing === "environment" ? "user" : "environment";
+  el.camSelect.value = ""; el.camSelect.dataset.picked = "0";
+  restartCamera();
+}
+
+/* mode langsung: setelah sumber siap dan model siap, pemantauan mulai sendiri */
 function maybeAutoStart() {
-  if (!pref.auto || S.manual || S.running || S.starting || S.kind !== "camera" || !S.camReady || S.model !== "siap") return;
-  start();
+  if (S.running || S.starting || S.manual || S.model !== "siap") return;
+  const ok = S.kind === "camera" ? pref.auto && S.camReady
+    : S.kind === "video" ? S.go && S.videoReady
+    : S.go && el.streamUrl.value.trim() !== "";
+  if (ok) start();
 }
 async function recover() {
   if (!pref.auto || S.manual || S.kind !== "camera" || S.running || S.camReady || S.camBusy) { maybeAutoStart(); return; }
@@ -271,22 +301,24 @@ function attachVideo() {
   el.video.loop = false;
   el.video.src = S.videoUrl;
   S.videoReady = false;
-  el.video.onloadeddata = () => { S.videoReady = true; refreshUI(); };
+  el.video.onloadeddata = () => { S.videoReady = true; refreshUI(); maybeAutoStart(); };
   el.video.onerror = () => { S.videoReady = false; notify("Video tidak bisa diputar di browser. Coba berkas .mp4 (H.264).", true); refreshUI(); };
 }
 
-function openVideoFile(file) {
+async function openVideoFile(file) {
   if (!file) return;
+  if (S.running) await stop();
   if (S.videoUrl) URL.revokeObjectURL(S.videoUrl);
   S.videoUrl = URL.createObjectURL(file);
-  el.videoName.textContent = file.name;
-  el.videoName.title = file.name;
+  el.videoName.textContent = file.name; el.videoName.title = file.name;
+  S.go = true; S.manual = false;                            // memilih berkas = ingin langsung dianalisis
   attachVideo();
   notify("");
+  hideSheet();
   refreshUI();
 }
 
-/* ------------------------------------------------------------------ bunyi, suara, notifikasi, layar tetap menyala */
+/* ------------------------------------------------------------------ bunyi, suara, getar, notifikasi, layar tetap menyala */
 let audio = null;
 function unlockAudio() {
   try {
@@ -316,10 +348,12 @@ function speak(text) {
 }
 function announce(a) {
   const msg = `${cap(a.kelas)} parkir di trotoar`;
+  const tapped = !navigator.userActivation || navigator.userActivation.hasBeenActive;      // getar hanya boleh setelah layar pernah disentuh
+  if (pref.alert !== "mati" && tapped) { try { if (navigator.vibrate) navigator.vibrate([220, 100, 220]); } catch (_) { /* tanpa getar */ } }
   if (pref.alert === "bip") beep();
   else if (pref.alert === "suara") speak(`Peringatan. ${msg}.`);
   if (pref.notify && document.hidden && "Notification" in window && Notification.permission === "granted") {
-    try { new Notification("Sidewalk Sentinel", { body: `${msg} · diam ${Math.round(a.dwell_s)} detik`, icon: "/static/favicon.svg", tag: "ss-alert" }); } catch (_) { /* abaikan */ }
+    try { new Notification("Sidewalk Sentinel", { body: `${msg} · diam ${Math.round(a.dwell_s)} detik`, icon: "/static/icon-192.png", tag: "ss-alert" }); } catch (_) { /* abaikan */ }
   }
 }
 async function keepAwake(on) {
@@ -333,31 +367,25 @@ async function keepAwake(on) {
 document.addEventListener("visibilitychange", () => { if (document.hidden) return; if (S.running) keepAwake(true); else recover(); });
 
 /* ------------------------------------------------------------------ mulai & berhenti */
-function resetTelemetry() {
-  S.vis.clear(); S.trails.clear();
-  S.hist = { veh: [], side: [], park: [], fps: [] }; S.histT = 0; S.mixKey = "";
-  [el.sparkVeh, el.sparkSide, el.sparkPark, el.sparkFps].forEach((s) => { s.innerHTML = ""; });
-  el.mix.textContent = "";
-  el.uptime.textContent = "00:00";
-  setSummary(null);
+function resetSession() {
+  S.vis.clear(); S.payload = null; S.payloadSeen = false;
+  el.metrics.hidden = true;
 }
 
 async function start() {
   if (S.starting) return;
-  S.starting = true; S.manual = false;
+  S.starting = true; S.manual = false; S.go = false;
   try { await startNow(); } finally { S.starting = false; }
 }
 
 async function startNow() {
   notify("");
   unlockAudio();
-  resetTelemetry();
-  hctx.clearRect(0, 0, heat.width, heat.height);
+  resetSession();
   try {
     if (S.kind === "stream") {
       const src = el.streamUrl.value.trim();
       if (!src) { notify("Isi dulu indeks webcam (0) atau alamat stream.", true); return; }
-      el.btnRun.disabled = true;
       await api("/api/start", { kind: "server", source: src });
       S.running = true; S.lastSeq = 0; S.startedAt = Date.now();
       el.stream.src = "/stream.mjpg?" + Date.now();
@@ -374,13 +402,14 @@ async function startNow() {
     keepAwake(true);
     poke();
   } catch (e) {
-    S.running = false; S.manual = true;                  // gagal mulai: jangan dicoba ulang terus-menerus
+    S.running = false; S.manual = true;                    // gagal mulai: jangan dicoba ulang terus-menerus
     notify(e.message, true);
   }
   refreshUI();
 }
 
 function userStop() { S.manual = true; return stop(); }
+function toggleRun() { if (!el.btnPause.disabled) (S.running ? userStop() : start()); }
 
 async function stop(msg) {
   const wasStream = S.kind === "stream";
@@ -388,9 +417,7 @@ async function stop(msg) {
   if (S.kind === "video") el.video.pause();
   try { await api("/api/stop"); } catch (_) { /* server mungkin sudah berhenti */ }
   if (wasStream) el.stream.removeAttribute("src");
-  S.payload = null; S.payloadSeen = false;
-  resetTelemetry(); showAlertState([]);
-  el.metrics.hidden = true;
+  resetSession();
   el.stage.dataset.idle = "0";
   keepAwake(false);
   notify(msg || "");
@@ -426,7 +453,7 @@ async function analyseLoop(token) {
   }
 }
 
-/* ------------------------------------------------------------------ hasil dari server (kamera di sisi server) */
+/* hasil dari server (kamera di sisi server) */
 async function pollResults(token) {
   while (S.running && token === S.token) {
     try {
@@ -437,105 +464,18 @@ async function pollResults(token) {
   }
 }
 
-/* ------------------------------------------------------------------ hasil deteksi -> telemetri, banner, daftar */
-function setSummary(p) {
-  const s = p ? p.summary : { kendaraan: 0, di_trotoar: 0, parkir: 0 };
-  el.nVeh.textContent = s.kendaraan; el.nSide.textContent = s.di_trotoar; el.nPark.textContent = s.parkir;
-  el.warn.classList.toggle("hot", s.parkir > 0);
-}
-
-function drawSpark(svg, arr, floor) {
-  if (arr.length < 2) { svg.innerHTML = ""; return; }
-  const W = 120, H = 30, max = Math.max(floor, ...arr);
-  const line = arr.map((v, i) => `${i ? "L" : "M"}${((i / (arr.length - 1)) * W).toFixed(1)},${(H - 2 - (v / max) * (H - 6)).toFixed(1)}`).join("");
-  svg.innerHTML = `<path class="area" d="${line}L${W},${H}L0,${H}Z"/><path class="line" d="${line}"/>`;
-}
-
-function pushHistory(p) {
-  const now = performance.now();
-  if (now - S.histT < 700) return;
-  S.histT = now;
-  const s = p.summary, h = S.hist;
-  [["veh", s.kendaraan], ["side", s.di_trotoar], ["park", s.parkir], ["fps", p.fps]].forEach(([k, v]) => {
-    h[k].push(v); if (h[k].length > 80) h[k].shift();
-  });
-  drawSpark(el.sparkVeh, h.veh, 3); drawSpark(el.sparkSide, h.side, 3);
-  drawSpark(el.sparkPark, h.park, 2); drawSpark(el.sparkFps, h.fps, 5);
-}
-
-function renderMix(p) {
-  const counts = {};
-  p.vehicles.forEach((v) => { counts[v.kelas] = (counts[v.kelas] || 0) + 1; });
-  const key = JSON.stringify(counts);
-  if (key === S.mixKey) return;
-  S.mixKey = key;
-  el.mix.textContent = "";
-  const names = Object.keys(counts).sort();
-  if (!names.length) { const c = document.createElement("span"); c.className = "chip"; c.textContent = "Belum ada kendaraan"; el.mix.append(c); return; }
-  names.forEach((k) => {
-    const c = document.createElement("span"); c.className = "chip";
-    const b = document.createElement("b"); b.textContent = counts[k];
-    c.append(b, " " + k); el.mix.append(c);
-  });
-}
-
-function syncBanner() {
-  el.banner.hidden = el.banner.dataset.on !== "1" || S.drawing;     // saat menggambar, panel gambar yang tampil
-}
-
-function showAlertState(confirmed) {
-  S.alerting = S.running && confirmed.length > 0;
-  el.banner.dataset.on = S.alerting ? "1" : "0";
-  syncBanner();
-  updateState();
-  if (!confirmed.length) return;
-  const v = confirmed[0];
-  el.bannerText.textContent = confirmed.length === 1
-    ? `${cap(v.kelas)}${v.id != null ? " #" + v.id : ""} parkir di trotoar · diam ${Math.round(v.dwell)} dtk`
-    : `${confirmed.length} kendaraan parkir di trotoar`;
-}
-
-/* jejak gerak & peta panas: dihitung dari setiap hasil, digambar oleh frame() */
-const heat = document.createElement("canvas");
-heat.width = 384; heat.height = 216;
-const hctx = heat.getContext("2d");
-
-function recordMotion(p) {
-  const now = performance.now();
-  p.vehicles.forEach((v) => {
-    const [x0, y0, x1, y1] = v.box;
-    if (v.id != null) {
-      let tr = S.trails.get(v.id);
-      if (!tr) { tr = { pts: [], last: now }; S.trails.set(v.id, tr); }
-      tr.last = now;
-      const x = (x0 + x1) / 2, y = y1, q = tr.pts[tr.pts.length - 1];
-      if (!q || Math.hypot(x - q.x, y - q.y) > 0.003) { tr.pts.push({ x, y, t: now }); if (tr.pts.length > 40) tr.pts.shift(); }
-    }
-    if (v.di_trotoar) {
-      const x = ((x0 + x1) / 2) * heat.width, y = (y0 + (y1 - y0) * 0.8) * heat.height;
-      const rad = Math.max(6, (x1 - x0) * heat.width * 0.4);
-      const g = hctx.createRadialGradient(x, y, 0, x, y, rad);
-      g.addColorStop(0, "rgba(255,110,70,.045)"); g.addColorStop(1, "rgba(255,110,70,0)");
-      hctx.globalCompositeOperation = "lighter"; hctx.fillStyle = g;
-      hctx.fillRect(x - rad, y - rad, rad * 2, rad * 2);
-    }
-  });
-  for (const [id, tr] of S.trails) if (now - tr.last > 2500) S.trails.delete(id);
-}
-
+/* ------------------------------------------------------------------ hasil deteksi -> status, kejadian */
 function onPayload(p) {
   S.payload = p;
-  setSummary(p);
-  showAlertState(p.vehicles.filter((v) => v.status === "PARKIR_TERKONFIRMASI"));
+  const confirmed = p.vehicles.filter((v) => v.status === "PARKIR_TERKONFIRMASI");
+  S.alerting = S.running && confirmed.length > 0;
   el.metrics.hidden = false;
   el.perfFps.textContent = fmt1(p.fps); el.perfLat.textContent = p.latency_ms;
   el.evDwell.textContent = Math.round(p.min_dwell);
-  renderMix(p); pushHistory(p); recordMotion(p);
-  if (!S.payloadSeen) { S.payloadSeen = true; fitView(); }
+  renderStatus(); updateState();
   if (p.alerts !== S.alertCount) loadAlerts(true);
 }
 
-/* ------------------------------------------------------------------ kejadian & tinjauan benar/salah */
 function renderPrecision() {
   const c = { benar: 0, salah: 0 };
   S.items.forEach((a) => { if (a.label in c) c[a.label]++; });
@@ -595,6 +535,8 @@ function renderEvents(fresh) {
   el.evCount.textContent = S.items.length;
   el.evEmpty.hidden = S.items.length > 0;
   el.csv.hidden = S.items.length === 0;
+  if (S.sheet === el.sheetEvents) S.seenCount = S.items.length;
+  el.btnEvents.dataset.new = S.items.length > S.seenCount ? "1" : "0";
   renderPrecision();
 }
 
@@ -605,6 +547,7 @@ async function loadAlerts(announceNew) {
   const fresh = items.filter((a) => !S.seenAlerts.has(a.id));
   S.items = items; S.alertCount = items.length;
   items.forEach((a) => S.seenAlerts.add(a.id));
+  if (S.firstAlerts) { S.firstAlerts = false; S.seenCount = items.length; }   // kejadian lama dari sesi sebelumnya dianggap sudah dilihat
   renderEvents(announceNew ? new Set(fresh.map((a) => a.id)) : new Set());
   if (announceNew && fresh.length) announce(fresh[0]);
 }
@@ -617,27 +560,13 @@ function mediaRect() {
   else { vw = el.video.videoWidth; vh = el.video.videoHeight; }
   if ((!vw || !vh) && S.payload) { vw = S.payload.w; vh = S.payload.h; }
   if (!vw || !vh) return null;
-  const s = Math.min(cw / vw, ch / vh);
+  const s = NARROW.matches ? Math.max(cw / vw, ch / vh) : Math.min(cw / vw, ch / vh);
   return { x: (cw - vw * s) / 2, y: (ch - vh * s) / 2, w: vw * s, h: vh * s };
 }
 
-/* di layar sempit, tinggi panggung mengikuti rasio gambar (video HP biasanya tegak) */
-const NARROW = window.matchMedia("(max-width: 860px)");
-function fitView() {
-  let vw = 0, vh = 0;
-  if (S.kind === "stream") { vw = el.stream.naturalWidth; vh = el.stream.naturalHeight; }
-  else { vw = el.video.videoWidth; vh = el.video.videoHeight; }
-  if ((!vw || !vh) && S.payload) { vw = S.payload.w; vh = S.payload.h; }
-  el.view.style.aspectRatio = NARROW.matches && vw && vh ? String(clamp(vw / vh, 0.6, 1.8)) : "";
-}
-NARROW.addEventListener("change", fitView);
-el.video.addEventListener("loadedmetadata", fitView);
-el.video.addEventListener("resize", fitView);
-
 function sizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  const w = el.view.clientWidth, h = el.view.clientHeight;
-  el.canvas.width = Math.round(w * dpr); el.canvas.height = Math.round(h * dpr);
+  el.canvas.width = Math.round(el.view.clientWidth * dpr); el.canvas.height = Math.round(el.view.clientHeight * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 new ResizeObserver(sizeCanvas).observe(el.view);
@@ -668,14 +597,12 @@ function smoothBox(v, dt) {
   return s.box;
 }
 
-function drawTrail(id, tr, color, now) {
-  const pts = tr.pts.filter((q) => now - q.t < 4000);
-  for (let i = 1; i < pts.length; i++) {
-    const age = (now - pts[i].t) / 4000;
-    ctx.strokeStyle = hexA(color, 0.75 * (1 - age));
-    ctx.lineWidth = 2.4 * (1 - age * 0.6) + 0.6;
-    ctx.beginPath(); ctx.moveTo(pts[i - 1].px, pts[i - 1].py); ctx.lineTo(pts[i].px, pts[i].py); ctx.stroke();
-  }
+function corners(sx, sy, ex, ey, L) {
+  ctx.beginPath();
+  [[sx, sy, 1, 1], [ex, sy, -1, 1], [sx, ey, 1, -1], [ex, ey, -1, -1]].forEach(([x, y, a, c]) => {
+    ctx.moveTo(x + a * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + c * L);
+  });
+  ctx.stroke();
 }
 
 function drawVehicle(v, r, now, dt) {
@@ -683,23 +610,22 @@ function drawVehicle(v, r, now, dt) {
   const danger = v.status === "PARKIR_TERKONFIRMASI" || v.status === "TERINDIKASI_PARKIR";
   const b = smoothBox(v, dt);
   const sx = r.x + b[0] * r.w, sy = r.y + b[1] * r.h, ex = r.x + b[2] * r.w, ey = r.y + b[3] * r.h;
-  const w = ex - sx, h = ey - sy;
+  const w = ex - sx, h = ey - sy, L = clamp(Math.min(w, h) * 0.28, 10, 22);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
 
+  if (v.status === "DI_JALAN") {                                // kendaraan di jalan: cukup isyarat tipis, tanpa label
+    ctx.lineWidth = 1.6; ctx.strokeStyle = hexA(st.color, 0.4); corners(sx, sy, ex, ey, L);
+    return;
+  }
   if (v.poly) {                                                // bentuk segmentasi, ikut bergeser bersama kotak yang dihaluskan
     tracePolys([v.poly], r, true, (b[0] - v.box[0]) * r.w, (b[1] - v.box[1]) * r.h);
     ctx.fillStyle = hexA(st.color, danger ? 0.28 : 0.15); ctx.fill();
-    ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.strokeStyle = hexA(st.color, 0.9); ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = hexA(st.color, 0.9); ctx.stroke();
   }
-
-  const L = clamp(Math.min(w, h) * 0.28, 10, 22);              // kurung sudut ala HUD
   ctx.save();
-  ctx.lineWidth = 2.6; ctx.lineCap = "round"; ctx.lineJoin = "round";
-  ctx.strokeStyle = st.color; ctx.shadowColor = st.color; ctx.shadowBlur = danger ? 14 : 8;
-  ctx.beginPath();
-  [[sx, sy, 1, 1], [ex, sy, -1, 1], [sx, ey, 1, -1], [ex, ey, -1, -1]].forEach(([x, y, a, c]) => {
-    ctx.moveTo(x + a * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + c * L);
-  });
-  ctx.stroke(); ctx.restore();
+  ctx.lineWidth = 2.6; ctx.strokeStyle = st.color; ctx.shadowColor = st.color; ctx.shadowBlur = danger ? 14 : 8;
+  corners(sx, sy, ex, ey, L);
+  ctx.restore();
 
   if (v.status === "PARKIR_TERKONFIRMASI" && !REDUCED) {       // denyut peringatan
     const ph = (now / 1100) % 1, g = 4 + ph * 18;
@@ -713,16 +639,17 @@ function drawVehicle(v, r, now, dt) {
   else if (v.status === "PARKIR_TERKONFIRMASI") { frac = 1; label += ` · parkir ${Math.round(v.dwell)} dtk`; }
   else label += ` · ${st.text}`;
 
+  const vw = el.view.clientWidth, vh = el.view.clientHeight;
   ctx.font = `600 12.5px ${FONT}`;
   const th = 26, padL = 10, ringW = 20, tw = ctx.measureText(label).width + padL + ringW + 10;
-  const x = clamp(sx, r.x + 2, r.x + r.w - tw - 2);
-  let y = sy - th - 6; if (y < r.y + 2) y = ey + 6;
+  const x = clamp(sx, 2, Math.max(2, vw - tw - 2));
+  let y = sy - th - 6; if (y < 2) y = Math.min(vh - th - 2, ey + 6);
   roundRect(x, y, tw, th, 8); ctx.fillStyle = "rgba(7,10,20,.84)"; ctx.fill();
   ctx.lineWidth = 1; ctx.strokeStyle = hexA(st.color, 0.7); ctx.stroke();
   const cx = x + padL + 6, cy = y + th / 2;
   if (frac === null) { ctx.beginPath(); ctx.arc(cx, cy, 3.6, 0, 7); ctx.fillStyle = st.color; ctx.fill(); }
   else {
-    ctx.lineWidth = 2.6; ctx.lineCap = "round";
+    ctx.lineWidth = 2.6;
     ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 7); ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.stroke();
     ctx.beginPath(); ctx.arc(cx, cy, 6, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2); ctx.strokeStyle = st.color; ctx.stroke();
   }
@@ -768,33 +695,19 @@ function frame(now) {
       if (S.polys.length) drawShapes(S.polys, r, false);
       drawDraft(r);
     } else if (p) {
-      if (S.heat) { ctx.save(); ctx.globalAlpha = 0.9; ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high"; ctx.drawImage(heat, r.x, r.y, r.w, r.h); ctx.restore(); }
       if (p.sidewalk.length) {
         tracePolys(p.sidewalk, r);
-        ctx.fillStyle = "rgba(123,140,255,.16)"; ctx.fill("evenodd");
-        ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(160,175,255,.85)";
+        ctx.fillStyle = "rgba(123,140,255,.1)"; ctx.fill("evenodd");
+        ctx.lineWidth = 1.4; ctx.strokeStyle = "rgba(160,175,255,.6)";
         if (!REDUCED) { ctx.setLineDash([8, 6]); ctx.lineDashOffset = -((now / 60) % 14); }
         ctx.stroke(); ctx.setLineDash([]);
       }
-      if (S.trail) {
-        for (const [id, tr] of S.trails) {
-          const v = p.vehicles.find((q) => q.id === id);
-          tr.pts.forEach((q) => { q.px = r.x + q.x * r.w; q.py = r.y + q.y * r.h; });
-          drawTrail(id, tr, (STATUS[v && v.status] || STATUS.DI_JALAN).color, performance.now());
-        }
-      }
-      // kendaraan yang bukan "di jalan" digambar belakangan agar tidak tertutup
       const order = (v) => (v.status === "DI_JALAN" ? 0 : v.status === "PARKIR_TERKONFIRMASI" ? 2 : 1);
       [...p.vehicles].sort((a, b) => order(a) - order(b)).forEach((v) => drawVehicle(v, r, now, dt));
       for (const [id, s] of S.vis) if (s.f !== S.frameNo) S.vis.delete(id);
     } else if (S.polys.length) {
       drawShapes(S.polys, r, false);
     }
-  }
-  if (S.running) {
-    const s = Math.floor((Date.now() - S.startedAt) / 1000);
-    const txt = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-    if (el.uptime.textContent !== txt) el.uptime.textContent = txt;
   }
   requestAnimationFrame(frame);
 }
@@ -803,9 +716,10 @@ function frame(now) {
 function toggleDraw() {
   if (S.drawing) { cancelDraw(); return; }
   if (!mediaRect() || !hasPicture()) {
-    notify("Nyalakan kamera, buka video, atau mulai pemantauan dulu supaya ada gambar yang bisa digambari.", true);
+    notify("Nyalakan kamera atau buka video dulu supaya ada gambar yang bisa digambari.", true);
     return;
   }
+  hideSheet();
   notify(""); S.drawing = true; S.draft = []; S.shapes = []; refreshUI();
 }
 function cancelDraw() { S.drawing = false; S.draft = []; S.shapes = []; refreshUI(); }
@@ -837,25 +751,23 @@ el.canvas.addEventListener("click", (e) => {
   if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
   if (S.draft.length >= 3) {
     const f = S.draft[0];
-    if (Math.hypot((f[0] - nx) * r.w, (f[1] - ny) * r.h) < 12) { closeShape(); return; }
+    if (Math.hypot((f[0] - nx) * r.w, (f[1] - ny) * r.h) < 14) { closeShape(); return; }
   }
   S.draft.push([nx, ny]);
 });
 
-/* ------------------------------------------------------------------ alat tambahan: peta panas, jejak, foto, layar penuh */
-function toggleHeat() { S.heat = !S.heat; refreshUI(); }
-function toggleTrail() { S.trail = !S.trail; pref.trail = S.trail; savePrefs(); refreshUI(); }
-
+/* ------------------------------------------------------------------ foto, layar penuh, pasang aplikasi */
 function snapshot() {
   const r = mediaRect();
   if (!r || !hasPicture()) { notify("Belum ada gambar untuk difoto.", true); return; }
   const src = S.kind === "stream" ? el.stream : el.video, dpr = window.devicePixelRatio || 1;
   const c = document.createElement("canvas");
-  c.width = Math.round(r.w * dpr); c.height = Math.round(r.h * dpr);
+  c.width = Math.round(el.view.clientWidth * dpr); c.height = Math.round(el.view.clientHeight * dpr);
   try {
     const g = c.getContext("2d");
-    g.drawImage(src, 0, 0, c.width, c.height);
-    g.drawImage(el.canvas, r.x * dpr, r.y * dpr, r.w * dpr, r.h * dpr, 0, 0, c.width, c.height);
+    g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(src, r.x * dpr, r.y * dpr, r.w * dpr, r.h * dpr);
+    g.drawImage(el.canvas, 0, 0, c.width, c.height);
   } catch (e) { notify(`Gambar tidak bisa disimpan: ${e.message}`, true); return; }
   c.toBlob((blob) => {
     if (!blob) { notify("Gambar tidak bisa disimpan.", true); return; }
@@ -871,33 +783,56 @@ function snapshot() {
 
 function toggleFull() {
   const ask = el.stage.requestFullscreen || el.stage.webkitRequestFullscreen;
-  if (!document.fullscreenElement && !ask) { notify("Browser ini tidak mendukung layar penuh. Putar HP ke mode lanskap.", true); return; }
+  if (!document.fullscreenElement && !ask) { notify("Browser ini tidak mendukung layar penuh. Pasang sebagai aplikasi untuk tampilan penuh.", true); return; }
   const p = document.fullscreenElement ? document.exitFullscreen() : ask.call(el.stage);
-  if (p && p.catch) p.catch(() => notify("Browser menolak layar penuh. Tekan tombolnya sekali lagi.", true));
+  if (p && p.catch) p.catch(() => notify("Browser menolak layar penuh. Coba lagi.", true));
 }
 
-/* dok melebur saat memantau supaya gambar tampil penuh; muncul lagi begitu pointer bergerak atau layar disentuh */
+let installEvent = null;
+const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function refreshInstall() {
+  el.btnInstall.hidden = !installEvent || standalone();
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  el.installHint.hidden = !(ios && !standalone());
+  if (!el.installHint.hidden) el.installHint.textContent = "Di iPhone: ketuk tombol Bagikan di Safari, lalu pilih Tambah ke Layar Utama.";
+}
+window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvent = e; refreshInstall(); });
+window.addEventListener("appinstalled", () => { installEvent = null; refreshInstall(); notify("Aplikasi terpasang."); });
+el.btnInstall.addEventListener("click", async () => {
+  if (!installEvent) return;
+  installEvent.prompt();
+  try { await installEvent.userChoice; } catch (_) { /* abaikan */ }
+  installEvent = null; refreshInstall();
+});
+
+/* panel muncul hanya saat diminta; antarmuka lain melebur saat memantau supaya gambar tampil penuh */
+function showSheet(which) {
+  hideSheet(true);
+  const sh = which === "events" ? el.sheetEvents : el.sheetSettings;
+  sh.hidden = false; el.scrim.hidden = false; S.sheet = sh;
+  requestAnimationFrame(() => sh.classList.add("in"));
+  if (which === "events") { S.seenCount = S.items.length; el.btnEvents.dataset.new = "0"; }
+  el.stage.dataset.idle = "0";
+  (which === "events" ? el.closeEvents : el.closeSettings).focus({ preventScroll: true });
+}
+function hideSheet(instant) {
+  const sh = S.sheet;
+  if (!sh) return;
+  S.sheet = null;
+  sh.classList.remove("in"); el.scrim.hidden = true;
+  const done = () => { if (!sh.classList.contains("in")) sh.hidden = true; };
+  if (instant) done(); else setTimeout(done, 300);
+}
+function toggleSheet(which) { (S.sheet === (which === "events" ? el.sheetEvents : el.sheetSettings)) ? hideSheet() : showSheet(which); }
+
 function poke() {
   el.stage.dataset.idle = "0";
   clearTimeout(S.idleTimer);
   S.idleTimer = setTimeout(() => {
-    if (S.running && !S.drawing && !el.dock.matches(":hover, :focus-within")) el.stage.dataset.idle = "1";
-  }, 3500);
+    if (S.running && !S.drawing && !S.sheet) el.stage.dataset.idle = "1";
+  }, 4000);
 }
 ["pointermove", "pointerdown", "keydown"].forEach((ev) => el.stage.addEventListener(ev, poke, { passive: true }));
-
-/* ------------------------------------------------------------------ laci pengaturan */
-function openDrawer() {
-  el.drawer.hidden = false; el.scrim.hidden = false;
-  requestAnimationFrame(() => el.drawer.classList.add("in"));
-  el.drawerClose.focus();
-}
-function closeDrawer() {
-  if (el.drawer.hidden) return;
-  el.drawer.classList.remove("in"); el.scrim.hidden = true;
-  setTimeout(() => { if (!el.drawer.classList.contains("in")) el.drawer.hidden = true; }, 260);
-  el.btnSettings.focus();
-}
 
 let settingsTimer = null;
 function sendSettings() {
@@ -940,33 +875,30 @@ async function pollStatus() {
 
 /* ------------------------------------------------------------------ pendengar & pintasan */
 el.tabs.forEach((b) => b.addEventListener("click", () => selectKind(b.dataset.kind)));
-el.seg.addEventListener("keydown", (e) => {
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-  const i = [...el.tabs].findIndex((b) => b.dataset.kind === S.kind);
-  const next = el.tabs[(i + (e.key === "ArrowRight" ? 1 : el.tabs.length - 1)) % el.tabs.length];
-  selectKind(next.dataset.kind); next.focus();
-});
-el.camOn.addEventListener("click", () => { S.manual = false; startCamera().then(maybeAutoStart); });
-el.streamUrl.addEventListener("input", refreshUI);
-el.streamUrl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !el.btnRun.disabled) start(); });
+el.camSelect.addEventListener("change", () => { el.camSelect.dataset.picked = el.camSelect.value ? "1" : "0"; restartCamera(); });
 el.emptyRetry.addEventListener("click", () => { S.manual = false; recover(); });
+el.btnFlip.addEventListener("click", flipCamera);
+el.btnPause.addEventListener("click", toggleRun);
+el.btnSettings.addEventListener("click", () => toggleSheet("settings"));
+el.btnEvents.addEventListener("click", () => toggleSheet("events"));
+el.closeSettings.addEventListener("click", () => hideSheet());
+el.closeEvents.addEventListener("click", () => hideSheet());
+el.scrim.addEventListener("click", () => hideSheet());
 el.videoPick.addEventListener("click", () => el.videoFile.click());
 el.videoFile.addEventListener("change", () => openVideoFile(el.videoFile.files[0]));
-el.btnRun.addEventListener("click", () => (S.running ? userStop() : start()));
+el.streamUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") el.streamGo.click(); });
+el.streamGo.addEventListener("click", () => {
+  if (!el.streamUrl.value.trim()) { notify("Isi dulu indeks webcam (0) atau alamat stream.", true); return; }
+  S.go = true; S.manual = false; hideSheet(); maybeAutoStart();
+});
 el.btnDraw.addEventListener("click", toggleDraw);
-el.btnHeat.addEventListener("click", toggleHeat);
-el.btnTrail.addEventListener("click", toggleTrail);
+el.btnAuto.addEventListener("click", backToAuto);
 el.btnShot.addEventListener("click", snapshot);
+el.btnFull.addEventListener("click", toggleFull);
 el.drawUndo.addEventListener("click", undoPoint);
 el.drawClose.addEventListener("click", closeShape);
 el.drawCancel.addEventListener("click", cancelDraw);
 el.drawApply.addEventListener("click", applyDraw);
-el.btnAuto.addEventListener("click", backToAuto);
-el.btnFull.addEventListener("click", toggleFull);
-el.btnHelp.addEventListener("click", () => el.help.showModal());
-el.btnSettings.addEventListener("click", openDrawer);
-el.drawerClose.addEventListener("click", closeDrawer);
-el.scrim.addEventListener("click", closeDrawer);
 el.setDwell.addEventListener("input", () => { el.oDwell.textContent = `${el.setDwell.value} dtk`; sendSettings(); });
 el.setTau.addEventListener("input", () => { el.oTau.textContent = fmt2(el.setTau.value); sendSettings(); });
 el.setComp.addEventListener("change", sendSettings);
@@ -989,38 +921,38 @@ el.setNotify.addEventListener("change", async () => {
   savePrefs();
 });
 el.btnRefresh.addEventListener("click", async () => { try { await api("/api/refresh"); notify("Trotoar akan dihitung ulang pada gambar berikutnya."); } catch (e) { notify(e.message, true); } });
-[el.lightbox, el.help].forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
+el.lightbox.addEventListener("click", (e) => { if (e.target === el.lightbox) el.lightbox.close(); });
+NARROW.addEventListener("change", sizeCanvas);
 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const tag = document.activeElement.tagName;
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag) || document.querySelector("dialog[open]")) return;
-  if (e.key === "Escape" && !el.drawer.hidden) { closeDrawer(); return; }
+  if (e.key === "Escape" && S.sheet) { hideSheet(); return; }
   if (S.drawing) {
     if (e.key === "Enter" && tag !== "BUTTON") { closeShape(); e.preventDefault(); return; }
     if (e.key === "Backspace") { undoPoint(); e.preventDefault(); return; }
     if (e.key === "Escape") { cancelDraw(); return; }
   }
   const k = e.key.toLowerCase();
-  if (k === " " && tag !== "BUTTON") { if (!el.btnRun.disabled) (S.running ? userStop() : start()); e.preventDefault(); }
+  if (k === " " && tag !== "BUTTON") { toggleRun(); e.preventDefault(); }
+  else if (k === "e") toggleSheet("events");
   else if (k === "d") toggleDraw();
-  else if (k === "h") toggleHeat();
-  else if (k === "t") toggleTrail();
-  else if (k === "s") snapshot();
   else if (k === "f") toggleFull();
-  else if (k === "?") el.help.showModal();
 });
 
 (async function init() {
   loadPrefs();
-  S.trail = pref.trail;
-  el.setAlert.value = pref.alert;
   el.setAuto.checked = pref.auto;
+  el.setAlert.value = pref.alert;
   el.setNotify.checked = pref.notify && "Notification" in window && Notification.permission === "granted";
+  if (!("Notification" in window)) el.setNotify.closest("label").hidden = true;
   if (!el.stage.requestFullscreen && !el.stage.webkitRequestFullscreen) el.btnFull.hidden = true;
   sizeCanvas();
   refreshUI();
+  refreshInstall();
   requestAnimationFrame(frame);
+  if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => { /* aplikasi tetap jalan tanpa SW */ });
   // Halaman dimuat ulang saat server masih memantau: sambungkan lagi (sumber server) atau bersihkan (sumber browser).
   try {
     const st = await (await fetch("/api/status", { cache: "no-store" })).json();
