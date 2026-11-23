@@ -297,6 +297,38 @@ def cmd_train(args, **_):
     print(f"Selesai. Bobot terbaik: {Path(args.project) / args.name / 'weights' / 'best.pt'}")
 
 
+def cmd_data(args, **_):
+    from . import datasets as ds
+    try:
+        if args.data_cmd == "masks":
+            opts = dict(ds.PRESETS.get(args.preset, {}))
+            for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix", "label_id"):
+                v = getattr(args, k)
+                if v is not None:
+                    opts[k] = v
+            missing = [k for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix") if k not in opts]
+            if missing:
+                raise SystemExit("Pilih --preset cityscapes, atau isi " + ", ".join("--" + k.replace("_", "-") for k in missing) + ".")
+            rgb = tuple(int(x) for x in args.label_rgb.split(",")) if args.label_rgb else None
+            if rgb is not None and len(rgb) != 3:
+                raise SystemExit("--label-rgb harus berbentuk R,G,B, mis. 244,35,232.")
+            if rgb is not None:
+                opts.pop("label_id", None)
+            st = ds.masks_to_yolo(args.src, args.out, splits=tuple(args.splits.split(",")), max_side=args.max_side,
+                                  class_name=args.class_name, limit=args.limit, label_rgb=rgb, **opts)
+            print(f"Selesai: {st['gambar']} gambar ({st['dengan_kelas']} berisi {args.class_name}, {st['tanpa_kelas']} tanpa, "
+                  f"{st['poligon']} poligon) per split {st['per_split']}.")
+            if st["tanpa_gambar"] or st["mask_rusak"]:
+                print(f"Dilewati: {st['tanpa_gambar']} mask tanpa gambar pasangannya, {st['mask_rusak']} berkas tak terbaca.")
+            print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --epochs 100")
+        else:
+            cmap = dict(m.split("=", 1) for m in args.map or [])
+            st = ds.merge_yolo(args.src, args.out, class_map=cmap, names=args.names, keep_unmapped=args.keep_unmapped)
+            print(f"Selesai: gambar per split {st['gambar']}; instans per kelas {st['instans']}; dilewati {st['dilewati']} (semua labelnya terbuang).")
+    except (ValueError, FileNotFoundError) as e:
+        raise SystemExit(str(e))
+
+
 # ----------------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trotoar", description="Deteksi kendaraan parkir di trotoar (segmentasi citra)")
@@ -386,6 +418,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--project", default="runs"); sp.add_argument("--name", default="trotoar")
     sp.add_argument("--device")
     sp.set_defaults(func=cmd_train)
+
+    sp = sub.add_parser("data", help="siapkan dataset publik (Cityscapes/IDD/Mapillary/Roboflow) untuk latih YOLO")
+    dsub = sp.add_subparsers(dest="data_cmd", required=True)
+    m = dsub.add_parser("masks", help="mask piksel -> YOLO-seg satu kelas (mis. sidewalk)")
+    m.add_argument("--src", required=True, help="folder dataset hasil unduhan/ekstrak")
+    m.add_argument("--out", required=True, help="folder keluaran (berisi data.yaml)")
+    m.add_argument("--preset", choices=["cityscapes"], help="tata letak dan id kelas bawaan")
+    m.add_argument("--image-dir", help="folder gambar; boleh memuat {split}, mis. {split}/images")
+    m.add_argument("--mask-dir", help="folder mask; boleh memuat {split}, mis. {split}/labels")
+    m.add_argument("--image-suffix"); m.add_argument("--mask-suffix")
+    m.add_argument("--label-id", type=int, help="id kelas pada mask 1 kanal (Cityscapes sidewalk = 8)")
+    m.add_argument("--label-rgb", help="warna kelas pada mask berwarna (RGB penuh), R,G,B")
+    m.add_argument("--splits", default="train,val", help="nama folder split pada dataset (Mapillary: training,validation)"); m.add_argument("--class-name", default="sidewalk")
+    m.add_argument("--max-side", type=int, default=1280, help="sisi terpanjang gambar keluaran (hemat ruang)")
+    m.add_argument("--limit", type=int, help="batasi gambar per split (untuk uji coba cepat)")
+    g = dsub.add_parser("merge", help="gabung set berformat YOLO (ekspor Roboflow) dan ubah nama kelas")
+    g.add_argument("--src", action="append", required=True, help="folder ekspor YOLO; boleh diulang")
+    g.add_argument("--out", required=True)
+    g.add_argument("--map", action="append", metavar="LAMA=BARU", help="ubah nama kelas; yang tak dipetakan dibuang; boleh diulang")
+    g.add_argument("--names", nargs="+", help="urutan nama kelas akhir")
+    g.add_argument("--keep-unmapped", action="store_true", help="pertahankan kelas yang tak ada di --map")
+    sp.set_defaults(func=cmd_data)
     return p
 
 

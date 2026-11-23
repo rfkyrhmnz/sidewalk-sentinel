@@ -141,6 +141,9 @@ Tanpa layar (server): tambahkan `--no-window`.
 Melatih model trotoar: anotasi **satu kelas** (`sidewalk`) berformat YOLO-segmentation (Roboflow/CVAT), lalu
 `python main.py train --data data.yaml --epochs 100`. Pisahkan train/val/test **per lokasi**, bukan acak per frame.
 
+**Dataset publik** (Cityscapes, IDD, Mapillary Vistas untuk trotoar; set Roboflow untuk kendaraan di trotoar) tidak disimpan di repo.
+`python main.py data masks|merge` mengubah hasil unduhan menjadi data siap latih; panduan langkah demi langkah ada di [`datasets/README.md`](datasets/README.md).
+
 ## Evaluasi
 
 ```bash
@@ -162,9 +165,9 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (89 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (96 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
-  CLI, evaluasi, penanganan EXIF/video, serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
+  CLI, evaluasi, penanganan EXIF/video, konversi dataset (mask piksel ke YOLO-seg, gabung/ubah kelas set YOLO; data buatan), serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
   pengaturan, tinjauan benar/salah dan CSV-nya, manifes aplikasi, service worker, dan ikon (termasuk di mode `--remote`), kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.
 - **Tampilan aplikasi** dicoba di Chrome headless dengan kamera palsu bawaan Chrome dan deteksi tiruan, di layar laptop (1440×900) dan HP (390×844):
   buka halaman tanpa klik apa pun lalu kamera menyala dan pemantauan mulai sendiri, kapsul berganti aman/memastikan/parkir, daftar kejadian dan tinjauan
@@ -187,7 +190,8 @@ dari data validasi Anda.
 
 ```
 main.py                 titik masuk CLI
-trotoar/                config, sidewalk, vehicles, geometry, decision, temporal, pipeline, visualize, media, metrics, cli, webui
+trotoar/                config, sidewalk, vehicles, geometry, decision, temporal, pipeline, visualize, media, metrics, datasets, cli, webui
+datasets/               panduan dan manifes dataset publik (datanya diunduh sendiri, tidak ikut git)
 trotoar/web/            antarmuka aplikasi (index.html, app.css, app.js, sw.js, ikon PNG)
 tests/                  tes otomatis + generator adegan sintetis (synthetic.py)
 ```

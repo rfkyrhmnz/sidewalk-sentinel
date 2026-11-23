@@ -15,3 +15,7 @@ data_bersih/
 
 # keluaran mode live / dasbor
 live_hasil/
+
+# dataset publik (diunduh sendiri; lisensi sebagian melarang dibagikan ulang)
+datasets/raw/
+datasets/yolo/

@@ -1,0 +1,24 @@
+{
+  "dibuat": "2026-11-23",
+  "catatan": "Tidak ada data di repo ini. Unduh ke datasets/raw/ (diabaikan git). Status 'diuji' = alat konversinya diuji dengan data buatan; belum dengan berkas asli.",
+  "datasets": [
+    {"id": "cityscapes", "nama": "Cityscapes", "peran": "segmentasi trotoar", "url": "https://www.cityscapes-dataset.com/",
+     "akses": "daftar akun (email kampus), aktivasi manual", "lisensi": "non-komersial untuk riset; dilarang membagikan ulang data; wajib sitasi (Cordts dkk., CVPR 2016)",
+     "berkas": ["leftImg8bit_trainvaltest.zip", "gtFine_trainvaltest.zip"], "ukuran": "~11 GB", "perintah": "data masks --preset cityscapes", "diuji": "tata letak buatan"},
+    {"id": "idd", "nama": "India Driving Dataset (IDD)", "peran": "segmentasi trotoar (lalu lintas padat motor)", "url": "http://idd.insaan.iiit.ac.in/",
+     "akses": "daftar akun", "lisensi": "terbuka untuk riset (baca syarat di situsnya)", "perintah": "data masks --label-id <id> --mask-suffix <akhiran>", "diuji": "belum: nama berkas dan id trotoar belum saya lihat"},
+    {"id": "mapillary-vistas", "nama": "Mapillary Vistas", "peran": "segmentasi trotoar", "url": "https://openaccess.thecvf.com/content_ICCV_2017/papers/Neuhold_The_Mapillary_Vistas_ICCV_2017_paper.pdf",
+     "akses": "unduh dari situs Mapillary (cari 'Mapillary Vistas'), versi riset", "lisensi": "gratis untuk riset/akademik; produk komersial butuh lisensi",
+     "perintah": "data masks --image-dir {split}/images --mask-dir {split}/labels --splits training,validation --image-suffix .jpg --mask-suffix .png --label-id 15", "diuji": "tata letak buatan; id 15 = Sidewalk untuk v1.2 (dari daftar kelas mmseg), belum dicek pada berkas asli"},
+    {"id": "hf-sidewalk-semantic", "nama": "segments/sidewalk-semantic (Hugging Face)", "peran": "segmentasi trotoar (Belgia)", "url": "https://huggingface.co/datasets/segments/sidewalk-semantic",
+     "akses": "gated: login Hugging Face dan setuju membagikan kontak", "lisensi": "tidak dinyatakan", "perintah": "format parquet: belum ada konverter", "diuji": "tidak"},
+    {"id": "edgevision", "nama": "EdgeVision (BikeWithRider, NoHelmet, Helmet)", "peran": "kendaraan dengan pengendara", "url": "https://data.mendeley.com/datasets/j82bnw7gsr",
+     "akses": "unduh dari Mendeley Data (format YOLO tersedia)", "lisensi": "cek di halaman datasetnya", "perintah": "data merge", "diuji": "tata letak buatan"},
+    {"id": "roboflow-toolkit-sidewalk", "nama": "toolkit/sidewalk-km3jp", "peran": "kendaraan di trotoar (set uji)", "url": "https://universe.roboflow.com/toolkit/sidewalk-km3jp",
+     "akses": "akun Roboflow, Download Dataset, format YOLO", "lisensi": "CC BY 4.0 (wajib atribusi)", "kelas": ["car-on-sidewalk", "motorcycle-on-sidewalk"], "perintah": "data merge --map", "diuji": "tata letak buatan"},
+    {"id": "roboflow-footpath-anomaly", "nama": "pavementmonitoringproject/footpath-anomaly-detection", "peran": "kendaraan di trotoar (set uji)", "url": "https://universe.roboflow.com/pavementmonitoringproject/footpath-anomaly-detection",
+     "akses": "akun Roboflow, format YOLO", "lisensi": "Public Domain", "kelas": ["illegal-parking"], "perintah": "data merge --map", "diuji": "tata letak buatan"},
+    {"id": "roboflow-walking-footpath", "nama": "walking/footpathdetection", "peran": "kendaraan di trotoar (set uji)", "url": "https://universe.roboflow.com/walking/footpathdetection",
+     "akses": "akun Roboflow, format YOLO", "lisensi": "CC BY 4.0 (wajib atribusi)", "kelas": ["encroachment"], "perintah": "data merge --map", "diuji": "tata letak buatan"}
+  ]
+}
