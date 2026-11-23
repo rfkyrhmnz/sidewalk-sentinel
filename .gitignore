@@ -19,3 +19,8 @@ live_hasil/
 # dataset publik (diunduh sendiri; lisensi sebagian melarang dibagikan ulang)
 datasets/raw/
 datasets/yolo/
+
+# data uji: video dan frame tidak masuk repo (pelat nomor terlihat)
+datasets/test/*.mp4
+datasets/test/*.mov
+datasets/test/frames/

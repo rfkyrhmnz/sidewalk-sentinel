@@ -1,0 +1,60 @@
+{
+  "catatan": "Usulan label dari pembacaan visual lembar kontak 1 fps (galat sekitar 1 detik); belum dikonfirmasi pemilik video. Video dan frame sengaja tidak ada di repo karena pelat nomor terlihat.",
+  "kategori": [
+    "aman",
+    "parkir",
+    "menyalip"
+  ],
+  "klip": [
+    {
+      "berkas": "IMG_4984.mp4",
+      "asli": "HEVC 720x1280 30 fps 10,9 detik (konversi H.264: IMG_4984_h264.mp4)",
+      "kamera": "genggam, berjalan mendekat/menjauh dari mobil",
+      "segmen": [
+        {
+          "dari_s": 0,
+          "sampai_s": 11,
+          "label": "parkir",
+          "isi": "taksi biru Bluebird diam di area trotoar di belakang bollard (pom Shell); kemungkinan pintu masuk pom, perlu dikonfirmasi",
+          "yakin": "sedang"
+        }
+      ]
+    },
+    {
+      "berkas": "IMG_4985.mp4",
+      "asli": "HEVC 1080x1920 ~60 fps 26,1 detik (konversi H.264: IMG_4985_h264.mp4)",
+      "kamera": "genggam, berjalan menyusuri trotoar",
+      "segmen": [
+        {
+          "dari_s": 0,
+          "sampai_s": 7,
+          "label": "parkir",
+          "isi": "mobil abu-abu gelap di trotoar bata dekat tiang biru, kamera mendekat",
+          "yakin": "tinggi"
+        },
+        {
+          "dari_s": 8,
+          "sampai_s": 11,
+          "label": "parkir",
+          "isi": "mobil di tepi frame, sebagian tertutup pot tanaman",
+          "yakin": "rendah"
+        },
+        {
+          "dari_s": 12,
+          "sampai_s": 21,
+          "label": "aman",
+          "isi": "trotoar kosong; motor dan mobil hanya di jalan",
+          "yakin": "sedang"
+        },
+        {
+          "dari_s": 22,
+          "sampai_s": 26,
+          "label": "tidak pasti",
+          "isi": "SUV gelap di ujung potongan trotoar dekat ramp",
+          "yakin": "rendah"
+        }
+      ]
+    }
+  ],
+  "peringatan_uji": "min_dwell_s bawaan 10 detik lebih panjang dari mobil yang terlihat di klip ini; uji dengan --set min_dwell_s=4"
+}
