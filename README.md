@@ -165,7 +165,7 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (96 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (97 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
   CLI, evaluasi, penanganan EXIF/video, konversi dataset (mask piksel ke YOLO-seg, gabung/ubah kelas set YOLO; data buatan), serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
   pengaturan, tinjauan benar/salah dan CSV-nya, manifes aplikasi, service worker, dan ikon (termasuk di mode `--remote`), kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.

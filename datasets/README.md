@@ -15,6 +15,20 @@ Pembagian kerjanya: aturan di program yang menentukan kategori (ada pengendara a
 | **A. Model trotoar** (YOLO-seg satu kelas `sidewalk`) | Cityscapes, IDD, Mapillary Vistas | `datasets/yolo/sidewalk/` |
 | **B. Set uji kendaraan di trotoar** (presisi/recall tiap kategori) | Set Roboflow di manifes + foto sendiri | `datasets/yolo/uji/` |
 
+## Yang paling gampang diunduh (halamannya tidak menyebut perlu akun)
+Unduhan dari sandbox ini diblokir, jadi kedua tautan di bawah belum saya coba; kalau ada yang meminta login, kabari.
+1. **Zenodo: Dataset for Detecting Motorcyclists in Pedestrian Areas** https://zenodo.org/records/7935299 (CC BY 4.0, `PedestrianDataSet.zip` 643 MB, 6.324 gambar CCTV 1280x720).
+   Kelasnya persis kasus kita: `MMAP` motor **dengan** pengendara di area pejalan kaki (= menyalip lewat trotoar), `MNAP` motor **tanpa** pengendara di area pejalan kaki (= parkir),
+   `MMNAP` motor dengan pengendara di luar area pejalan kaki, `PCP` pejalan kaki di zebra cross. Catatan: hanya motor (tanpa mobil); halamannya tidak mendefinisikan "area pejalan kaki"
+   dan tidak menyebut format anotasi di folder `etiquetas/`, jadi **belum ada konverter**. Setelah diunduh, lihat isi satu berkas di `etiquetas/` dan sesuaikan.
+2. **ADE20K SceneParsing** http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip (sekitar 1 GB, kelas `sidewalk` di antara 150 kelas). Ekstrak ke `datasets/raw/` (hasilnya `datasets/raw/ADEChallengeData2016/`), lalu:
+   ```bash
+   python main.py data masks --src datasets/raw/ADEChallengeData2016 --out datasets/yolo/sidewalk_ade \
+     --image-dir images --mask-dir annotations --splits training,validation \
+     --image-suffix .jpg --mask-suffix .png --label-id 12 --skip-empty
+   ```
+   `--skip-empty` wajib di sini: sebagian besar gambar ADE20K adalah dalam ruangan tanpa trotoar. Id 12 diturunkan dari daftar kelas Ultralytics (trotoar = indeks 11, id mask = indeks + 1), belum dicek pada berkas asli.
+
 Kendaraan dan pengendara tidak perlu dilatih dulu: YOLO bawaan (COCO) sudah mengenali car, motorcycle, dan person.
 
 ## A. Model trotoar

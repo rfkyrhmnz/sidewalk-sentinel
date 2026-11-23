@@ -87,6 +87,30 @@ def test_masks_to_yolo_mapillary_layout_with_palette_masks(tmp_path):
     assert "train: images/train" in (out / "data.yaml").read_text()
 
 
+def test_masks_to_yolo_ade20k_layout_with_skip_empty(tmp_path, capsys):
+    """images/<split> + annotations/<split>, id kelas 1-150 (trotoar = 12); gambar dalam ruangan tanpa trotoar dibuang."""
+    src, out = tmp_path / "ade", tmp_path / "yolo"
+    for split in ("training", "validation"):
+        (src / "images" / split).mkdir(parents=True)
+        (src / "annotations" / split).mkdir(parents=True)
+        for name, sidewalk in (("ADE_street", True), ("ADE_kitchen", False)):
+            cv2.imwrite(str(src / "images" / split / f"{name}.jpg"), np.full((100, 200, 3), 70, np.uint8))
+            lab = np.full((100, 200), 1, np.uint8)            # 1 = dinding
+            if sidewalk:
+                lab[60:] = 12
+            cv2.imwrite(str(src / "annotations" / split / f"{name}.png"), lab)
+    st = ds.masks_to_yolo(src, out, image_dir="images", mask_dir="annotations", image_suffix=".jpg", mask_suffix=".png",
+                          label_id=12, splits=("training", "validation"), skip_empty=True)
+    assert st["gambar"] == 2 and st["dibuang_kosong"] == 2 and st["per_split"] == {"train": 1, "val": 1}
+    assert not list((out / "images" / "train").glob("ADE_kitchen*"))
+    st = ds.masks_to_yolo(src, tmp_path / "yolo_all", image_dir="images", mask_dir="annotations", image_suffix=".jpg",
+                          mask_suffix=".png", label_id=12, splits=("training", "validation"))
+    assert st["gambar"] == 4 and st["tanpa_kelas"] == 2                                     # tanpa --skip-empty: semuanya ikut
+    main(["data", "masks", "--src", str(src), "--out", str(tmp_path / "cli"), "--image-dir", "images", "--mask-dir", "annotations",
+          "--image-suffix", ".jpg", "--mask-suffix", ".png", "--label-id", "12", "--splits", "training,validation", "--skip-empty"])
+    assert "Dibuang karena tidak memuat sidewalk: 2" in capsys.readouterr().out
+
+
 def test_masks_to_yolo_errors_are_clear(tmp_path):
     with pytest.raises(FileNotFoundError, match="Tidak ada folder"):
         ds.masks_to_yolo(tmp_path, tmp_path / "o", **ds.PRESETS["cityscapes"])

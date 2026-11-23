@@ -80,12 +80,13 @@ def _select(mask: np.ndarray, label_id: int | None, label_rgb: tuple[int, int, i
 def masks_to_yolo(src, out, *, image_dir: str, mask_dir: str, image_suffix: str, mask_suffix: str,
                   label_id: int | None = None, label_rgb: tuple[int, int, int] | None = None,
                   splits=("train", "val"), max_side: int = 1280, min_area: float = 0.0005,
-                  class_name: str = "sidewalk", limit: int | None = None) -> dict:
-    """Ubah pasangan gambar + mask piksel menjadi dataset YOLO-seg satu kelas. Pembagian train/val mengikuti folder bawaan dataset."""
+                  class_name: str = "sidewalk", limit: int | None = None, skip_empty: bool = False) -> dict:
+    """Ubah pasangan gambar + mask piksel menjadi dataset YOLO-seg satu kelas. Pembagian train/val mengikuti folder bawaan dataset.
+    ``skip_empty``: buang gambar yang tidak memuat kelas itu (untuk dataset serba-ada seperti ADE20K yang sebagian besar berisi dalam ruangan)."""
     src, out = Path(src), Path(out)
     if label_id is None and label_rgb is None:
         raise ValueError("Tentukan --label-id (mask 1 kanal) atau --label-rgb (mask berwarna).")
-    stats = {"gambar": 0, "dengan_kelas": 0, "tanpa_kelas": 0, "poligon": 0, "tanpa_gambar": 0, "mask_rusak": 0, "per_split": {}}
+    stats = {"gambar": 0, "dengan_kelas": 0, "tanpa_kelas": 0, "poligon": 0, "tanpa_gambar": 0, "mask_rusak": 0, "dibuang_kosong": 0, "per_split": {}}
     used = []
     for raw_split in splits:
         split = SPLIT_ALIASES.get(raw_split, raw_split)
@@ -117,6 +118,9 @@ def masks_to_yolo(src, out, *, image_dir: str, mask_dir: str, image_suffix: str,
                 img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
                 sel = cv2.resize(sel, size, interpolation=cv2.INTER_NEAREST)
             polys = mask_to_polygons(sel.astype(bool), min_area)
+            if skip_empty and not polys:
+                stats["dibuang_kosong"] += 1
+                continue
             name = "__".join(rel.parent.parts + (stem,))
             cv2.imwrite(str(out / "images" / split / f"{name}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
             (out / "labels" / split / f"{name}.txt").write_text(

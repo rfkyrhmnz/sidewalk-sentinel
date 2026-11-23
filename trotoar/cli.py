@@ -315,9 +315,11 @@ def cmd_data(args, **_):
             if rgb is not None:
                 opts.pop("label_id", None)
             st = ds.masks_to_yolo(args.src, args.out, splits=tuple(args.splits.split(",")), max_side=args.max_side,
-                                  class_name=args.class_name, limit=args.limit, label_rgb=rgb, **opts)
+                                  class_name=args.class_name, limit=args.limit, skip_empty=args.skip_empty, label_rgb=rgb, **opts)
             print(f"Selesai: {st['gambar']} gambar ({st['dengan_kelas']} berisi {args.class_name}, {st['tanpa_kelas']} tanpa, "
                   f"{st['poligon']} poligon) per split {st['per_split']}.")
+            if st["dibuang_kosong"]:
+                print(f"Dibuang karena tidak memuat {args.class_name}: {st['dibuang_kosong']} gambar.")
             if st["tanpa_gambar"] or st["mask_rusak"]:
                 print(f"Dilewati: {st['tanpa_gambar']} mask tanpa gambar pasangannya, {st['mask_rusak']} berkas tak terbaca.")
             print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --epochs 100")
@@ -433,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--splits", default="train,val", help="nama folder split pada dataset (Mapillary: training,validation)"); m.add_argument("--class-name", default="sidewalk")
     m.add_argument("--max-side", type=int, default=1280, help="sisi terpanjang gambar keluaran (hemat ruang)")
     m.add_argument("--limit", type=int, help="batasi gambar per split (untuk uji coba cepat)")
+    m.add_argument("--skip-empty", action="store_true", help="buang gambar tanpa kelas itu (disarankan untuk ADE20K)")
     g = dsub.add_parser("merge", help="gabung set berformat YOLO (ekspor Roboflow) dan ubah nama kelas")
     g.add_argument("--src", action="append", required=True, help="folder ekspor YOLO; boleh diulang")
     g.add_argument("--out", required=True)
