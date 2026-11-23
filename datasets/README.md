@@ -15,13 +15,33 @@ Pembagian kerjanya: aturan di program yang menentukan kategori (ada pengendara a
 | **A. Model trotoar** (YOLO-seg satu kelas `sidewalk`) | Cityscapes, IDD, Mapillary Vistas | `datasets/yolo/sidewalk/` |
 | **B. Set uji kendaraan di trotoar** (presisi/recall tiap kategori) | Set Roboflow di manifes + foto sendiri | `datasets/yolo/uji/` |
 
-## Yang paling gampang diunduh (halamannya tidak menyebut perlu akun)
-Unduhan dari sandbox ini diblokir, jadi kedua tautan di bawah belum saya coba; kalau ada yang meminta login, kabari.
-1. **Zenodo: Dataset for Detecting Motorcyclists in Pedestrian Areas** https://zenodo.org/records/7935299 (CC BY 4.0, `PedestrianDataSet.zip` 643 MB, 6.324 gambar CCTV 1280x720).
+## Yang paling gampang diunduh (tanpa akun)
+Hanya GitHub yang bisa dijangkau dari sandbox pengembangan, jadi dataset di GitHub (nomor 1 dan 2) sudah ditarik dan dikonversi di sana. Nomor 3 dan 4 belum pernah dicoba diunduh.
+
+1. **Trotoar: SidewalkDetection (GitHub, MIT)** https://github.com/charbel-a-hC/SidewalkDetection : 276 gambar latih + 45 validasi 1920x1080, mask biner (putih = trotoar).
+   ```bash
+   git clone --depth 1 https://github.com/charbel-a-hC/SidewalkDetection datasets/raw/SidewalkDetection
+   python main.py data masks --src datasets/raw/SidewalkDetection/dataset --out datasets/yolo/sidewalk_a --preset sidewalkdetection
+   python main.py train --data datasets/yolo/sidewalk_a/data.yaml --model yolo11n-seg.pt --epochs 100
+   ```
+   Hasil uji pada berkas asli: 321 gambar (276 latih, 45 val), 372 poligon, sekitar 30 detik; hamparan poligon pada 6 contoh sudah dilihat dan menutup trotoar dengan benar, termasuk takik di sekitar sepeda yang parkir.
+   Catatan: clone-nya sekitar 1,2 GB (folder `dataset/` 552 MB, sisanya riwayat git dan bobot). Folder `Train_set/` dan `test/` tidak dipakai. Semua gambar berisi trotoar (tidak ada contoh tanpa trotoar), README tidak menyebut lokasi pengambilan, dan lisensi MIT tertulis untuk repositorinya (hak cipta Charbel Abi Hana 2022); tidak ada lisensi terpisah untuk gambarnya. Pelatihan YOLO belum dicoba.
+2. **Trotoar: WalkScapes (GitHub, CC BY-NC 4.0)** https://github.com/KNSyNAPS-org/walkscapes-dataset (panduan) dan https://github.com/KNSyNAPS-org/walkscapes-dataset-data (data): 1.503 foto HP dari sudut pandang pejalan kaki di 10 kota Polandia, 14 kelas (trotoar = id 1). Pembagian bawaan 1.057 latih / 224 val / 222 uji.
+   ```bash
+   git clone --depth 1 https://github.com/KNSyNAPS-org/walkscapes-dataset-data datasets/raw/walkscapes
+   python main.py data masks --src datasets/raw/walkscapes/dataset --out datasets/yolo/sidewalk_b --preset walkscapes
+   ```
+   **Clone-nya sekitar 11 GB** (foto HP resolusi asli, sampai 3213x5712); di Colab lebih nyaman daripada di laptop. Hasil uji pada berkas asli: 1.281 gambar (1.057 latih + 224 val), 3.169 poligon, 2 menit 33 detik; 6 contoh dicek visual dan selaras dengan fotonya. Lisensi non-komersial plus Terms of Use tambahan (belum saya baca isinya): cukup untuk tugas kuliah, jangan dipakai produk komersial.
+   Gabungkan dengan nomor 1 (keduanya satu kelas `sidewalk`, jadi tidak perlu `--map`):
+   ```bash
+   python main.py data merge --src datasets/yolo/sidewalk_a --src datasets/yolo/sidewalk_b --out datasets/yolo/sidewalk_all --names sidewalk
+   ```
+   Hasil uji: 1.333 latih + 269 val, 3.541 poligon, 565 MB. Belum diukur berapa banyak foto yang memuat kendaraan di atas trotoar; mask WalkScapes memisahkan kelas kendaraan dari trotoar, jadi logika "lubang di bawah kendaraan" hanya terlatih sebanyak contoh seperti itu ada.
+3. **Zenodo: Dataset for Detecting Motorcyclists in Pedestrian Areas** https://zenodo.org/records/7935299 (CC BY 4.0, `PedestrianDataSet.zip` 643 MB, 6.324 gambar CCTV 1280x720).
    Kelasnya persis kasus kita: `MMAP` motor **dengan** pengendara di area pejalan kaki (= menyalip lewat trotoar), `MNAP` motor **tanpa** pengendara di area pejalan kaki (= parkir),
    `MMNAP` motor dengan pengendara di luar area pejalan kaki, `PCP` pejalan kaki di zebra cross. Catatan: hanya motor (tanpa mobil); halamannya tidak mendefinisikan "area pejalan kaki"
    dan tidak menyebut format anotasi di folder `etiquetas/`, jadi **belum ada konverter**. Setelah diunduh, lihat isi satu berkas di `etiquetas/` dan sesuaikan.
-2. **ADE20K SceneParsing** http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip (sekitar 1 GB, kelas `sidewalk` di antara 150 kelas). Ekstrak ke `datasets/raw/` (hasilnya `datasets/raw/ADEChallengeData2016/`), lalu:
+4. **ADE20K SceneParsing** http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip (sekitar 1 GB, kelas `sidewalk` di antara 150 kelas). Ekstrak ke `datasets/raw/` (hasilnya `datasets/raw/ADEChallengeData2016/`), lalu:
    ```bash
    python main.py data masks --src datasets/raw/ADEChallengeData2016 --out datasets/yolo/sidewalk_ade \
      --image-dir images --mask-dir annotations --splits training,validation \

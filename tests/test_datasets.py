@@ -111,6 +111,57 @@ def test_masks_to_yolo_ade20k_layout_with_skip_empty(tmp_path, capsys):
     assert "Dibuang karena tidak memuat sidewalk: 2" in capsys.readouterr().out
 
 
+def test_masks_to_yolo_binary_jpeg_masks_with_prefixes(tmp_path, capsys):
+    """Tata letak SidewalkDetection: <split>/image/Raw_1.jpg + <split>/label/Label_1.jpg, mask biner JPEG (nilai tidak persis 255)."""
+    src, out = tmp_path / "sd", tmp_path / "yolo"
+    for split in ("train", "val"):
+        (src / split / "image").mkdir(parents=True)
+        (src / split / "label").mkdir(parents=True)
+        for i, full in ((1, False), (2, True)):
+            cv2.imwrite(str(src / split / "image" / f"Raw_{i}.jpg"), np.full((90, 160, 3), 90, np.uint8))
+            lab = np.zeros((90, 160, 3), np.uint8)
+            lab[40:] = 255 if not full else lab[40:]
+            if full:
+                lab[:] = 0                                     # tanpa trotoar sama sekali
+            cv2.imwrite(str(src / split / "label" / f"Label_{i}.jpg"), lab, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        cv2.imwrite(str(src / split / "label" / "Catatan_3.jpg"), np.zeros((9, 9, 3), np.uint8))   # bukan berawalan Label_: harus diabaikan
+    st = ds.masks_to_yolo(src, out, image_dir="{split}/image", mask_dir="{split}/label", image_prefix="Raw_", mask_prefix="Label_",
+                          image_suffix=".jpg", mask_suffix=".jpg", threshold=127)
+    assert st["gambar"] == 4 and st["dengan_kelas"] == 2 and st["tanpa_kelas"] == 2 and st["tanpa_gambar"] == 0
+    assert (out / "images" / "train" / "1.jpg").is_file() and (out / "labels" / "val" / "2.txt").read_text() == ""
+    rows = (out / "labels" / "train" / "1.txt").read_text().strip().splitlines()
+    assert len(rows) == 1 and rows[0].startswith("0 ")
+    ys = [float(v) for v in rows[0].split()[2::2]]
+    assert min(ys) > 0.40 and max(ys) > 0.97                      # poligon mengikuti bagian bawah gambar (y >= 40/90)
+    main(["data", "masks", "--src", str(src), "--out", str(tmp_path / "cli"), "--image-dir", "{split}/image", "--mask-dir", "{split}/label",
+          "--image-prefix", "Raw_", "--mask-prefix", "Label_", "--image-suffix", ".jpg", "--mask-suffix", ".jpg", "--threshold", "127"])
+    assert "4 gambar" in capsys.readouterr().out
+    main(["data", "masks", "--src", str(src), "--out", str(tmp_path / "cli2"), "--preset", "sidewalkdetection"])      # preset = hal yang sama
+    assert "4 gambar" in capsys.readouterr().out
+    assert (tmp_path / "cli2" / "labels" / "train" / "1.txt").read_text() == (tmp_path / "cli" / "labels" / "train" / "1.txt").read_text()
+
+
+def test_masks_to_yolo_auto_image_extension_walkscapes_layout(tmp_path):
+    """imgs/<split>/x.(jpg|jpeg|png) + masks/<split>/x_mask.png (id 1 = trotoar, 255 = void): ekstensi gambar dicari otomatis."""
+    src, out = tmp_path / "ws", tmp_path / "yolo"
+    for split in ("train", "val"):
+        (src / "imgs" / split).mkdir(parents=True)
+        (src / "masks" / split).mkdir(parents=True)
+        for name, ext in (("poland_1", ".jpg"), ("poland_2", ".jpeg"), ("poland_3", ".png")):
+            cv2.imwrite(str(src / "imgs" / split / (name + ext)), np.full((80, 120, 3), 60, np.uint8))
+            lab = np.zeros((80, 120), np.uint8)
+            lab[50:] = 1
+            lab[:5] = 255
+            cv2.imwrite(str(src / "masks" / split / f"{name}_mask.png"), lab)
+    st = ds.masks_to_yolo(src, out, image_dir="imgs", mask_dir="masks", image_suffix="auto", mask_suffix="_mask.png", label_id=1)
+    assert st["gambar"] == 6 and st["dengan_kelas"] == 6 and st["tanpa_gambar"] == 0
+    main(["data", "masks", "--src", str(src), "--out", str(tmp_path / "cli"), "--preset", "walkscapes"])
+    assert (tmp_path / "cli" / "labels" / "val" / "poland_2.txt").read_text() == (out / "labels" / "val" / "poland_2.txt").read_text()
+    (src / "imgs" / "train" / "poland_1.jpg").unlink()
+    assert ds.masks_to_yolo(src, tmp_path / "yolo2", image_dir="imgs", mask_dir="masks", image_suffix="auto",
+                            mask_suffix="_mask.png", label_id=1)["tanpa_gambar"] == 1
+
+
 def test_masks_to_yolo_errors_are_clear(tmp_path):
     with pytest.raises(FileNotFoundError, match="Tidak ada folder"):
         ds.masks_to_yolo(tmp_path, tmp_path / "o", **ds.PRESETS["cityscapes"])

@@ -302,7 +302,7 @@ def cmd_data(args, **_):
     try:
         if args.data_cmd == "masks":
             opts = dict(ds.PRESETS.get(args.preset, {}))
-            for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix", "label_id"):
+            for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix", "label_id", "threshold", "image_prefix", "mask_prefix"):
                 v = getattr(args, k)
                 if v is not None:
                     opts[k] = v
@@ -312,8 +312,10 @@ def cmd_data(args, **_):
             rgb = tuple(int(x) for x in args.label_rgb.split(",")) if args.label_rgb else None
             if rgb is not None and len(rgb) != 3:
                 raise SystemExit("--label-rgb harus berbentuk R,G,B, mis. 244,35,232.")
-            if rgb is not None:
+            if rgb is not None or opts.get("threshold") is not None:
                 opts.pop("label_id", None)
+            if args.label_id is not None or rgb is not None:
+                opts.pop("threshold", None)                    # id/warna eksplisit mengalahkan nilai bawaan preset
             st = ds.masks_to_yolo(args.src, args.out, splits=tuple(args.splits.split(",")), max_side=args.max_side,
                                   class_name=args.class_name, limit=args.limit, skip_empty=args.skip_empty, label_rgb=rgb, **opts)
             print(f"Selesai: {st['gambar']} gambar ({st['dengan_kelas']} berisi {args.class_name}, {st['tanpa_kelas']} tanpa, "
@@ -426,12 +428,14 @@ def build_parser() -> argparse.ArgumentParser:
     m = dsub.add_parser("masks", help="mask piksel -> YOLO-seg satu kelas (mis. sidewalk)")
     m.add_argument("--src", required=True, help="folder dataset hasil unduhan/ekstrak")
     m.add_argument("--out", required=True, help="folder keluaran (berisi data.yaml)")
-    m.add_argument("--preset", choices=["cityscapes"], help="tata letak dan id kelas bawaan")
+    m.add_argument("--preset", choices=["cityscapes", "sidewalkdetection", "walkscapes"], help="tata letak dan id kelas bawaan")
     m.add_argument("--image-dir", help="folder gambar; boleh memuat {split}, mis. {split}/images")
     m.add_argument("--mask-dir", help="folder mask; boleh memuat {split}, mis. {split}/labels")
-    m.add_argument("--image-suffix"); m.add_argument("--mask-suffix")
+    m.add_argument("--image-suffix", help='akhiran berkas gambar, mis. .jpg; "auto" = coba semua ekstensi gambar'); m.add_argument("--mask-suffix")
     m.add_argument("--label-id", type=int, help="id kelas pada mask 1 kanal (Cityscapes sidewalk = 8)")
     m.add_argument("--label-rgb", help="warna kelas pada mask berwarna (RGB penuh), R,G,B")
+    m.add_argument("--threshold", type=int, help="mask biner hitam-putih: kelas = piksel lebih terang dari nilai ini (mis. 127)")
+    m.add_argument("--image-prefix", help="awalan nama berkas gambar, mis. Raw_"); m.add_argument("--mask-prefix", help="awalan nama berkas mask, mis. Label_")
     m.add_argument("--splits", default="train,val", help="nama folder split pada dataset (Mapillary: training,validation)"); m.add_argument("--class-name", default="sidewalk")
     m.add_argument("--max-side", type=int, default=1280, help="sisi terpanjang gambar keluaran (hemat ruang)")
     m.add_argument("--limit", type=int, help="batasi gambar per split (untuk uji coba cepat)")

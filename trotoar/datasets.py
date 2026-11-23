@@ -19,6 +19,13 @@ PRESETS = {
     # Id 8 = sidewalk pada labelIds Cityscapes.
     "cityscapes": dict(image_dir="leftImg8bit", mask_dir="gtFine", image_suffix="_leftImg8bit.png",
                        mask_suffix="_gtFine_labelIds.png", label_id=8),
+    # github.com/charbel-a-hC/SidewalkDetection (folder dataset/): <split>/image/Raw_N.jpg + <split>/label/Label_N.jpg,
+    # mask biner JPEG (putih = trotoar; nilainya tidak persis 255, jadi pakai ambang).
+    # github.com/KNSyNAPS-org/walkscapes-dataset-data: dataset/imgs/<split>/poland_N.(jpg|jpeg|png) + dataset/masks/<split>/poland_N_mask.png,
+    # mask id 1 kanal (0 jalan, 1 trotoar, ..., 255 void). CC BY-NC 4.0.
+    "walkscapes": dict(image_dir="imgs", mask_dir="masks", image_suffix="auto", mask_suffix="_mask.png", label_id=1),
+    "sidewalkdetection": dict(image_dir="{split}/image", mask_dir="{split}/label", image_prefix="Raw_", mask_prefix="Label_",
+                              image_suffix=".jpg", mask_suffix=".jpg", threshold=127),
 }
 SPLIT_ALIASES = {"training": "train", "validation": "val", "valid": "val"}   # nama folder bawaan beberapa dataset
 MAX_POINTS = 200            # batas titik per poligon agar berkas label tetap kecil
@@ -67,7 +74,20 @@ def _dir(src: Path, d: str, split: str) -> Path:
     return src / d.format(split=split) if "{split}" in d else src / d / split
 
 
-def _select(mask: np.ndarray, label_id: int | None, label_rgb: tuple[int, int, int] | None) -> np.ndarray:
+def _find_image(folder: Path, base: str, suffix: str) -> Path | None:
+    """Berkas gambar pasangan mask. ``suffix="auto"``: coba semua ekstensi gambar (dataset yang gambarnya campur .jpg/.jpeg/.png)."""
+    exts = IMG_EXT + tuple(e.upper() for e in IMG_EXT) if suffix == "auto" else (suffix,)
+    for e in exts:
+        p = folder / (base + e)
+        if p.is_file():
+            return p
+    return None
+
+
+def _select(mask: np.ndarray, label_id: int | None, label_rgb: tuple[int, int, int] | None, threshold: int | None = None) -> np.ndarray:
+    if threshold is not None:                       # mask biner (putih = kelas); aman untuk mask JPEG yang nilainya tidak persis 255
+        gray = mask if mask.ndim == 2 else mask[..., :3].mean(axis=-1)
+        return gray > threshold
     if label_rgb is not None:
         if mask.ndim != 3 or mask.shape[2] < 3:
             raise ValueError("--label-rgb butuh mask berwarna (3 kanal).")
@@ -80,12 +100,15 @@ def _select(mask: np.ndarray, label_id: int | None, label_rgb: tuple[int, int, i
 def masks_to_yolo(src, out, *, image_dir: str, mask_dir: str, image_suffix: str, mask_suffix: str,
                   label_id: int | None = None, label_rgb: tuple[int, int, int] | None = None,
                   splits=("train", "val"), max_side: int = 1280, min_area: float = 0.0005,
-                  class_name: str = "sidewalk", limit: int | None = None, skip_empty: bool = False) -> dict:
+                  class_name: str = "sidewalk", limit: int | None = None, skip_empty: bool = False,
+                  threshold: int | None = None, image_prefix: str = "", mask_prefix: str = "") -> dict:
     """Ubah pasangan gambar + mask piksel menjadi dataset YOLO-seg satu kelas. Pembagian train/val mengikuti folder bawaan dataset.
-    ``skip_empty``: buang gambar yang tidak memuat kelas itu (untuk dataset serba-ada seperti ADE20K yang sebagian besar berisi dalam ruangan)."""
+    ``skip_empty``: buang gambar yang tidak memuat kelas itu (untuk dataset serba-ada seperti ADE20K yang sebagian besar berisi dalam ruangan).
+    ``threshold``: untuk mask biner hitam-putih (kelas = piksel lebih terang dari nilai ini, mis. 127), tanpa id kelas.
+    ``image_prefix``/``mask_prefix``: untuk dataset yang namanya beda awalan, mis. ``Raw_1.jpg`` dan ``Label_1.jpg``."""
     src, out = Path(src), Path(out)
-    if label_id is None and label_rgb is None:
-        raise ValueError("Tentukan --label-id (mask 1 kanal) atau --label-rgb (mask berwarna).")
+    if label_id is None and label_rgb is None and threshold is None:
+        raise ValueError("Tentukan --label-id (mask 1 kanal), --label-rgb (mask berwarna), atau --threshold (mask biner hitam-putih).")
     stats = {"gambar": 0, "dengan_kelas": 0, "tanpa_kelas": 0, "poligon": 0, "tanpa_gambar": 0, "mask_rusak": 0, "dibuang_kosong": 0, "per_split": {}}
     used = []
     for raw_split in splits:
@@ -96,20 +119,20 @@ def masks_to_yolo(src, out, *, image_dir: str, mask_dir: str, image_suffix: str,
         (out / "images" / split).mkdir(parents=True, exist_ok=True)
         (out / "labels" / split).mkdir(parents=True, exist_ok=True)
         n = 0
-        for mp in sorted(root.rglob("*" + mask_suffix)):
+        for mp in sorted(root.rglob(mask_prefix + "*" + mask_suffix)):
             if limit is not None and n >= limit:
                 break
             rel = mp.relative_to(root)
-            stem = mp.name[: -len(mask_suffix)]
-            ip = iroot / rel.parent / (stem + image_suffix)
-            if not ip.is_file():
+            stem = mp.name[len(mask_prefix): -len(mask_suffix)]
+            ip = _find_image(iroot / rel.parent, image_prefix + stem, image_suffix)
+            if ip is None:
                 stats["tanpa_gambar"] += 1
                 continue
             mask, img = _read_mask(mp), cv2.imread(str(ip), cv2.IMREAD_COLOR)
             if mask is None or img is None:
                 stats["mask_rusak"] += 1
                 continue
-            sel = _select(mask, label_id, label_rgb).astype(np.uint8)
+            sel = _select(mask, label_id, label_rgb, threshold).astype(np.uint8)
             if sel.shape[:2] != img.shape[:2]:
                 sel = cv2.resize(sel, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
             scale = min(1.0, max_side / max(img.shape[:2]))

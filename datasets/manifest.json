@@ -3,6 +3,28 @@
   "catatan": "Tidak ada data di repo ini. Unduh ke datasets/raw/ (diabaikan git). Status 'diuji' = alat konversinya diuji dengan data buatan; belum dengan berkas asli.",
   "datasets": [
     {
+      "id": "sidewalkdetection-github",
+      "nama": "SidewalkDetection (charbel-a-hC, GitHub)",
+      "peran": "segmentasi trotoar (satu kelas)",
+      "url": "https://github.com/charbel-a-hC/SidewalkDetection",
+      "akses": "git clone, tanpa akun (clone ~1,2 GB; folder dataset/ 552 MB)",
+      "lisensi": "MIT untuk repositori (Charbel Abi Hana 2022); gambar tidak punya lisensi terpisah",
+      "isi": "276 gambar latih + 45 val, 1920x1080, mask biner JPEG; semua gambar berisi trotoar; lokasi pengambilan tidak disebut di README",
+      "perintah": "data masks --src datasets/raw/SidewalkDetection/dataset --out datasets/yolo/sidewalk_a --preset sidewalkdetection",
+      "diuji": "ya, pada berkas asli: 321 gambar / 372 poligon, hamparan dicek visual pada 6 contoh; pelatihan belum"
+    },
+    {
+      "id": "walkscapes-github",
+      "nama": "WalkScapes (KNSyNAPS-org, GitHub)",
+      "peran": "segmentasi trotoar dari sudut pandang pejalan kaki (foto HP)",
+      "url": "https://github.com/KNSyNAPS-org/walkscapes-dataset-data",
+      "akses": "git clone, tanpa akun; clone sekitar 11 GB",
+      "lisensi": "CC BY-NC 4.0 + Terms of Use tambahan (isinya belum dibaca)",
+      "isi": "1.503 foto 10 kota Polandia, 14 kelas, trotoar = id 1; split 1.057/224/222; mask 1 kanal uint8 (255 = void); gambar campur .jpg/.jpeg/.png",
+      "perintah": "data masks --src datasets/raw/walkscapes/dataset --out datasets/yolo/sidewalk_b --preset walkscapes",
+      "diuji": "ya, pada berkas asli: 1.281 gambar / 3.169 poligon, hamparan dicek visual pada 6 contoh; gabungan dengan SidewalkDetection 1.333+269; pelatihan belum"
+    },
+    {
       "id": "zenodo-motorcyclists-pedestrian-areas",
       "nama": "Dataset for Detecting Motorcyclists in Pedestrian Areas (Zenodo)",
       "peran": "motor dengan/tanpa pengendara di area pejalan kaki (set latih atau uji)",
