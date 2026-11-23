@@ -294,7 +294,12 @@ def cmd_train(args, **_):
     model = YOLO(args.model)
     model.train(data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
                 project=args.project, name=args.name, device=args.device or None, patience=args.patience)
-    print(f"Selesai. Bobot terbaik: {Path(args.project) / args.name / 'weights' / 'best.pt'}")
+    # Ultralytics menaruh hasil di runs/<tugas>/<project>/<name>[-2, -3, ...], bukan persis
+    # <project>/<name>; satu-satunya sumber yang benar adalah save_dir milik trainer.
+    save_dir = getattr(getattr(model, "trainer", None), "save_dir", None)
+    if save_dir is None:
+        save_dir = Path(args.project) / args.name
+    print(f"Selesai. Bobot terbaik: {Path(save_dir) / 'weights' / 'best.pt'}")
 
 
 def cmd_data(args, **_):
