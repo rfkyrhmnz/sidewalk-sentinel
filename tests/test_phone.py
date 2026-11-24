@@ -23,7 +23,20 @@ print("2026-11-23T03:30:01Z INF Requesting new quick Tunnel on trycloudflare.com
 print('2026-11-23T03:30:01Z ERR retrying https://api.trycloudflare.com/tunnel', flush=True)
 print("2026-11-23T03:30:02Z INF |  https://calm-river-demo-42.trycloudflare.com                |", flush=True)
 print("ARGS", " ".join(sys.argv[1:]), flush=True)
+time.sleep(1.0)      # alamat dicetak lebih dulu; terowongan baru tersambung beberapa detik kemudian
+print("2026-11-23T03:30:04Z INF Registered tunnel connection connIndex=0 connection=abc event=0 ip=198.41.192.67 location=sin06 protocol=quic", flush=True)
 time.sleep(60)
+"""
+FAKE_NO_REGISTER = """
+import time
+print("2026-11-23T03:30:02Z INF |  https://calm-river-demo-42.trycloudflare.com                |", flush=True)
+time.sleep(60)
+"""
+FAKE_DIES_AFTER_URL = """
+import sys, time
+print("2026-11-23T03:30:02Z INF |  https://calm-river-demo-42.trycloudflare.com                |", flush=True)
+print("2026-11-23T03:30:03Z ERR Unable to establish connection with Cloudflare edge", flush=True)
+sys.exit(1)
 """
 FAKE_FAIL = """
 import sys
@@ -83,6 +96,47 @@ def test_start_tunnel_reads_url_and_passes_expected_arguments(tmp_path):
     finally:
         t.close()
     assert t.proc.poll() is not None
+
+
+def test_start_tunnel_waits_until_connection_is_registered(tmp_path):
+    """Alamat sudah muncul sebelum terowongan tersambung (Error 1033 bila dibuka saat itu): tunggu penandanya."""
+    t0 = time.time()
+    t = phone.start_tunnel(fake(tmp_path, FAKE_OK), 8765, timeout=15)
+    try:
+        assert t.ready is True and time.time() - t0 >= 0.9
+    finally:
+        t.close()
+
+
+def test_start_tunnel_without_ready_marker_still_returns_url_not_ready(tmp_path):
+    t0 = time.time()
+    t = phone.start_tunnel(fake(tmp_path, FAKE_NO_REGISTER), 8765, timeout=15, ready_timeout=0.5)
+    try:
+        assert t.url == "https://calm-river-demo-42.trycloudflare.com" and t.ready is False
+        assert time.time() - t0 < 10
+    finally:
+        t.close()
+
+
+def test_start_tunnel_process_dying_after_url_is_an_error(tmp_path):
+    with pytest.raises(phone.TunnelError) as e:
+        phone.start_tunnel(fake(tmp_path, FAKE_DIES_AFTER_URL), 8765, timeout=15, ready_timeout=5)
+    assert "setelah memberi alamat" in str(e.value) and "Unable to establish" in str(e.value)
+
+
+def test_session_adds_hint_when_tunnel_not_confirmed(tmp_path, monkeypatch):
+    out: list[str] = []
+    orig = phone.start_tunnel
+    monkeypatch.setattr(phone, "start_tunnel", lambda cmd, port, timeout=45.0, ready_timeout=25.0: orig(cmd, port, timeout, 0.5))
+    s = phone.PhoneSession(8765, "K", tmp_path, phone.PhoneOptions(open_image=False), fake(tmp_path, FAKE_NO_REGISTER),
+                           out=out.append, timeout=15)
+    s.start()
+    try:
+        assert s.done.wait(20)
+    finally:
+        s.close()
+    text = "\n".join(out)
+    assert "belum melaporkan tersambung" in text and "Error 1033" in text
 
 
 def test_start_tunnel_failure_shows_last_output(tmp_path):

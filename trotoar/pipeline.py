@@ -15,7 +15,8 @@ import numpy as np
 
 from .config import Config
 from .decision import STATUS_CONFIRMED, VehicleResult, decide_frame
-from .media import (LatestFrameReader, have_ffmpeg, is_live_source, open_capture, parse_source, to_h264)
+from .media import (LatestFrameReader, have_ffmpeg, is_live_source, open_capture, open_video, parse_source,
+                    to_h264)
 from .sidewalk import segment_sidewalk_classical, sidewalk_from_polygon
 from .temporal import CameraMotion, DwellTracker, shift_mask
 from .vehicles import Detections, union_masks
@@ -187,9 +188,7 @@ class Analyzer:
     def run_video(self, src, out_video, csv_path=None, summary_path=None, h264: bool = True,
                   max_frames: int | None = None, verbose: bool = True) -> dict:
         cfg = self.cfg
-        cap = cv2.VideoCapture(str(src))
-        if not cap.isOpened():
-            raise RuntimeError(f"Tidak bisa membuka video: {src}")
+        cap = open_video(src)
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or fps <= 1 or fps > 240:
             fps = 30.0

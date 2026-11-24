@@ -204,6 +204,46 @@ def test_cli_without_ultralytics_gives_install_hint(tmp_path, capsys):
     assert "pip install ultralytics" in capsys.readouterr().err
 
 
+def test_train_prints_real_save_dir(tmp_path, capsys, monkeypatch):
+    """Ultralytics menyimpan di runs/segment/runs/trotoar-2, bukan runs/trotoar: yang dicetak harus
+    save_dir milik trainer (kasus nyata di laptop pengguna), bukan hasil tebakan project/name."""
+    import sys
+    import types
+
+    real = tmp_path / "runs" / "segment" / "runs" / "trotoar-2"
+
+    class FakeYOLO:
+        def __init__(self, weights):
+            self.trainer = None
+            self.kw = None
+
+        def train(self, **kw):
+            self.kw = kw
+            self.trainer = types.SimpleNamespace(save_dir=real)
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    main(["train", "--data", "d.yaml", "--epochs", "1", "--device", "cpu"])
+    out = capsys.readouterr().out
+    assert str(real / "weights" / "best.pt") in out
+    assert str(Path("runs") / "trotoar" / "weights" / "best.pt") not in out
+
+
+def test_train_falls_back_when_trainer_missing(capsys, monkeypatch):
+    import sys
+    import types
+
+    class FakeYOLO:
+        def __init__(self, weights):
+            pass
+
+        def train(self, **kw):
+            pass
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    main(["train", "--data", "d.yaml", "--epochs", "1"])
+    assert str(Path("runs") / "trotoar" / "weights" / "best.pt") in capsys.readouterr().out
+
+
 @pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg tidak ada")
 def test_cli_prepare_and_frames(tmp_path, capsys):
     from PIL import Image

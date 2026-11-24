@@ -149,3 +149,23 @@ def test_video_normalize_and_extract_frames(tmp_path):
     cap.release()
     n = media.extract_frames(src, tmp_path / "fr", fps=1.0)
     assert n == 3 and len(list((tmp_path / "fr").glob("*.jpg"))) == 3
+
+
+def test_open_video_distinguishes_missing_from_unreadable(tmp_path):
+    """OpenCV memberi isOpened()=False untuk dua kasus berbeda; pesannya harus menunjuk perbaikan yang tepat."""
+    with pytest.raises(RuntimeError, match="tidak ditemukan") as e:
+        media.open_video(tmp_path / "IMG_0001.mp4")
+    assert "folder kerja" in str(e.value)
+    rusak = tmp_path / "rusak.mp4"
+    rusak.write_bytes(b"bukan video sama sekali" * 50)
+    with pytest.raises(RuntimeError, match="HEVC") as e:
+        media.open_video(rusak)
+    assert "prepare" in str(e.value) and "tidak ditemukan" not in str(e.value)
+
+
+def test_cli_video_missing_file_is_friendly(tmp_path, capsys):
+    from trotoar.cli import main
+    with pytest.raises(SystemExit):
+        main(["video", str(tmp_path / "tidak_ada.mp4"), "--out", str(tmp_path / "o")], segmenter_factory=lambda c: None)
+    err = capsys.readouterr().err
+    assert "Galat" in err and "tidak ditemukan" in err

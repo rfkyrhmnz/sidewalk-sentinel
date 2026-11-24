@@ -294,7 +294,68 @@ def cmd_train(args, **_):
     model = YOLO(args.model)
     model.train(data=args.data, epochs=args.epochs, imgsz=args.imgsz, batch=args.batch,
                 project=args.project, name=args.name, device=args.device or None, patience=args.patience)
-    print(f"Selesai. Bobot terbaik: {Path(args.project) / args.name / 'weights' / 'best.pt'}")
+    # Ultralytics menaruh hasil di runs/<tugas>/<project>/<name>[-2, -3, ...], bukan persis
+    # <project>/<name>; satu-satunya sumber yang benar adalah save_dir milik trainer.
+    save_dir = getattr(getattr(model, "trainer", None), "save_dir", None)
+    if save_dir is None:
+        save_dir = Path(args.project) / args.name
+    print(f"Selesai. Bobot terbaik: {Path(save_dir) / 'weights' / 'best.pt'}")
+
+
+def cmd_data(args, **_):
+    from . import datasets as ds
+    try:
+        if args.data_cmd == "masks":
+            opts = dict(ds.PRESETS.get(args.preset, {}))
+            for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix", "label_id", "threshold", "image_prefix", "mask_prefix"):
+                v = getattr(args, k)
+                if v is not None:
+                    opts[k] = v
+            missing = [k for k in ("image_dir", "mask_dir", "image_suffix", "mask_suffix") if k not in opts]
+            if missing:
+                raise SystemExit("Pilih --preset cityscapes, atau isi " + ", ".join("--" + k.replace("_", "-") for k in missing) + ".")
+            rgb = tuple(int(x) for x in args.label_rgb.split(",")) if args.label_rgb else None
+            if rgb is not None and len(rgb) != 3:
+                raise SystemExit("--label-rgb harus berbentuk R,G,B, mis. 244,35,232.")
+            if rgb is not None or opts.get("threshold") is not None:
+                opts.pop("label_id", None)
+            if args.label_id is not None or rgb is not None:
+                opts.pop("threshold", None)                    # id/warna eksplisit mengalahkan nilai bawaan preset
+            st = ds.masks_to_yolo(args.src, args.out, splits=tuple(args.splits.split(",")), max_side=args.max_side,
+                                  class_name=args.class_name, limit=args.limit, skip_empty=args.skip_empty, label_rgb=rgb, **opts)
+            print(f"Selesai: {st['gambar']} gambar ({st['dengan_kelas']} berisi {args.class_name}, {st['tanpa_kelas']} tanpa, "
+                  f"{st['poligon']} poligon) per split {st['per_split']}.")
+            if st["dibuang_kosong"]:
+                print(f"Dibuang karena tidak memuat {args.class_name}: {st['dibuang_kosong']} gambar.")
+            if st["tanpa_gambar"] or st["mask_rusak"]:
+                print(f"Dilewati: {st['tanpa_gambar']} mask tanpa gambar pasangannya, {st['mask_rusak']} berkas tak terbaca.")
+            print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --epochs 100")
+        elif args.data_cmd == "zenodo":
+            from . import zenodo as zn
+            if args.inspect:
+                info = zn.inspect_zenodo(args.src, classes=args.classes)
+                for k, v in info.items():
+                    print(f"{k:20s}: {v}")
+                print("\nCek: apakah 'objek_per_kelas' masuk akal (MMNAP biasanya terbanyak), dan nama kelasnya benar? "
+                      "Bila id kelas tidak sesuai urutan bawaan, ulangi dengan --classes NAMA0 NAMA1 ... sesuai id sebenarnya.")
+                return
+            if not args.out:
+                raise SystemExit("Isi --out (folder keluaran), atau pakai --inspect untuk hanya memeriksa.")
+            cmap = dict(m.split("=", 1) for m in args.map) if args.map else None
+            st = zn.convert_zenodo(args.src, args.out, classes=args.classes, class_map=cmap, val_frac=args.val_frac,
+                                   neg_ratio=args.neg_ratio, seed=args.seed, fmt=args.format)
+            print(f"Selesai: gambar per split {st['gambar']}; instans per kelas {st['instans']}; "
+                  f"positif {st['positif']}, negatif dipakai {st['negatif_dipakai']} dari {st['negatif_tersedia']}.")
+            print(f"Kelas dibuang (jadi latar): {st['kelas_dibuang']}; format anotasi: {st['format_anotasi']}; nama kelas dari: {st['nama_kelas_dari']}.")
+            print("Catatan: pembagian latih/val acak dan set ini tidak mencantumkan kamera, jadi frame berdekatan bisa ada di keduanya "
+                  "(metrik val cenderung optimistis).")
+            print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --model yolo11n.pt --epochs 50")
+        else:
+            cmap = dict(m.split("=", 1) for m in args.map or [])
+            st = ds.merge_yolo(args.src, args.out, class_map=cmap, names=args.names, keep_unmapped=args.keep_unmapped)
+            print(f"Selesai: gambar per split {st['gambar']}; instans per kelas {st['instans']}; dilewati {st['dilewati']} (semua labelnya terbuang).")
+    except (ValueError, FileNotFoundError) as e:
+        raise SystemExit(str(e))
 
 
 # ----------------------------------------------------------------------------- parser
@@ -386,6 +447,41 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--project", default="runs"); sp.add_argument("--name", default="trotoar")
     sp.add_argument("--device")
     sp.set_defaults(func=cmd_train)
+
+    sp = sub.add_parser("data", help="siapkan dataset publik (Cityscapes/IDD/Mapillary/Roboflow) untuk latih YOLO")
+    dsub = sp.add_subparsers(dest="data_cmd", required=True)
+    m = dsub.add_parser("masks", help="mask piksel -> YOLO-seg satu kelas (mis. sidewalk)")
+    m.add_argument("--src", required=True, help="folder dataset hasil unduhan/ekstrak")
+    m.add_argument("--out", required=True, help="folder keluaran (berisi data.yaml)")
+    m.add_argument("--preset", choices=["cityscapes", "sidewalkdetection", "walkscapes"], help="tata letak dan id kelas bawaan")
+    m.add_argument("--image-dir", help="folder gambar; boleh memuat {split}, mis. {split}/images")
+    m.add_argument("--mask-dir", help="folder mask; boleh memuat {split}, mis. {split}/labels")
+    m.add_argument("--image-suffix", help='akhiran berkas gambar, mis. .jpg; "auto" = coba semua ekstensi gambar'); m.add_argument("--mask-suffix")
+    m.add_argument("--label-id", type=int, help="id kelas pada mask 1 kanal (Cityscapes sidewalk = 8)")
+    m.add_argument("--label-rgb", help="warna kelas pada mask berwarna (RGB penuh), R,G,B")
+    m.add_argument("--threshold", type=int, help="mask biner hitam-putih: kelas = piksel lebih terang dari nilai ini (mis. 127)")
+    m.add_argument("--image-prefix", help="awalan nama berkas gambar, mis. Raw_"); m.add_argument("--mask-prefix", help="awalan nama berkas mask, mis. Label_")
+    m.add_argument("--splits", default="train,val", help="nama folder split pada dataset (Mapillary: training,validation)"); m.add_argument("--class-name", default="sidewalk")
+    m.add_argument("--max-side", type=int, default=1280, help="sisi terpanjang gambar keluaran (hemat ruang)")
+    m.add_argument("--limit", type=int, help="batasi gambar per split (untuk uji coba cepat)")
+    m.add_argument("--skip-empty", action="store_true", help="buang gambar tanpa kelas itu (disarankan untuk ADE20K)")
+    g = dsub.add_parser("merge", help="gabung set berformat YOLO (ekspor Roboflow) dan ubah nama kelas")
+    g.add_argument("--src", action="append", required=True, help="folder ekspor YOLO; boleh diulang")
+    g.add_argument("--out", required=True)
+    g.add_argument("--map", action="append", metavar="LAMA=BARU", help="ubah nama kelas; yang tak dipetakan dibuang; boleh diulang")
+    g.add_argument("--names", nargs="+", help="urutan nama kelas akhir")
+    g.add_argument("--keep-unmapped", action="store_true", help="pertahankan kelas yang tak ada di --map")
+    z = dsub.add_parser("zenodo", help="Zenodo 'Motorcyclists in Pedestrian Areas' -> YOLO (kendaraan_parkir, pengendara_lewat)")
+    z.add_argument("--src", required=True, help="folder hasil ekstrak PedestrianDataSet.zip (berisi images/ dan etiquetas/)")
+    z.add_argument("--out", help="folder keluaran (berisi data.yaml); tidak perlu bila --inspect")
+    z.add_argument("--inspect", action="store_true", help="hanya periksa isi dan format anotasi; tidak menulis apa pun")
+    z.add_argument("--classes", nargs="+", help="nama kelas menurut urutan id bila tak ada classes.txt (bawaan: MMNAP MMAP MNAP PCP)")
+    z.add_argument("--map", action="append", metavar="LAMA=BARU", help="bawaan: MNAP=kendaraan_parkir dan MMAP=pengendara_lewat; boleh diulang")
+    z.add_argument("--val-frac", type=float, default=0.15)
+    z.add_argument("--neg-ratio", type=float, default=0.3, help="gambar tanpa objek target (motor di jalan) = rasio x gambar positif")
+    z.add_argument("--seed", type=int, default=0)
+    z.add_argument("--format", choices=["polygon", "box"], default="polygon", help="polygon = kotak ditulis sebagai poligon 4 titik (bisa digabung ke set segmentasi)")
+    sp.set_defaults(func=cmd_data)
     return p
 
 
