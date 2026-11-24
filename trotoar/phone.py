@@ -31,6 +31,9 @@ INSTALL_HINT = (
 )
 
 _URL_RE = re.compile(r"https://([a-z0-9-]+)\.trycloudflare\.com", re.I)
+# Baris log cloudflared saat terowongan benar-benar tersambung ke jaringan Cloudflare. Alamat sudah dicetak
+# beberapa detik SEBELUM ini; membuka alamat pada jeda itu menghasilkan "Error 1033".
+_READY_MARK = "registered tunnel connection"
 
 
 class TunnelError(RuntimeError):
@@ -70,8 +73,8 @@ def find_url(line: str) -> str | None:
 
 
 class Tunnel:
-    def __init__(self, proc: subprocess.Popen, url: str, tail: deque):
-        self.proc, self.url, self.tail = proc, url, tail
+    def __init__(self, proc: subprocess.Popen, url: str, tail: deque, ready: bool = True):
+        self.proc, self.url, self.tail, self.ready = proc, url, tail, ready
 
     def close(self) -> None:
         if self.proc.poll() is None:
@@ -82,8 +85,10 @@ class Tunnel:
                 self.proc.kill()
 
 
-def start_tunnel(base_cmd: Sequence[str], port: int, timeout: float = 45.0) -> Tunnel:
-    """Jalankan ``<cloudflared> tunnel --url http://127.0.0.1:<port>`` dan tunggu alamat publiknya."""
+def start_tunnel(base_cmd: Sequence[str], port: int, timeout: float = 45.0, ready_timeout: float = 25.0) -> Tunnel:
+    """Jalankan ``<cloudflared> tunnel --url http://127.0.0.1:<port>``; tunggu alamat publiknya, lalu (paling lama
+    ``ready_timeout`` detik) sampai cloudflared melaporkan terowongan tersambung. Bila penanda itu tak muncul
+    (format log berubah), alamat tetap dikembalikan dengan ``ready=False`` supaya pemakai diberi petunjuk."""
     cmd = [*base_cmd, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -93,6 +98,7 @@ def start_tunnel(base_cmd: Sequence[str], port: int, timeout: float = 45.0) -> T
     tail: deque = deque(maxlen=12)
     box: dict = {}
     found = threading.Event()
+    ready = threading.Event()
 
     def pump() -> None:                                        # terus menguras keluaran supaya pipa tidak penuh
         for line in proc.stdout:                               # type: ignore[union-attr]
@@ -102,7 +108,11 @@ def start_tunnel(base_cmd: Sequence[str], port: int, timeout: float = 45.0) -> T
                 if u:
                     box["url"] = u
                     found.set()
+            if _READY_MARK in line.lower():
+                box["ready"] = True
+                ready.set()
         found.set()                                            # proses berakhir
+        ready.set()
 
     threading.Thread(target=pump, daemon=True).start()
     found.wait(timeout)
@@ -111,7 +121,12 @@ def start_tunnel(base_cmd: Sequence[str], port: int, timeout: float = 45.0) -> T
         why = "berhenti sebelum memberi alamat" if proc.poll() is not None else f"tidak memberi alamat dalam {timeout:.0f} detik"
         raise TunnelError(f"cloudflared {why}. Keluaran terakhir:\n  " + "\n  ".join(tail or ["(kosong)"])
                           + "\nPeriksa koneksi internet; jaringan kampus kadang memblokir terowongan.")
-    return Tunnel(proc, box["url"], tail)
+    if not box.get("ready"):
+        ready.wait(ready_timeout)
+    if proc.poll() is not None and not box.get("ready"):
+        raise TunnelError("cloudflared berhenti setelah memberi alamat. Keluaran terakhir:\n  " + "\n  ".join(tail or ["(kosong)"])
+                          + "\nPeriksa koneksi internet; jaringan kampus kadang memblokir terowongan.")
+    return Tunnel(proc, box["url"], tail, ready=bool(box.get("ready")))
 
 
 # ---------------------------------------------------------------------------- kode QR
@@ -207,7 +222,7 @@ class PhoneSession:
 
     def _run(self) -> None:
         try:
-            self.out("Menyiapkan tautan HTTPS untuk HP (Cloudflare Tunnel)... biasanya 5-15 detik.")
+            self.out("Menyiapkan tautan HTTPS untuk HP (Cloudflare Tunnel)... biasanya 10-30 detik.")
             try:
                 self.tunnel = start_tunnel(self.base_cmd, self.port, self.timeout)
             except TunnelError as e:
@@ -237,7 +252,11 @@ class PhoneSession:
                     _open_file(png)
             self.out("")
             self.out("Di Safari: ketuk Izinkan untuk kamera, maka deteksi mulai sendiri. Biarkan layar iPhone menyala dan Safari tetap di depan.\n"
-                     "Kalau halaman belum terbuka, tunggu beberapa detik (alamat baru perlu waktu agar bisa dijangkau), lalu muat ulang.")
+                     "Kalau halaman belum terbuka, tunggu beberapa detik (alamat baru perlu waktu agar bisa dijangkau), lalu muat ulang.\n"
+                     "\"Error 1033\" = terowongan belum atau sudah tidak tersambung. Biarkan terminal ini tetap jalan dan laptop tidak tidur; "
+                     "bila terminal sudah berhenti, jalankan lagi lalu pindai QR yang BARU (alamat berganti tiap dijalankan).")
+            if not self.tunnel.ready:
+                self.out("Catatan: terowongan belum melaporkan tersambung; bila halaman menampilkan Error 1033, tunggu 10-30 detik lalu muat ulang.")
         finally:
             self.done.set()
 

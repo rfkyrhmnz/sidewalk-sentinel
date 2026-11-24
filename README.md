@@ -97,6 +97,9 @@ buka aplikasi **Kamera**, arahkan ke kode, ketuk tautan yang muncul, ketuk **Izi
 - Kamera belakang dipakai lebih dulu. Notifikasi browser tidak tersedia di Safari biasa; bunyi/suara baru aktif setelah layar disentuh sekali.
 - Tautan berisi kunci acak dan berubah tiap `python main.py phone`; sumber di sisi server (Stream) dimatikan pada mode ini.
 - Bila tautan belum terbuka, tunggu beberapa detik lalu muat ulang (alamat baru perlu waktu agar bisa dijangkau). Jaringan kampus kadang memblokir terowongan; coba hotspot HP.
+- **Error 1033** (halaman "Cloudflare Tunnel error") = terowongan di laptop belum atau sudah tidak tersambung. `python main.py phone` kini menunggu
+  cloudflared melaporkan *Registered tunnel connection* sebelum mencetak QR (penanda ini belum dicoba dengan cloudflared asli; bila tak muncul,
+  QR tetap dicetak disertai catatan). Bila terminal sudah berhenti (Ctrl+C, laptop tidur), jalankan lagi dan pindai QR yang **baru**.
 - Tanpa terowongan: aplikasi yang menjadikan HP sebagai webcam laptop (misalnya Iriun Webcam atau Camo) membuat HP muncul di daftar kamera di Pengaturan,
   atau pakai aplikasi kamera IP di HP dengan sumber **Stream** (Wi-Fi yang sama).
 - Manual (tanpa `phone`): `python main.py ui --remote`, lalu `cloudflared tunnel --url http://127.0.0.1:8765` dan buka `https://<alamat>/?key=<kunci>`.
@@ -165,7 +168,7 @@ dari data validasi Anda.
 
 ## Status verifikasi — baca sebelum dipakai di laporan
 
-- **Teruji (103 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
+- **Teruji (107 tes otomatis, data SINTETIS)**: segmentasi klasik, geometri kontak/cincin, heuristik pengendara,
   dwell time, kompensasi gerak kamera, pipeline video, mode live (sumber berkas + kamera tiruan berlaju tetap),
   CLI, evaluasi, penanganan EXIF/video, konversi dataset (mask piksel ke YOLO-seg, gabung/ubah kelas set YOLO; data buatan), serta server dasbor (frame JPEG lewat HTTP, siaran MJPEG, poligon manual,
   pengaturan, tinjauan benar/salah dan CSV-nya, manifes aplikasi, service worker, dan ikon (termasuk di mode `--remote`), kunci akses `--remote`, pembuatan kode QR yang di-decode ulang, pembacaan alamat terowongan dari log, galat bila cloudflared tak ada). Jalankan: `pytest tests -q`.
