@@ -330,6 +330,26 @@ def cmd_data(args, **_):
             if st["tanpa_gambar"] or st["mask_rusak"]:
                 print(f"Dilewati: {st['tanpa_gambar']} mask tanpa gambar pasangannya, {st['mask_rusak']} berkas tak terbaca.")
             print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --epochs 100")
+        elif args.data_cmd == "zenodo":
+            from . import zenodo as zn
+            if args.inspect:
+                info = zn.inspect_zenodo(args.src, classes=args.classes)
+                for k, v in info.items():
+                    print(f"{k:20s}: {v}")
+                print("\nCek: apakah 'objek_per_kelas' masuk akal (MMNAP biasanya terbanyak), dan nama kelasnya benar? "
+                      "Bila id kelas tidak sesuai urutan bawaan, ulangi dengan --classes NAMA0 NAMA1 ... sesuai id sebenarnya.")
+                return
+            if not args.out:
+                raise SystemExit("Isi --out (folder keluaran), atau pakai --inspect untuk hanya memeriksa.")
+            cmap = dict(m.split("=", 1) for m in args.map) if args.map else None
+            st = zn.convert_zenodo(args.src, args.out, classes=args.classes, class_map=cmap, val_frac=args.val_frac,
+                                   neg_ratio=args.neg_ratio, seed=args.seed, fmt=args.format)
+            print(f"Selesai: gambar per split {st['gambar']}; instans per kelas {st['instans']}; "
+                  f"positif {st['positif']}, negatif dipakai {st['negatif_dipakai']} dari {st['negatif_tersedia']}.")
+            print(f"Kelas dibuang (jadi latar): {st['kelas_dibuang']}; format anotasi: {st['format_anotasi']}; nama kelas dari: {st['nama_kelas_dari']}.")
+            print("Catatan: pembagian latih/val acak dan set ini tidak mencantumkan kamera, jadi frame berdekatan bisa ada di keduanya "
+                  "(metrik val cenderung optimistis).")
+            print(f"Latih dengan:  python main.py train --data {Path(args.out) / 'data.yaml'} --model yolo11n.pt --epochs 50")
         else:
             cmap = dict(m.split("=", 1) for m in args.map or [])
             st = ds.merge_yolo(args.src, args.out, class_map=cmap, names=args.names, keep_unmapped=args.keep_unmapped)
@@ -451,6 +471,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--map", action="append", metavar="LAMA=BARU", help="ubah nama kelas; yang tak dipetakan dibuang; boleh diulang")
     g.add_argument("--names", nargs="+", help="urutan nama kelas akhir")
     g.add_argument("--keep-unmapped", action="store_true", help="pertahankan kelas yang tak ada di --map")
+    z = dsub.add_parser("zenodo", help="Zenodo 'Motorcyclists in Pedestrian Areas' -> YOLO (kendaraan_parkir, pengendara_lewat)")
+    z.add_argument("--src", required=True, help="folder hasil ekstrak PedestrianDataSet.zip (berisi images/ dan etiquetas/)")
+    z.add_argument("--out", help="folder keluaran (berisi data.yaml); tidak perlu bila --inspect")
+    z.add_argument("--inspect", action="store_true", help="hanya periksa isi dan format anotasi; tidak menulis apa pun")
+    z.add_argument("--classes", nargs="+", help="nama kelas menurut urutan id bila tak ada classes.txt (bawaan: MMNAP MMAP MNAP PCP)")
+    z.add_argument("--map", action="append", metavar="LAMA=BARU", help="bawaan: MNAP=kendaraan_parkir dan MMAP=pengendara_lewat; boleh diulang")
+    z.add_argument("--val-frac", type=float, default=0.15)
+    z.add_argument("--neg-ratio", type=float, default=0.3, help="gambar tanpa objek target (motor di jalan) = rasio x gambar positif")
+    z.add_argument("--seed", type=int, default=0)
+    z.add_argument("--format", choices=["polygon", "box"], default="polygon", help="polygon = kotak ditulis sebagai poligon 4 titik (bisa digabung ke set segmentasi)")
     sp.set_defaults(func=cmd_data)
     return p
 

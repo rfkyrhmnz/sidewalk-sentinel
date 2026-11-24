@@ -101,6 +101,33 @@ python main.py data merge --src datasets/raw/toolkit-sidewalk --src datasets/raw
 Kelas yang tidak dipetakan dibuang, dan gambar yang seluruh labelnya terbuang tidak disalin. **Periksa dulu mutu tiap set**: jumlah gambar dan ketepatan label di halaman Roboflow belum saya verifikasi.
 Set ini sebaiknya dipakai sebagai himpunan uji/penyesuaian dan dilengkapi foto sendiri; 100 sampai 200 gambar berlabel sudah berguna untuk menghitung presisi dan recall.
 
+## C. Kendaraan di area pejalan kaki: Zenodo (motor dengan / tanpa pengendara)
+Satu-satunya set publik yang membedakan **motor dengan pengendara** dan **motor tanpa pengendara** di area pejalan kaki: 6.324 gambar CCTV Medellín
+(Kolombia), CC BY 4.0, DOI 10.5281/zenodo.7935299. Dipetakan ke dua kelas proyek: `MMAP` menjadi `pengendara_lewat`, `MNAP` menjadi `kendaraan_parkir`;
+`MMNAP` (motor di jalan) dan `PCP` dibuang tetapi gambarnya dipakai sebagai contoh negatif.
+```powershell
+# Windows (PowerShell, di folder proyek). 643 MB.
+mkdir datasets\raw -Force
+curl.exe -L --fail -o datasets\raw\PedestrianDataSet.zip "https://zenodo.org/records/7935299/files/PedestrianDataSet.zip?download=1"
+Expand-Archive datasets\raw\PedestrianDataSet.zip datasets\raw\zenodo
+python main.py data zenodo --src datasets\raw\zenodo --inspect                  # lihat format anotasi + jumlah objek per kelas
+python main.py data zenodo --src datasets\raw\zenodo --out datasets\yolo\kendaraan
+```
+**Jalankan `--inspect` dulu.** Halaman Zenodo tidak menyebut format anotasi (YOLO txt atau Pascal VOC xml didukung; format lain berhenti dengan pesan
+yang jelas), dan urutan id kelasnya diasumsikan `MMNAP, MMAP, MNAP, PCP` bila tidak ada `classes.txt`. Bila `objek_per_kelas` tampak tak masuk akal,
+ulangi dengan `--classes NAMA0 NAMA1 ...` menurut id yang benar. URL unduhan di atas belum dicoba dari sandbox (hanya GitHub yang terjangkau); bila gagal,
+unduh dari https://zenodo.org/records/7935299 secara manual.
+
+Melatihnya di CPU laptop tidak realistis (6 ribu gambar); pakai notebook Colab `notebooks/latih_kendaraan.ipynb` (GPU T4 gratis), yang menjalankan perintah
+di atas lalu `python main.py train`. Bagian B notebook (opsional, eksperimen) menggabungkan set ini dengan set trotoar menjadi **satu model tiga kelas**
+`trotoar` / `kendaraan_parkir` / `pengendara_lewat` lewat `data merge`.
+
+Peringatan metodologis:
+- **Pembagian latih/val acak.** Set ini tidak punya split dan tidak mencantumkan kamera; frame berdekatan dari kamera yang sama bisa ada di latih dan val, jadi mAP val optimistis.
+- **Label parsial pada model tiga kelas.** Gambar Zenodo tidak berlabel trotoar, dan gambar trotoar tidak berlabel kendaraan; model belajar bahwa objek tak berlabel itu latar. Itu menurunkan trotoar di gambar CCTV dan kendaraan di gambar trotoar. Pendekatan yang lebih bersih: model trotoar terpisah (yang sudah ada) ditambah detektor dua kelas ini, lalu keputusan dari tumpang-tindihnya.
+- **Hanya motor, dari CCTV Kolombia.** Tidak ada mobil, dan "area pejalan kaki" tidak didefinisikan (bisa termasuk zebra cross). Wajib diuji pada videomu sendiri sebelum dipercaya.
+- Detektor ini belum tersambung ke aplikasi: aplikasi masih memakai YOLO COCO untuk kendaraan dan pengendara. Penyambungan dikerjakan setelah modelnya terbukti layak.
+
 ## Batasan yang perlu diketahui
 - Alat konversi diuji dengan data **buatan** yang meniru tata letak Cityscapes, Mapillary (mask palet), dan ekspor Roboflow. Belum dicoba pada unduhan asli, dan pelatihan YOLO-nya sendiri belum dijalankan.
 - Cityscapes, IDD, dan Mapillary diambil di jalan Eropa/India, bukan Indonesia. Setelah pelatihan awal, tambahkan 100 sampai 200 foto trotoar lokal untuk penyesuaian dan ukur hasilnya di foto lokal.
