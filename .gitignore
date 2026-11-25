@@ -1,0 +1,27 @@
+# Data runtime: unggahan, hasil analisis, video demo. Aman dihapus kapan saja.
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Bobot model dan keluaran training (proyek ini tidak memakainya)
+*.pt
+runs/
+live_hasil/
+
+# Video mentah mengandung wajah dan plat nomor: jangan masuk repositori
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
