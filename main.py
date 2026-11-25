@@ -3,6 +3,7 @@
 
     python main.py                      # jalankan aplikasi web di http://localhost:8000
     python main.py serve --lan          # buka juga dari HP di Wi-Fi yang sama (tautan berkunci)
+    python main.py serve --https        # sama, plus HTTPS: perlu agar kamera HP bisa jadi CCTV
     python main.py --cam "Depan=rtsp://user:sandi@192.168.1.20/stream1"   # kamera CCTV, dipantau terus
     python main.py analyze video.mp4    # analisis lewat baris perintah
     python main.py demo                 # buat video demo sintetis
@@ -30,9 +31,10 @@ def parse_sets(items: list[str]) -> dict:
 
 def cmd_serve(a) -> int:
     from sidewalk_sentinel.server import serve
-    if not a.no_open and not a.lan:
+    if not a.no_open and not (a.lan or a.https):
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{a.port}/")).start()
-    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan, cams=a.cam, retention_days=a.retention_days)
+    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan, cams=a.cam, retention_days=a.retention_days,
+          https=a.https)
     return 0
 
 
@@ -77,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--lan", action="store_true", help="dengarkan di semua antarmuka, tautan berkunci untuk HP")
+    s.add_argument("--https", action="store_true",
+                   help="layani HTTPS (sertifikat dibuat sendiri) agar kamera HP bisa dipakai; otomatis ikut --lan")
     s.add_argument("--data", default="data", help="folder unggahan dan hasil (aman dihapus)")
     s.add_argument("--no-open", action="store_true", help="jangan buka browser otomatis")
     s.add_argument("--cam", action="append", metavar="NAMA=SUMBER",

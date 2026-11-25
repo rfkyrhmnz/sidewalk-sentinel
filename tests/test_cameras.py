@@ -548,3 +548,105 @@ def test_sumber_url_diuji_lewat_siaran_mjpeg_kamera_lain(srv):
         for cam in (b, a):
             if cam:
                 c.req("DELETE", f"/api/cams/{cam['id']}")
+
+
+# ====================================================================== kamera perangkat (frame didorong browser)
+def _jpeg(frame) -> bytes:
+    import cv2
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    assert ok
+    return buf.tobytes()
+
+
+def test_sumber_browser_diterima_dan_dikenali():
+    assert parse_source("browser").kind == "browser"
+    assert not parse_source("browser").is_recording
+    assert cam_mod.source_kind("browser") == "browser"
+    assert build_spec({"source": "browser", "name": "HP"}).learn == "normal"
+
+
+def test_ukuran_jpeg_dibaca_dari_header_tanpa_mendekode():
+    import numpy as np
+    assert cam_mod.jpeg_size(_jpeg(np.zeros((90, 160, 3), np.uint8))) == (160, 90)
+    assert cam_mod.jpeg_size(b"bukan jpeg") is None
+    assert cam_mod.jpeg_size(b"\xff\xd8\xff\xd9") is None
+    assert cam_mod.jpeg_size(b"") is None
+
+
+def test_kamera_perangkat_belajar_memantau_dan_mencatat_parkir(srv):
+    from sidewalk_sentinel.synthetic import Actor, Renderer, Scene
+    app, c = srv
+    scene = Scene(seconds=30, actors=[Actor("P", (60, 36), (40, 60, 200), [(0.0, 320, 300)], stay=True)])
+    r = Renderer(scene)
+    st, d = c.req("POST", "/api/cams", {"source": "browser", "name": "HP uji", "learn": "cepat",
+                                        "settings": {"park_seconds": 1}, "roi": [list(p) for p in ROI]})
+    assert st == 201 and d["kind"] == "browser", d
+    cid = d["id"]
+    try:
+        wait_for(lambda: cam_info(c, cid)["status"] == "menunggu", 10, msg="tanpa frame harus menunggu perangkat")
+
+        def push(actors, t):
+            st, resp = c.req("POST", f"/api/cams/{cid}/frame", _jpeg(r.frame(t, actors=actors)))
+            assert st == 200, resp
+            return resp
+
+        seen = set()
+        t0 = time.time()
+        while time.time() - t0 < 20:                      # trotoar kosong: belajar latar sendiri
+            resp = push(False, 1.0)
+            seen.add(resp["status"])
+            if resp["status"] == "memantau":
+                break
+            time.sleep(0.12)
+        assert {"belajar", "memantau"} <= seen, seen
+        assert set(resp) >= {"status", "learn_progress", "tracks", "counts_today", "seq"}
+
+        boxes = []
+        t0 = time.time()
+        while time.time() - t0 < 6 and cam_info(c, cid)["counts_today"]["parkir"] == 0:
+            resp = push(True, 5.0)                        # kendaraan datang dan diam di trotoar
+            boxes += resp["tracks"]
+            time.sleep(0.12)
+        info = cam_info(c, cid)
+        assert info["counts_today"]["parkir"] == 1, info
+        assert boxes and all(0 <= v <= 1 for t in boxes for v in t["box"]), "jejak harus ternormalisasi"
+        assert {"id", "box", "state", "dwell"} <= set(boxes[0])
+        assert info["relearns"] == 0
+
+        # perangkat berhenti mengirim: menunggu, tanpa membuang latar yang sudah dipelajari
+        wait_for(lambda: cam_info(c, cid)["status"] == "menunggu", 12, msg="harus menunggu saat frame berhenti")
+        t0 = time.time()
+        while time.time() - t0 < 5 and cam_info(c, cid)["status"] != "memantau":
+            push(False, 8.0)
+            time.sleep(0.12)
+        again = cam_info(c, cid)
+        assert again["status"] == "memantau" and again["learn_progress"] == info["learn_progress"], again
+        assert again["relearns"] == 0
+    finally:
+        c.req("DELETE", f"/api/cams/{cid}")
+
+
+def test_frame_perangkat_menolak_masukan_buruk(srv):
+    import numpy as np
+    app, c = srv
+    st, d = c.req("POST", "/api/cams", {"source": "browser", "name": "HP buruk"})
+    cid = d["id"]
+    st2, demo = c.req("POST", "/api/cams", {"source": "demo", "speed": 1})
+    try:
+        good = _jpeg(np.zeros((90, 160, 3), np.uint8))
+        assert c.req("POST", f"/api/cams/{cid}/frame", b"bukan jpeg")[0] == 400
+        assert c.req("POST", f"/api/cams/{cid}/frame", b"")[0] == 400
+
+        # 'bom dekompresi': header menyatakan 30000x30000. Harus ditolak SEBELUM mendekode (pesan khas penjaga).
+        i = good.index(b"\xff\xc0")
+        bomb = good[:i + 5] + (30000).to_bytes(2, "big") + (30000).to_bytes(2, "big") + good[i + 9:]
+        st, err = c.req("POST", f"/api/cams/{cid}/frame", bomb)
+        assert st == 400 and "terlalu besar" in err["error"], err
+
+        st, err = c.req("POST", f"/api/cams/{demo['id']}/frame", good)       # bukan kamera perangkat
+        assert st == 400 and "perangkat" in err["error"], err
+        assert c.req("POST", "/api/cams/000000000000/frame", good)[0] == 404
+        assert c.req("GET", f"/api/cams/{cid}/frame")[0] in (404, 405)
+    finally:
+        c.req("DELETE", f"/api/cams/{cid}")
+        c.req("DELETE", f"/api/cams/{demo['id']}")

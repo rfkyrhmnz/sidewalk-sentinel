@@ -1,7 +1,8 @@
 # Sidewalk Sentinel
 
-Aplikasi web (bisa dipasang di layar utama HP) yang mendeteksi dua hal pada trotoar, dari **kamera CCTV yang
-dipantau terus-menerus** atau dari video yang diunggah:
+Aplikasi web (bisa dipasang di layar utama HP) yang **menjadikan HP atau laptop sebagai kamera CCTV**: kamera
+dinyalakan, diarahkan ke trotoar, dan deteksi berjalan langsung serta otomatis. Aplikasi juga bisa membaca kamera CCTV
+lain (RTSP, webcam USB) atau menganalisis video yang diunggah. Dua hal yang dideteksi pada trotoar:
 
 1. **Kendaraan parkir di trotoar**: kendaraan diam di atas area trotoar selama sekian detik (bawaan 10 detik).
 2. **Pengendara naik ke trotoar**: kendaraan bergerak yang masuk ke area trotoar dari luar (jalan).
@@ -25,43 +26,77 @@ Browser terbuka di `http://localhost:8000/`. Folder `data/` menyimpan unggahan d
 `ffmpeg` bersifat opsional: bila ada, video hasil diberi anotasi dalam H.264 yang bisa diputar di HP; bila tidak, hasil
 tetap lengkap (hitungan, foto bukti, CSV, JSON) tanpa video beranotasi.
 
-Coba cepat tanpa kamera atau video sendiri: di halaman **Pantau** tekan **Coba kamera demo**. Server memutar adegan
+Coba cepat dengan kamera laptop: di halaman **Pantau** tekan **Jadikan perangkat ini CCTV**, izinkan kamera, tandai
+area trotoar, lalu biarkan. Aplikasi mempelajari latar sendiri dan mencatat kendaraan yang parkir atau naik ke trotoar.
+(`http://localhost` termasuk konteks aman, jadi di laptop tidak perlu HTTPS.)
+
+Coba cepat tanpa kamera atau video sendiri: di halaman **Pantau** tekan **Coba demo**. Server memutar adegan
 sintetis seperti kamera sungguhan, belajar latarnya sendiri, lalu mencatat kejadian. Hasil yang benar untuk adegan itu
 adalah 1 parkir dan 2 naik trotoar. Untuk jalur analisis video, buka **Analisis** lalu **Coba dengan video demo**.
 
 ## Membuka dari HP
 
 ```powershell
-python main.py --lan
+python main.py --https
 ```
 
-Terminal mencetak tautan `http://<IP-laptop>:8000/?k=...`. HP dan laptop harus berada di Wi-Fi yang sama. Tautan itu
-memuat kunci acak yang berlaku untuk satu kali jalan server; tanpa kunci, server menolak permintaan.
+`--https` otomatis mengaktifkan `--lan`. Terminal mencetak tautan `https://<IP-laptop>:8000/?k=...`. HP dan laptop harus
+berada di Wi-Fi yang sama. Tautan itu memuat kunci acak yang berlaku untuk satu kali jalan server; tanpa kunci, server
+menolak permintaan.
 
-- **Pantau** tidak butuh HTTPS: server yang membaca kamera, HP hanya menampilkan hasilnya.
+**Kenapa HTTPS:** browser hanya mengizinkan kamera (`getUserMedia`) pada HTTPS atau `localhost`. Alamat Wi-Fi seperti
+`http://192.168.1.23:8000` tidak termasuk, sehingga kamera HP tidak bisa dibuka tanpa HTTPS.
+
+**Peringatan sertifikat.** Sertifikat dibuat sendiri (ditandatangani sendiri, tersimpan di `data/tls/`, memuat IP Wi-Fi
+saat itu, dibuat ulang otomatis bila IP berubah atau hampir habis), sehingga browser memberi peringatan sekali.
+Di Chrome: **Lanjutan → Lanjutkan ke situs**. Di Safari: **Tampilkan Detail → buka situs web ini**. Sesudah itu
+izinkan kamera. Paket `cryptography` (ada di `requirements.txt`) dipakai untuk membuat sertifikat.
+
+Cara lain tanpa peringatan: terowongan HTTPS ke server (misalnya `cloudflared tunnel --url http://localhost:8000`) dan
+buka alamat HTTPS-nya dengan tambahan `?k=<kunci>`. Terowongan membuat server terjangkau dari internet; kunci acak
+tetap berlaku, tetapi pertimbangkan risikonya.
+
+- **Pantau dari sumber lain** (RTSP, webcam USB di laptop, rekaman) tidak butuh HTTPS: server yang membaca kamera, HP
+  hanya menampilkan hasilnya.
 - **Rekam video** dan **Pilih video** (halaman Analisis) bekerja lewat HTTP biasa: HP membuka kamera bawaannya, hasil rekaman diunggah.
-- **Kamera langsung** (halaman Analisis, memakai kamera perangkat itu sendiri) memakai `getUserMedia`, yang hanya diizinkan browser pada HTTPS atau `localhost`. Di HP lewat
-  `http://IP-laptop` fitur ini menampilkan penjelasan, bukan galat. Untuk mengaktifkannya, buat terowongan HTTPS ke
-  server (misalnya `cloudflared tunnel --url http://localhost:8000`) dan buka alamat HTTPS-nya dengan tambahan `?k=<kunci>`.
-  Cara ini belum diuji pada perangkat sungguhan; ingat bahwa terowongan membuat server terjangkau dari internet.
-- Manifest dan ikon PWA sudah disediakan. Lewat HTTP biasa, menu **Tambahkan ke layar utama** hanya membuat pintasan;
-  pemasangan PWA penuh (service worker) butuh HTTPS.
+- Manifest dan ikon PWA sudah disediakan. Dengan sertifikat yang belum dipercaya, browser menolak mendaftarkan service
+  worker, sehingga **Tambahkan ke layar utama** hanya membuat pintasan. Kamera tetap bisa dipakai.
+- Tanpa `--https`, tombol kamera perangkat di HP menampilkan penjelasan cara memperbaikinya, bukan galat.
 
 ## Mode pantau (kamera CCTV)
 
+### Perangkat ini jadi CCTV
+
+1. **Pantau → Jadikan perangkat ini CCTV.** Izinkan kamera. Kamera belakang dipakai lebih dulu di HP; **Ganti kamera**
+   bertukar depan dan belakang.
+2. **Tandai area trotoar** pada gambar langsung dari kamera itu. Tidak perlu memilih frame kosong: aplikasi **belajar
+   latar sendiri** dengan median piksel dari beberapa cuplikan berjarak waktu (sekitar 22 detik pada kamera langsung),
+   sehingga kendaraan yang kebetulan lewat tidak ikut tersimpan.
+3. Status berubah menjadi **Memantau**. Kendaraan yang parkir atau naik ke trotoar langsung diberi kotak di gambar
+   dan masuk ke **Kejadian** dengan foto bukti. Pita merah di atas layar menandakan perangkat ini sedang jadi CCTV dan
+   tetap tampil di semua halaman.
+
+Cara kerjanya: browser mengambil gambar dari `<video>` sekitar 5 kali per detik (lebar 640 px, JPEG) dan mengirimnya ke
+`POST /api/cams/<id>/frame`. Server menyimpan hanya frame terbaru, lalu menjalankan mesin pantau yang sama persis dengan
+sumber lain. Kotak deteksi digambar di browser dari hasil yang dikembalikan tiap kiriman. Server menolak frame yang
+bukan JPEG, lebih dari 8 megapiksel, atau badannya melebihi 3 MB, tanpa mendekodenya lebih dulu.
+
+Bila halaman dimuat ulang atau ditutup lalu dibuka lagi, perangkat yang sama melanjutkan sendiri tanpa belajar ulang
+(latar tersimpan di server). Bila tidak ada frame lebih dari 3 detik, status menjadi **Menunggu perangkat**.
+
+### Sumber lain
+
 Server membaca tiap kamera di utas sendiri, tanpa menunggu ada yang membuka halaman. Laptop dan HP hanya penampil.
+**Pantau → Tambah kamera → Sumber lain** menerima alamat RTSP dari CCTV atau NVR, tautan http(s) berupa video
+(misalnya MJPEG), webcam USB di komputer server (`device:0`), rekaman video yang diunggah (diputar seperti siaran
+kamera, bisa diulang terus), dan kamera demo. Langkah belajar latar dan penandaan area sama; belajar latar memakan
+sekitar 3 detik untuk rekaman dan demo.
 
-1. **Pantau → Tambah kamera.** Sumber yang dikenali: alamat RTSP dari CCTV atau NVR, tautan http(s) berupa video
-   (misalnya MJPEG), webcam USB di komputer server (`device:0`), rekaman video yang diunggah (diputar seperti siaran
-   kamera, bisa diulang terus), dan kamera demo.
-2. **Tandai area trotoar** pada gambar langsung dari kamera. Tidak perlu memilih frame kosong: server **belajar
-   latar sendiri** dengan median piksel dari beberapa cuplikan berjarak waktu (sekitar 3 detik untuk rekaman dan demo,
-   sekitar 22 detik untuk kamera langsung), sehingga kendaraan yang kebetulan lewat tidak ikut tersimpan.
-3. Kamera berstatus **Memantau**. Kejadian masuk ke halaman kamera dan ke **Kejadian** (semua kamera, bisa disaring
-   per jenis, unduh CSV) lengkap dengan foto bukti beranotasi nama kamera dan jam. Selama halaman terbuka, kejadian
-   baru memunculkan pemberitahuan, getar di HP, dan lencana pada menu Kejadian.
+Kejadian masuk ke halaman kamera dan ke **Kejadian** (semua kamera, bisa disaring per jenis, unduh CSV) lengkap dengan
+foto bukti beranotasi nama kamera dan jam. Selama halaman terbuka, kejadian baru memunculkan pemberitahuan, getar di HP,
+dan lencana pada menu Kejadian.
 
-Status kamera: *Perlu area*, *Menghubungkan*, *Belajar latar*, *Memantau*, *Terputus* (mencoba lagi sendiri dengan
+Status kamera: *Perlu area*, *Menghubungkan*, *Menunggu perangkat*, *Belajar latar*, *Memantau*, *Terputus* (mencoba lagi sendiri dengan
 jeda yang membesar sampai 30 detik), *Dijeda*, *Selesai* (rekaman yang tidak diulang; tombol **Putar ulang**).
 Di halaman kamera tersedia **Kalibrasi lagi**, **Ubah area**, **Jeda**, pengaturan (lama diam, kepekaan, ukuran objek
 minimum, nama, kecepatan putar rekaman), dan **Hapus** (dua ketukan).
@@ -72,7 +107,8 @@ mana-mana **dan** zona trotoar dibanjiri foreground (`use_scene_guard`, `scene_c
 Syarat kedua penting: dalam eksperimen, engine ternyata tahan terhadap pergeseran warna sedang, dan belajar ulang pada
 saat itu justru menyerap kendaraan yang sedang diam ke latar.
 
-**Keamanan sumber.** API hanya menerima `demo`, unggahan, `device:0` sampai `device:9`, `rtsp(s)://`, dan `http(s)://`.
+**Keamanan sumber.** API hanya menerima `demo`, unggahan, `browser` (kamera perangkat), `device:0` sampai `device:9`,
+`rtsp(s)://`, dan `http(s)://`.
 Jalur berkas lokal hanya lewat `--cam` (operator). Sandi pada alamat kamera disamarkan di API, log, dan layar;
 `cameras.json` disimpan dengan izin 600 (berlaku di Linux dan macOS; di Windows andalkan izin akun). Batas: 8 kamera dan 12 penonton siaran serentak. Kejadian lebih tua dari
 `--retention-days` (bawaan 30) dan di atas 5000 per kamera dihapus bersama fotonya.
@@ -84,6 +120,7 @@ python main.py --cam "Depan=rtsp://user:sandi@192.168.1.20:554/stream1" --cam "M
 ```
 
 Titik akhir utama: `GET/POST /api/cams`, `GET/POST/DELETE /api/cams/<id>`, `POST /api/cams/<id>/recalibrate`,
+`POST /api/cams/<id>/frame` (satu frame JPEG dari kamera perangkat; dijawab status, kotak deteksi, dan hitungan hari ini),
 `GET /api/cams/<id>/snapshot.jpg` (`?raw=1` tanpa anotasi), `GET /api/cams/<id>/stream.mjpg`,
 `GET /api/cams/<id>/events?after=<no>`, `GET /api/events?kind=&limit=&offset=`, dan `GET /api/events.csv`.
 
@@ -156,7 +193,16 @@ hitung presisi, recall, dan galat waktu.
   bekasnya bisa terbaca sebagai objek.
 - Kendaraan gelap di bawah bayangan pekat bisa terbaca sebagai bayangan.
 - Pengendara yang tampak dari depan bisa mirip pejalan kaki dan tersaring.
-- Kamera langsung (kamera perangkat itu sendiri, halaman Analisis) di HP butuh HTTPS; mode Pantau tidak.
+- **Kamera perangkat hanya hidup selama halaman aplikasi terbuka di layar.** Web tidak bisa menjaga kamera tetap
+  menyala saat HP terkunci atau aplikasi berpindah ke latar; aplikasi meminta layar tetap menyala (Wake Lock) selama
+  kamera aktif, tetapi HP sebaiknya dicolok ke pengisi daya dan ditaruh di dudukan. Untuk pemantauan 24 jam,
+  pakai kamera IP (RTSP) yang dibaca server.
+- Satu kamera perangkat sebaiknya dikirim dari satu perangkat saja. Server tidak membedakan pengirim, jadi dua
+  perangkat ke kamera yang sama saling menimpa frame.
+- Memutar HP (potret ke lanskap) mengubah rasio gambar: aplikasi belajar latar ulang, tetapi area trotoar yang sudah
+  ditandai tidak ikut bergeser, jadi tandai ulang lewat **Ubah area**.
+- Dengan `--https`, browser memberi peringatan sertifikat sekali (lihat "Membuka dari HP"). Cara ini baru diuji pada
+  Chrome di Linux (sertifikat dan alur kamera lewat kamera tiruan), belum pada HP sungguhan.
 - Pemberitahuan kejadian hanya muncul selama halaman terbuka. Web Push (notifikasi saat aplikasi tertutup) belum ada.
 - **Seluruh validasi memakai adegan sintetis.** Alamat RTSP belum diuji pada kamera sungguhan; jalur sumber URL
   diuji lewat siaran MJPEG http dari kamera lain. Beban CPU untuk banyak kamera belum diukur pada perangkat lemah.
@@ -198,8 +244,11 @@ python -m pytest -q
 `tests/test_monitor.py` menguji belajar latar otomatis dan penjaga perubahan adegan. `tests/test_cameras.py` menguji
 validasi sumber (termasuk penolakan sumber berbahaya dan penyamaran sandi), penyimpanan kejadian, siklus kamera
 (demo, unggahan, jeda, hapus, pemulihan setelah restart), siaran MJPEG, dan API.
+`tests/test_tls.py` menguji sertifikat HTTPS (alamat LAN, pemakaian ulang, pembuatan ulang, izin kunci) dan server TLS
+(termasuk koneksi yang diam saat jabat tangan dan cookie `Secure`).
 `tests/test_ui_live.py` dan `tests/test_ui_pantau.py` memakai Playwright dan Chrome untuk mengecek kamera langsung
-dan seluruh alur Pantau; otomatis dilewati bila keduanya tidak ada (`pip install playwright` dan Chrome terpasang).
+dan seluruh alur Pantau, termasuk perangkat jadi CCTV dengan kamera tiruan (kanvas yang menggambar jalan dan kendaraan),
+juga lewat HTTPS; otomatis dilewati bila keduanya tidak ada (`pip install playwright` dan Chrome terpasang).
 Seluruh rangkaian butuh sekitar 5 menit karena kamera demo diputar sungguhan.
 
 ## Privasi
