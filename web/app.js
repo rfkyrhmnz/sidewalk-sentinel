@@ -35,6 +35,15 @@ const ICON = {
   flip: I('<path d="M4 8h13l-3-3M20 16H7l3 3"/>'),
   stop: I('<rect x="6" y="6" width="12" height="12" rx="2"/>'),
   sync: I('<path d="M20 12a8 8 0 01-14 5M4 12a8 8 0 0114-5"/><path d="M18 3v4h-4M6 21v-4h4"/>'),
+  radar: I('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.5-5.5"/>'),
+  list: I('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
+  film: I('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9.5h18M3 14.5h18M8 5v14M16 5v14"/>'),
+  plus: I('<path d="M12 5v14M5 12h14"/>'),
+  pause: I('<path d="M9 5v14M15 5v14"/>'),
+  play: I('<path d="M7 4.5l12 7.5-12 7.5z"/>'),
+  area: I('<path d="M4 7l8-4 8 4v9l-8 5-8-5z"/>'),
+  sliders: I('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>'),
+  back: I('<path d="M15 5l-7 7 7 7"/>'),
 };
 
 function toast(title, text = '', kind = '') {
@@ -63,12 +72,20 @@ function stepper(n) {
     `<li data-s="${i + 1 < n ? 'done' : i + 1 === n ? 'now' : ''}" ${i + 1 === n ? 'aria-current="step"' : ''}><b>${i + 1}</b>${t}</li>`).join('')}</ol>`;
 }
 
+const SENS = { 1: 34, 2: 28, 3: 22, 4: 17, 5: 13 };                  // kepekaan -> diff_floor
+const SIZE = { kecil: 0.0008, sedang: 0.0015, besar: 0.004 };         // ukuran minimum -> min_area_frac
+const nearest = (map, v, dflt) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Object.keys(map).reduce((best, k) => (Math.abs(map[k] - n) < Math.abs(map[best] - n) ? k : best));
+};
+
 function overrides() {
   const s = S.settings;
   return {
     park_seconds: Number(s.park_seconds),
-    diff_floor: { 1: 34, 2: 28, 3: 22, 4: 17, 5: 13 }[s.sens],
-    min_area_frac: { kecil: 0.0008, sedang: 0.0015, besar: 0.004 }[s.size],
+    diff_floor: SENS[s.sens],
+    min_area_frac: SIZE[s.size],
     filter_pedestrians: s.filter_pedestrians,
     use_homomorphic: s.use_homomorphic,
     use_shadow_removal: s.use_shadow_removal,
@@ -84,19 +101,28 @@ function showError(host, err, tone = 'bad') {
 
 // --------------------------------------------------------------------------- router
 const NAV = [
-  ['#/', 'Beranda', ICON.home, /^#\/?$|^#\/(area|atur|proses|hasil)/],
-  ['#/live', 'Kamera', ICON.camera, /^#\/live/],
-  ['#/riwayat', 'Riwayat', ICON.history, /^#\/riwayat/],
-  ['#/tahapan', 'Tahapan', ICON.layers, /^#\/tahapan/],
+  ['#/', 'Pantau', ICON.radar, /^#\/?$|^#\/(pantau|tambah)/, false],
+  ['#/kejadian', 'Kejadian', ICON.list, /^#\/kejadian/, true],
+  ['#/analisis', 'Analisis', ICON.film, /^#\/(analisis|area|atur|proses|hasil|live|riwayat)/, false],
+  ['#/tahapan', 'Tahapan', ICON.layers, /^#\/tahapan/, false],
 ];
 
 function renderNav(hash) {
-  document.getElementById('nav').innerHTML = NAV.map(([href, label, icon, re]) =>
-    `<a href="${href}" ${re.test(hash) ? 'aria-current="page"' : ''}>${icon}<span>${label}</span></a>`).join('');
+  document.getElementById('nav').innerHTML = NAV.map(([href, label, icon, re, badge]) => {
+    const n = badge ? P.unseen : 0;
+    const tag = n ? `<i class="nav-badge" aria-hidden="true">${n > 99 ? '99+' : n}</i>` : '';
+    const sr = n ? `<span class="sr-only">, ${n} baru</span>` : '';
+    return `<a href="${href}" ${re.test(hash) ? 'aria-current="page"' : ''}>${icon}<span>${label}${sr}</span>${tag}</a>`;
+  }).join('');
 }
 
 const ROUTES = [
-  [/^#\/?$/, viewHome],
+  [/^#\/?$/, viewPantau],
+  [/^#\/tambah$/, viewAddCam],
+  [/^#\/pantau\/([0-9a-f]{12})$/, viewCam],
+  [/^#\/pantau\/([0-9a-f]{12})\/area$/, viewCamArea],
+  [/^#\/kejadian$/, viewFeed],
+  [/^#\/analisis$/, viewHome],
   [/^#\/area$/, viewArea],
   [/^#\/atur$/, viewSettings],
   [/^#\/proses\/([0-9a-f]{12})$/, viewProcess],
@@ -110,6 +136,7 @@ function route() {
   try { current.dispose(); } catch { /* abaikan */ }
   current = { dispose() {} };
   const hash = location.hash || '#/';
+  if (/^#\/kejadian/.test(hash)) P.unseen = 0;
   renderNav(hash);
   for (const [re, fn] of ROUTES) {
     const m = hash.match(re);
@@ -158,24 +185,26 @@ async function viewHome() {
   const ffmpegNote = S.info && !S.info.ffmpeg
     ? `<div class="notice" data-tone="warn"><b>ffmpeg belum terpasang</b>Analisis tetap jalan. Video beranotasi dinonaktifkan; bukti tetap berupa foto.</div>` : '';
   view.innerHTML = `
-  <div class="hero">
-    <div class="hero-scene">${HERO}</div>
-    <div class="hero-copy stack">
-      <h1 class="h1">Kendaraan di trotoar, terdeteksi otomatis.</h1>
-      <p class="lead">Rekam atau unggah video trotoar. Aplikasi menandai kendaraan yang parkir di atasnya dan pengendara yang naik dari jalan, memakai pengolahan citra klasik.</p>
-      <div class="actions">
-        <label class="btn primary block" id="recBtn" tabindex="0" role="button">${ICON.rec}<span>Rekam video</span>
-          <input id="rec" type="file" accept="video/*" capture="environment" hidden></label>
-        <div class="actions row">
-          <label class="btn line" tabindex="0" role="button">${ICON.up}<span>Pilih video</span>
-            <input id="pick" type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.avi" hidden></label>
-          <a class="btn line" href="#/live">${ICON.camera}<span>Kamera langsung</span></a>
-        </div>
-        <button class="btn quiet" id="demoBtn" type="button">Coba dengan video demo</button>
-      </div>
-      <div id="homeMsg"></div>
-      ${ffmpegNote}
+  <div class="stack-lg" style="max-width:640px">
+    <div class="stack">
+      <h1 class="h2">Analisis rekaman video</h1>
+      <p class="lead">Punya video trotoar? Unggah, tandai area, dan dapatkan laporan kejadian lengkap dengan foto bukti. Untuk pemantauan terus-menerus, tambahkan kamera di halaman Pantau.</p>
     </div>
+    <div class="actions">
+      <label class="btn primary block" id="recBtn" tabindex="0" role="button">${ICON.rec}<span>Rekam video</span>
+        <input id="rec" type="file" accept="video/*" capture="environment" hidden></label>
+      <div class="actions row">
+        <label class="btn line" tabindex="0" role="button">${ICON.up}<span>Pilih video</span>
+          <input id="pick" type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.avi" hidden></label>
+        <a class="btn line" href="#/live">${ICON.camera}<span>Kamera langsung</span></a>
+      </div>
+      <div class="actions row">
+        <button class="btn quiet" id="demoBtn" type="button">Coba dengan video demo</button>
+        <a class="btn quiet" href="#/riwayat">${ICON.history}<span>Riwayat analisis</span></a>
+      </div>
+    </div>
+    <div id="homeMsg"></div>
+    ${ffmpegNote}
   </div>`;
 
   const msg = document.getElementById('homeMsg');
@@ -209,7 +238,7 @@ async function viewHome() {
 
 // ------------------------------------------------------------------------------ area
 function viewArea() {
-  if (!S.upload) return go('#/');
+  if (!S.upload) return go('#/analisis');
   const dur = S.upload.info.duration || 0;
   view.innerHTML = `${stepper(2)}
   <div class="split">
@@ -280,7 +309,7 @@ function sw(id, title, hint, checked) {
 }
 
 function viewSettings() {
-  if (!S.upload || S.roi.length < 3) return go('#/');
+  if (!S.upload || S.roi.length < 3) return go('#/analisis');
   const s = S.settings;
   const info = S.upload.info;
   view.innerHTML = `${stepper(3)}
@@ -432,7 +461,7 @@ async function viewResult(id) {
   try { j = await getJSON(`/api/jobs/${id}`); } catch (e) { return showError(view, e); }
   if (j.state === 'queued' || j.state === 'running') return go(`#/proses/${id}`);
   if (j.state !== 'done') {
-    view.innerHTML = `<div class="stack"><h1 class="h2">Analisis tidak selesai</h1><div id="e"></div><a class="btn line" href="#/">Kembali ke beranda</a></div>`;
+    view.innerHTML = `<div class="stack"><h1 class="h2">Analisis tidak selesai</h1><div id="e"></div><a class="btn line" href="#/analisis">Kembali ke analisis</a></div>`;
     return showError(document.getElementById('e'), new Error(j.error || 'Analisis dibatalkan.'), 'warn');
   }
   const dur = (j.video && j.video.duration) || Math.max(1, ...j.events.map((e) => e.t));
@@ -465,7 +494,7 @@ async function viewResult(id) {
   </div>`;
   wireEvents(document.getElementById('evs'));
   const again = document.getElementById('again');
-  if (!S.upload || (j.upload_id && S.upload.upload_id !== j.upload_id)) again.setAttribute('href', '#/');
+  if (!S.upload || (j.upload_id && S.upload.upload_id !== j.upload_id)) again.setAttribute('href', '#/analisis');
   const vid = document.getElementById('vid');
   for (const b of view.querySelectorAll('.timeline button')) b.onclick = () => {
     const ev = j.events.find((e) => String(e.no) === b.dataset.no);
@@ -485,7 +514,7 @@ async function viewHistory() {
       return `<a class="list-item" href="#/hasil/${j.id}"><b>${sum.parkir} parkir, ${sum.naik_trotoar} naik trotoar</b>
         <span class="chip" data-tone="${j.state === 'done' ? 'ok' : ''}">${j.state === 'done' ? 'Selesai' : j.state}</span>
         <span class="dim small">${when}${j.video && j.video.duration ? `, video ${fmt(j.video.duration)}` : ''}</span></a>`;
-    }).join('') : `<div class="dropzone"><b>Belum ada analisis</b><span>Rekam atau unggah video dari beranda untuk memulai.</span><a class="btn primary" href="#/">Ke beranda</a></div>`;
+    }).join('') : `<div class="dropzone"><b>Belum ada analisis</b><span>Rekam atau unggah video dari halaman Analisis untuk memulai.</span><a class="btn primary" href="#/analisis">Ke analisis</a></div>`;
   } catch (e) { showError(host, e); }
 }
 
@@ -531,8 +560,8 @@ function viewLive() {
   const body = document.getElementById('liveBody');
   if (!cameraSupported()) {
     body.innerHTML = `<div class="notice" data-tone="warn"><b>Kamera langsung butuh koneksi aman</b>
-      Browser hanya mengizinkan kamera di HTTPS atau localhost. Di HP, pakai Rekam video dari beranda, atau buka aplikasi lewat tautan HTTPS (misalnya cloudflared tunnel).</div>
-      <div class="actions" style="margin-top:16px"><a class="btn primary" href="#/">Rekam video dari beranda</a></div>`;
+      Browser hanya mengizinkan kamera di HTTPS atau localhost. Di HP, pakai Rekam video dari halaman Analisis, atau tambahkan kamera CCTV di halaman Pantau (server yang membaca kameranya, jadi tidak perlu HTTPS).</div>
+      <div class="actions" style="margin-top:16px"><a class="btn primary" href="#/analisis">Rekam video dari halaman Analisis</a></div>`;
     return;
   }
 
@@ -644,16 +673,584 @@ function viewLive() {
   intro();
 }
 
-// ------------------------------------------------------------------------------ mulai
-async function boot() {
+// ============================================================================ pantau (mode CCTV)
+// Server memantau kamera terus-menerus. Halaman ini hanya penampil: ia mengambil keadaan dari /api/cams
+// tiap beberapa detik dan memberi tahu bila ada kejadian baru, di halaman mana pun pengguna berada.
+const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+const STATUS = {
+  perlu_area: ['paint', 'Perlu area'],
+  menghubungkan: ['scan', 'Menghubungkan'],
+  belajar: ['paint', 'Belajar latar'],
+  memantau: ['ok', 'Memantau'],
+  terputus: ['flare', 'Terputus'],
+  jeda: ['', 'Dijeda'],
+  selesai: ['', 'Selesai'],
+};
+
+const P = { cams: [], max: 8, now: '', unseen: 0, seen: new Map(), subs: new Set(), timer: 0, gen: 0 };
+const camById = (id) => P.cams.find((c) => c.id === id);
+const subscribe = (fn) => { P.subs.add(fn); return () => P.subs.delete(fn); };
+const hhmm = (ts) => String(ts).slice(11, 16);
+
+function whenLabel(ts) {
+  ts = String(ts);
+  if (ts.slice(0, 10) === String(P.now).slice(0, 10)) return `${hhmm(ts)} hari ini`;
+  return `${hhmm(ts)}, ${Number(ts.slice(8, 10))} ${MONTH[Number(ts.slice(5, 7)) - 1] || ''}`;
+}
+
+function fmtSpan(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec} detik`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} menit`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} jam ${Math.floor((sec % 3600) / 60)} menit`;
+  return `${Math.floor(sec / 86400)} hari ${Math.floor((sec % 86400) / 3600)} jam`;
+}
+
+const statusChip = (c) => {
+  const [tone, label] = STATUS[c.status] || ['', c.status];
+  return `<span class="chip" data-tone="${tone}" data-st="${esc(c.status)}"><i class="dot" aria-hidden="true"></i>${label}</span>`;
+};
+
+function swapImage(img, url) {                      // ganti gambar hanya setelah yang baru siap: tanpa kedip
+  const probe = new Image();
+  probe.onload = () => { if (img.isConnected) img.src = probe.src; };
+  probe.src = url;
+}
+
+async function announce(cam, since) {
+  try {
+    const { events } = await getJSON(`/api/cams/${cam.id}/events?after=${since}&limit=5`);
+    for (const ev of events) toast(KIND[ev.kind], `${cam.name}, ${whenLabel(ev.ts)}`, ev.kind);
+    if (events.length && navigator.vibrate) navigator.vibrate(events.some((e) => e.kind === 'parkir') ? [200, 80, 200] : 120);
+  } catch { /* pemberitahuan tidak wajib */ }
+}
+
+async function pollCams() {
   const conn = document.getElementById('conn');
   try {
-    S.info = await getJSON('/api/info');
+    const r = await getJSON('/api/cams');
+    P.cams = r.cams; P.max = r.max; P.now = r.now;
     conn.dataset.ok = '1'; conn.lastElementChild.textContent = 'Server siap';
+    let fresh = 0;
+    const ids = new Set();
+    for (const c of r.cams) {
+      ids.add(c.id);
+      const prev = P.seen.get(c.id);
+      if (prev === undefined || c.seq < prev) { P.seen.set(c.id, c.seq); continue; }   // pertama terlihat: jadi acuan
+      if (c.seq > prev) { P.seen.set(c.id, c.seq); fresh += c.seq - prev; announce(c, prev); }
+    }
+    for (const id of [...P.seen.keys()]) if (!ids.has(id)) P.seen.delete(id);
+    if (fresh && !/^#\/kejadian/.test(location.hash)) { P.unseen += fresh; renderNav(location.hash || '#/'); }
+    for (const fn of [...P.subs]) { try { fn(); } catch (e) { console.error(e); } }
   } catch {
     conn.dataset.ok = '0'; conn.lastElementChild.textContent = 'Server tidak terjangkau';
   }
+}
+
+function startWatcher() {
+  const loop = async () => {
+    const mine = ++P.gen;
+    await pollCams();
+    if (mine === P.gen) P.timer = setTimeout(loop, document.hidden ? 8000 : 2000);
+  };
+  P.timer = setTimeout(loop, 2000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(P.timer); loop(); } });
+}
+
+async function createCam(body) {
+  const cam = await postJSON('/api/cams', body);
+  await pollCams();                                  // jadikan acuan sebelum kejadian pertama
+  return cam;
+}
+
+function camEventRow(ev, camName, fresh = false) {
+  const src = ev.snapshot_url || '';
+  return `<button class="event ${fresh ? 'fresh' : ''}" type="button" data-k="${ev.kind}" data-src="${esc(src)}">
+    ${src ? `<img src="${esc(src)}" alt="Bukti ${esc(KIND[ev.kind])}" loading="lazy">` : '<span></span>'}
+    <span class="stack"><b>${KIND[ev.kind]}</b>
+      <span class="dim small">${camName ? `${esc(camName)}, ` : ''}${whenLabel(ev.ts)}</span>
+      <span class="dim small">${esc(ev.reason)}.</span></span></button>`;
+}
+
+const $id = (q) => document.getElementById(q);
+
+// -------------------------------------------------------------------------- daftar kamera
+function viewPantau() {
+  view.innerHTML = '<div id="pantau"></div>';
+  const root = $id('pantau');
+  let mode = '', sig = '';
+
+  const camTile = (c) => `<a class="cam-tile" href="#/pantau/${c.id}" data-id="${c.id}">
+    <div class="frame"><img class="thumb" alt="" width="640" height="360" src="/api/cams/${c.id}/snapshot.jpg?_=${Date.now()}"><span class="badge end" data-r="chip"></span></div>
+    <div class="cam-meta"><b class="cam-name" data-r="name"></b>
+      <span class="cam-counts"><span data-k="parkir"><b data-r="park">0</b> parkir</span><span data-k="naik_trotoar"><b data-r="ride">0</b> naik trotoar</span></span>
+      <span class="dim small" data-r="last"></span></div></a>`;
+
+  const buildEmpty = () => {
+    mode = 'empty'; sig = '';
+    root.innerHTML = `<div class="hero">
+      <div class="hero-scene">${HERO}</div>
+      <div class="hero-copy stack">
+        <h1 class="h1">Trotoar dipantau tanpa henti.</h1>
+        <p class="lead">Hubungkan kamera CCTV, webcam, atau rekaman. Server belajar sendiri seperti apa trotoar kosong, lalu mencatat kendaraan yang parkir atau naik ke trotoar, lengkap dengan foto.</p>
+        <div class="actions">
+          <a class="btn primary block" href="#/tambah">${ICON.plus}<span>Tambah kamera</span></a>
+          <button class="btn line block" id="demoCam" type="button">${ICON.play}<span>Coba kamera demo</span></button>
+        </div>
+        <div id="pmsg"></div>
+      </div></div>`;
+    $id('demoCam').onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try { const cam = await createCam({ source: 'demo' }); go(`#/pantau/${cam.id}`); }
+      catch (err) { e.currentTarget.disabled = false; showError($id('pmsg'), err); }
+    };
+  };
+
+  const buildList = (idsig) => {
+    mode = 'list'; sig = idsig;
+    root.innerHTML = `<div class="stack-lg">
+      <div class="head-row">
+        <div class="stack"><h1 class="h2">Pantau trotoar</h1><p class="dim" id="psub"></p></div>
+        <a class="btn primary" id="addBtn" href="#/tambah">${ICON.plus}<span>Tambah kamera</span></a>
+      </div>
+      <div class="tally" aria-live="off">
+        <div data-k="parkir"><div class="n" id="tp">0</div><div class="l">Parkir hari ini</div></div><div class="sep"></div>
+        <div data-k="naik_trotoar"><div class="n" id="tr">0</div><div class="l">Naik trotoar hari ini</div></div></div>
+      <div class="cam-grid" id="grid">${P.cams.map(camTile).join('')}</div>
+    </div>`;
+  };
+
+  const patch = () => {
+    const cams = P.cams;
+    if (!cams.length) { if (mode !== 'empty') buildEmpty(); return; }
+    const idsig = cams.map((c) => c.id).join(',');
+    if (mode !== 'list' || idsig !== sig) buildList(idsig);
+    let park = 0, ride = 0, on = 0;
+    for (const c of cams) {
+      park += c.counts_today.parkir; ride += c.counts_today.naik_trotoar; if (c.status === 'memantau') on++;
+      const t = root.querySelector(`.cam-tile[data-id="${c.id}"]`);
+      if (!t) continue;
+      const set = (k, v) => { const el = t.querySelector(`[data-r="${k}"]`); if (el && el.textContent !== String(v)) el.textContent = v; };
+      const chip = statusChip(c);
+      const chipEl = t.querySelector('[data-r="chip"]');
+      if (chipEl.dataset.h !== chip) { chipEl.innerHTML = chip; chipEl.dataset.h = chip; }
+      set('name', c.name); set('park', c.counts_today.parkir); set('ride', c.counts_today.naik_trotoar);
+      set('last', c.last_event ? `${KIND[c.last_event.kind]}, ${whenLabel(c.last_event.ts)}` : 'Belum ada kejadian');
+    }
+    $id('tp').textContent = park; $id('tr').textContent = ride;
+    $id('psub').textContent = `${cams.length} kamera, ${on} sedang memantau. Server bekerja terus; halaman ini hanya menampilkan.`;
+    const full = cams.length >= P.max;
+    $id('addBtn').setAttribute('aria-disabled', String(full));
+    if (full) $id('addBtn').setAttribute('tabindex', '-1'); else $id('addBtn').removeAttribute('tabindex');
+  };
+
+  patch();
+  const off = subscribe(patch);
+  const thumbs = setInterval(() => {
+    if (document.hidden) return;
+    for (const img of root.querySelectorAll('img.thumb')) {
+      swapImage(img, `/api/cams/${img.closest('.cam-tile').dataset.id}/snapshot.jpg?_=${Date.now()}`);
+    }
+  }, 2000);
+  current = { dispose() { off(); clearInterval(thumbs); } };
+}
+
+// ----------------------------------------------------------------------- tambah kamera
+function viewAddCam() {
+  let type = 'url', file = null;
+  const KINDS = [['url', 'Kamera IP'], ['device', 'Webcam'], ['upload', 'Rekaman']];
+  view.innerHTML = `<div class="stack-lg" style="max-width:640px">
+    <div class="stack"><a class="back" href="#/">${ICON.back}<span>Semua kamera</span></a>
+      <h1 class="h2">Tambah kamera</h1>
+      <p class="dim">Server yang membaca kamera, jadi HP atau laptop ini hanya melihat hasilnya dan tidak perlu HTTPS.</p></div>
+    <div class="stack">
+      <div class="seg fill" role="group" aria-label="Jenis sumber">${KINDS.map(([k, t]) => `<button type="button" data-t="${k}" aria-pressed="${k === type}">${t}</button>`).join('')}</div>
+      <div class="field"><label for="cname">Nama kamera</label>
+        <input class="input" id="cname" type="text" maxlength="40" autocomplete="off" placeholder="Contoh: Depan toko"></div>
+      <div id="src"></div>
+      <button class="btn primary block" id="add" type="button">Tambah dan tandai area</button>
+      <div id="addMsg"></div>
+    </div>
+    <div class="panel stack"><b>Belum punya kamera?</b>
+      <p class="dim small">Kamera demo memutar adegan sintetis dan mencatat kejadiannya, supaya Anda bisa melihat seluruh alurnya.</p>
+      <button class="btn line block" id="demo" type="button">${ICON.play}<span>Coba kamera demo</span></button></div>
+  </div>`;
+
+  const src = $id('src');
+  const draw = () => {
+    for (const b of view.querySelectorAll('[data-t]')) b.setAttribute('aria-pressed', String(b.dataset.t === type));
+    if (type === 'url') {
+      src.innerHTML = `<div class="field"><label for="url">Alamat kamera</label>
+        <input class="input" id="url" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="rtsp://user:sandi@192.168.1.20:554/stream1">
+        <span class="hint">Alamat RTSP dari CCTV atau NVR, atau tautan video http(s) seperti MJPEG. Server harus bisa menjangkau alamat ini. Sandi disamarkan di layar.</span></div>`;
+    } else if (type === 'device') {
+      src.innerHTML = `<div class="field"><label for="dev">Webcam</label>
+        <select class="input" id="dev">${[0, 1, 2, 3].map((n) => `<option value="${n}">Webcam ${n + 1}</option>`).join('')}</select>
+        <span class="hint">Webcam yang tercolok di komputer server, bukan kamera di perangkat ini.</span></div>`;
+    } else {
+      src.innerHTML = `<div class="stack"><div class="field"><span class="label">Video rekaman</span>
+        <label class="btn line block" tabindex="0" role="button">${ICON.up}<span id="fname">${file ? esc(file.name) : 'Pilih video'}</span>
+          <input id="vfile" type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.avi" hidden></label>
+        <span class="hint">Diputar seperti kamera sungguhan. Cocok untuk mencoba tanpa CCTV.</span></div>
+        <div class="panel">${sw('loop', 'Ulangi terus', 'Mulai lagi dari awal setiap selesai, seperti siaran kamera.', false)}</div></div>`;
+      const lab = src.querySelector('label.btn');
+      lab.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $id('vfile').click(); } });
+      $id('vfile').addEventListener('change', (e) => {
+        file = e.target.files[0] || null;
+        $id('fname').textContent = file ? file.name : 'Pilih video';
+        if (file && !$id('cname').value.trim()) $id('cname').value = file.name.replace(/\.[^.]+$/, '').slice(0, 40);
+      });
+    }
+  };
+  for (const b of view.querySelectorAll('[data-t]')) b.onclick = () => { type = b.dataset.t; draw(); };
+  draw();
+
+  $id('demo').onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    try { const cam = await createCam({ source: 'demo' }); go(`#/pantau/${cam.id}`); }
+    catch (err) { e.currentTarget.disabled = false; showError($id('addMsg'), err); }
+  };
+
+  $id('add').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const msg = $id('addMsg');
+    let name = $id('cname').value.trim();
+    let source;
+    if (type === 'url') {
+      source = $id('url').value.trim();
+      if (!source) return showError(msg, new Error('Isi alamat kamera lebih dulu.'));
+      if (!name) { try { name = new URL(source).hostname; } catch { name = 'Kamera IP'; } }
+    } else if (type === 'device') {
+      source = `device:${$id('dev').value}`;
+      if (!name) name = `Webcam ${Number($id('dev').value) + 1}`;
+    } else if (!file) {
+      return showError(msg, new Error('Pilih video rekaman lebih dulu.'));
+    }
+    btn.disabled = true;
+    try {
+      const body = { name: name.slice(0, 40) };
+      if (type === 'upload') {
+        msg.innerHTML = `<div class="panel stack"><b>Mengunggah ${esc(file.name)}</b>
+          <div class="kerb" aria-hidden="true"><i id="upBar"></i></div><span class="dim small" id="upTxt">0%</span></div>`;
+        const res = await upload(file, (f) => {
+          $id('upBar').style.width = `${Math.round(f * 100)}%`; $id('upTxt').textContent = `${Math.round(f * 100)}%`;
+        });
+        source = `upload:${res.upload_id}`;
+        if ($id('loop').checked) body.max_loops = null;
+        if (!body.name) body.name = 'Rekaman';
+      }
+      body.source = source;
+      const cam = await createCam(body);
+      go(`#/pantau/${cam.id}/area`);
+    } catch (err) { btn.disabled = false; showError(msg, err); }
+  };
+}
+
+// ------------------------------------------------------------------------ satu kamera
+function viewCam(id) {
+  let cam = camById(id);
+  if (!cam) {
+    view.innerHTML = `<div class="stack"><a class="back" href="#/">${ICON.back}<span>Semua kamera</span></a>
+      <h1 class="h2">Kamera tidak ditemukan</h1><p class="dim">Kamera ini mungkin sudah dihapus.</p></div>`;
+    return;
+  }
+  let dead = false, lastSeq = -1, known = null, snapTimer = 0, confirmDel = 0;
+  const stream = document.createElement('img');
+  stream.id = 'stream';
+  const detach = () => { stream.onerror = null; clearInterval(snapTimer); stream.removeAttribute('src'); };
+  const attach = () => {
+    clearInterval(snapTimer);
+    stream.onerror = () => {                          // siaran ditolak (penonton penuh) atau terputus: pakai gambar diam per detik
+      stream.onerror = null;
+      snapTimer = setInterval(() => swapImage(stream, `/api/cams/${id}/snapshot.jpg?_=${Date.now()}`), 1000);
+    };
+    stream.src = `/api/cams/${id}/stream.mjpg?_=${Date.now()}`;
+  };
+  const onVis = () => { if (document.hidden) detach(); else if (!dead) attach(); };
+  const off = subscribe(() => tick());
+  current = { dispose() { dead = true; clearTimeout(confirmDel); document.removeEventListener('visibilitychange', onVis); off(); detach(); } };
+
+  view.innerHTML = `<div class="stack-lg">
+    <a class="back" href="#/">${ICON.back}<span>Semua kamera</span></a>
+    <div class="split">
+      <div class="stack">
+        <div class="frame" id="live"><span class="badge end" id="chip"></span></div>
+        <div class="panel stack" id="state"></div>
+        <p class="sr-only" role="status" id="stLive"></p>
+      </div>
+      <div class="stack-lg">
+        <div class="stack"><h1 class="h2" id="cname"></h1><p class="dim small" id="csrc"></p></div>
+        <div class="tally">
+          <div data-k="parkir"><div class="n" id="tp">0</div><div class="l">Parkir hari ini</div></div><div class="sep"></div>
+          <div data-k="naik_trotoar"><div class="n" id="tr">0</div><div class="l">Naik trotoar hari ini</div></div></div>
+        <div class="actions row">
+          <button class="btn line" id="recal" type="button"></button>
+          <a class="btn line" id="area" href="#/pantau/${id}/area">${ICON.area}<span>Ubah area</span></a></div>
+        <div class="actions row">
+          <button class="btn line" id="toggle" type="button"></button>
+          <button class="btn line" id="cfg" type="button" aria-expanded="false" aria-controls="cfgPanel">${ICON.sliders}<span>Atur</span></button></div>
+        <div id="cfgPanel" hidden></div>
+      </div>
+    </div>
+    <div class="stack"><h2 class="h3">Kejadian terbaru</h2><div class="events" id="evs"><p class="dim">Memuat…</p></div></div>
+  </div>`;
+  $id('live').prepend(stream);
+  stream.alt = `Siaran langsung kamera ${cam.name}`; stream.width = 640; stream.height = 360;
+  document.addEventListener('visibilitychange', onVis);
+  attach();
+
+  const html = {};                                     // isi terakhir tiap bagian: hindari menyusun ulang DOM yang sama
+  const put = (key, el, markup) => { if (html[key] !== markup) { html[key] = markup; el.innerHTML = markup; } };
+
+  const patch = () => {
+    const c = cam;
+    put('chip', $id('chip'), statusChip(c));
+    const label = (STATUS[c.status] || ['', c.status])[1];
+    if (html.live !== label) { html.live = label; $id('stLive').textContent = `${c.name}: ${label}`; }   // hanya saat status berganti
+    $id('cname').textContent = c.name;
+    $id('csrc').textContent = c.kind === 'demo' ? 'Adegan sintetis bawaan' : c.kind === 'upload'
+      ? 'Rekaman video yang diunggah'
+      : `${{ file: 'Rekaman video', device: 'Webcam USB' }[c.kind] || 'Kamera IP'}: ${c.source}`;
+    $id('tp').textContent = c.counts_today.parkir; $id('tr').textContent = c.counts_today.naik_trotoar;
+    const lp = c.learn_progress || { have: 0, need: 1 };
+    let body = `<b>${esc(c.message || (STATUS[c.status] || ['', c.status])[1])}</b>`;
+    if (c.status === 'belajar') {
+      body += `<div class="kerb" role="progressbar" aria-valuemin="0" aria-valuemax="${lp.need}" aria-valuenow="${lp.have}"><i style="width:${Math.round((lp.have / Math.max(1, lp.need)) * 100)}%;transition:none"></i></div>
+        <span class="dim small">Cuplikan ${lp.have} dari ${lp.need}. Biarkan kamera tetap diam; kendaraan yang lewat tidak ikut tersimpan sebagai latar.</span>`;
+    } else if (c.status === 'perlu_area') {
+      body += `<a class="btn primary block" href="#/pantau/${id}/area">${ICON.area}<span>Tandai area trotoar</span></a>`;
+    } else if (c.status === 'memantau') {
+      const facts = [c.fps ? `${c.fps} gambar/detik` : '', c.size ? `${c.size[0]}×${c.size[1]}` : '', c.uptime_s != null ? `tersambung ${fmtSpan(c.uptime_s)}` : ''].filter(Boolean);
+      body += `<span class="dim small">${facts.join(', ')}.</span>`;
+      if (c.relearns) body += `<span class="faint small">Belajar latar ulang otomatis ${c.relearns} kali karena perubahan cahaya besar.</span>`;
+    }
+    put('state', $id('state'), body);
+    put('recal', $id('recal'), c.status === 'selesai' ? `${ICON.play}<span>Putar ulang</span>` : `${ICON.sync}<span>Kalibrasi lagi</span>`);
+    $id('recal').disabled = c.status === 'perlu_area';
+    put('toggle', $id('toggle'), c.enabled ? `${ICON.pause}<span>Jeda</span>` : `${ICON.play}<span>Lanjutkan</span>`);
+  };
+
+  const loadEvents = async () => {
+    try {
+      const { events } = await getJSON(`/api/cams/${id}/events?limit=30`);
+      if (dead) return;
+      const first = known === null;
+      const prev = known || new Set();
+      known = new Set(events.map((e) => e.no));
+      $id('evs').innerHTML = events.length
+        ? events.map((e) => camEventRow(e, '', !first && !prev.has(e.no))).join('')
+        : '<p class="dim">Belum ada kejadian. Kendaraan yang parkir atau naik ke trotoar akan muncul di sini.</p>';
+      wireEvents($id('evs'));
+    } catch (e) { if (!dead) showError($id('evs'), e); }
+  };
+
+  const tick = () => {
+    const c = camById(id);
+    if (!c) { toast('Kamera dihapus', cam.name); go('#/'); return; }
+    cam = c;
+    patch();
+    if (c.seq !== lastSeq) { lastSeq = c.seq; loadEvents(); }
+  };
+
+  const act = async (fn, okText) => {
+    try { await fn(); await pollCams(); if (okText) toast(okText); } catch (e) { toast('Gagal', e.message, 'error'); }
+  };
+  $id('recal').onclick = () => act(() => postJSON(`/api/cams/${id}/recalibrate`), cam.status === 'selesai' ? 'Rekaman diputar ulang' : 'Kamera belajar latar ulang');
+  $id('toggle').onclick = () => act(() => postJSON(`/api/cams/${id}`, { enabled: !cam.enabled }), cam.enabled ? 'Pemantauan dijeda' : 'Pemantauan dilanjutkan');
+  $id('cfg').onclick = () => {
+    const panel = $id('cfgPanel');
+    const open = panel.hidden;
+    panel.hidden = !open;
+    $id('cfg').setAttribute('aria-expanded', String(open));
+    if (open) { buildSettings(panel); panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+  };
+
+  const buildSettings = (panel) => {
+    const st = cam.settings || {};
+    let park = Number(st.park_seconds) || 10;
+    let sens = Number(nearest(SENS, st.diff_floor ?? SENS[3], '3'));
+    let size = nearest(SIZE, st.min_area_frac ?? SIZE.sedang, 'sedang');
+    const rec = ['demo', 'upload', 'file'].includes(cam.kind);
+    let speed = [1, 2, 4, 8].reduce((b, v) => (Math.abs(v - cam.speed) < Math.abs(b - cam.speed) ? v : b), 1);
+    panel.innerHTML = `<div class="panel stack-lg">
+      <div class="field"><label for="sName">Nama kamera</label>
+        <input class="input" id="sName" type="text" maxlength="40" autocomplete="off" value="${esc(cam.name)}"></div>
+      <div class="field"><label for="sPark">Lama diam sampai dihitung parkir</label>
+        <div class="slider-row"><input id="sPark" type="range" min="3" max="60" step="1" value="${park}"><output id="sParkOut">${park} dtk</output></div></div>
+      <div class="field"><label for="sSens">Kepekaan</label>
+        <div class="slider-row"><input id="sSens" type="range" min="1" max="5" step="1" value="${sens}"><output id="sSensOut">${sens}</output></div>
+        <span class="hint">Naikkan bila kendaraan gelap atau kecil terlewat. Turunkan bila banyak deteksi palsu.</span></div>
+      <div class="field"><span class="label">Ukuran objek minimum</span>
+        <div class="seg" role="group" aria-label="Ukuran objek minimum">${['kecil', 'sedang', 'besar'].map((k) => `<button type="button" data-size="${k}" aria-pressed="${k === size}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div></div>
+      ${rec ? `<div class="field"><span class="label">Kecepatan putar rekaman</span>
+        <div class="seg" role="group" aria-label="Kecepatan putar">${[1, 2, 4, 8].map((v) => `<button type="button" data-speed="${v}" aria-pressed="${v === speed}">${v}×</button>`).join('')}</div>
+        ${sw('sLoop', 'Ulangi terus', 'Mulai lagi dari awal setiap selesai.', cam.max_loops === null)}</div>` : ''}
+      <div class="stack">
+        <button class="btn primary block" id="sSave" type="button">Simpan</button>
+        <p class="faint small">Menyimpan pengaturan membuat kamera belajar latar ulang beberapa detik.</p>
+        <div id="sMsg"></div>
+        <hr class="rule">
+        <button class="btn line danger block" id="sDel" type="button">${ICON.trash}<span>Hapus kamera dan kejadiannya</span></button>
+      </div></div>`;
+    $id('sPark').oninput = (e) => { park = Number(e.target.value); $id('sParkOut').textContent = `${park} dtk`; };
+    $id('sSens').oninput = (e) => { sens = Number(e.target.value); $id('sSensOut').textContent = sens; };
+    for (const b of panel.querySelectorAll('[data-size]')) b.onclick = () => {
+      size = b.dataset.size; for (const o of panel.querySelectorAll('[data-size]')) o.setAttribute('aria-pressed', String(o === b));
+    };
+    for (const b of panel.querySelectorAll('[data-speed]')) b.onclick = () => {
+      speed = Number(b.dataset.speed); for (const o of panel.querySelectorAll('[data-speed]')) o.setAttribute('aria-pressed', String(o === b));
+    };
+    $id('sSave').onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      const body = { name: $id('sName').value.trim(), settings: { ...(cam.settings || {}), park_seconds: park, diff_floor: SENS[sens], min_area_frac: SIZE[size] } };
+      if (rec) { body.speed = speed; body.max_loops = $id('sLoop').checked ? null : (cam.max_loops ?? 1); }
+      try {
+        await postJSON(`/api/cams/${id}`, body);
+        await pollCams();
+        toast('Pengaturan disimpan', 'Kamera belajar latar ulang.');
+        panel.hidden = true; $id('cfg').setAttribute('aria-expanded', 'false');
+      } catch (err) { e.currentTarget.disabled = false; showError($id('sMsg'), err); }
+    };
+    $id('sDel').onclick = async (e) => {
+      const btn = e.currentTarget;
+      if (!confirmDel) {                                // dua ketukan: cegah salah hapus
+        btn.querySelector('span').textContent = 'Ketuk lagi untuk menghapus';
+        confirmDel = setTimeout(() => { confirmDel = 0; if (btn.isConnected) btn.querySelector('span').textContent = 'Hapus kamera dan kejadiannya'; }, 4000);
+        return;
+      }
+      clearTimeout(confirmDel); btn.disabled = true;
+      try { await postJSON(`/api/cams/${id}`, {}, 'DELETE'); await pollCams(); toast('Kamera dihapus', cam.name); go('#/'); }
+      catch (err) { btn.disabled = false; showError($id('sMsg'), err); }
+    };
+  };
+
+  tick();
+}
+
+// ---------------------------------------------------------------------- tandai area kamera
+function viewCamArea(id) {
+  const cam = camById(id);
+  if (!cam) return go('#/');
+  let dead = false, retry = 0, loaded = false;
+  current = { dispose() { dead = true; clearTimeout(retry); } };
+  view.innerHTML = `<div class="stack-lg">
+    <a class="back" href="#/pantau/${id}">${ICON.back}<span>${esc(cam.name)}</span></a>
+    <div class="split">
+      <div class="stack"><div class="frame" id="frameHost"><span class="badge chip" data-tone="scan">Gambar langsung dari kamera</span></div>
+        <p class="dim small" id="aMsg" role="status">Menunggu gambar pertama dari kamera…</p></div>
+      <div class="stack sticky">
+        <h1 class="h2">Tandai area trotoar</h1>
+        <p class="dim">Ketuk di sepanjang tepi trotoar untuk membuat area. Seret titik untuk memperbaiki. Kamera belajar sendiri seperti apa trotoar kosong, jadi tidak perlu menunggu trotoar kosong.</p>
+        <div class="actions row">
+          <button class="btn line" id="undo" type="button">${ICON.undo}<span>Urungkan</span></button>
+          <button class="btn line" id="clear" type="button">${ICON.trash}<span>Hapus</span></button></div>
+        <button class="btn line block" id="preset" type="button">Isi sepertiga bawah</button>
+        <button class="btn line block" id="reload" type="button">${ICON.sync}<span>Ambil gambar baru</span></button>
+        <button class="btn primary block" id="save" type="button" disabled>Simpan dan mulai memantau</button>
+        <div id="aErr"></div>
+      </div>
+    </div></div>`;
+  const save = $id('save');
+  const editor = new RoiEditor($id('frameHost'), {
+    onChange: (pts) => { save.disabled = pts.length < 3 || !loaded; },
+  });
+  if (cam.roi && cam.roi.length) editor.setPoints(cam.roi);
+
+  const load = () => {
+    clearTimeout(retry);
+    const img = new Image();
+    img.onload = () => {
+      if (dead) return;
+      loaded = true; editor.setImage(img); editor.onChange(editor.points);
+      $id('aMsg').textContent = `Gambar ${img.naturalWidth}×${img.naturalHeight}.`;
+    };
+    img.onerror = () => {                              // 503 = kamera belum mengirim frame
+      if (dead) return;
+      const c = camById(id);
+      $id('aMsg').textContent = c && c.status === 'terputus' ? `Kamera belum tersambung. ${c.message}` : 'Menunggu gambar pertama dari kamera…';
+      retry = setTimeout(load, 1500);
+    };
+    img.src = `/api/cams/${id}/snapshot.jpg?raw=1&_=${Date.now()}`;
+  };
+  load();
+
+  $id('undo').onclick = () => editor.undo();
+  $id('clear').onclick = () => editor.clear();
+  $id('preset').onclick = () => editor.setPoints(PRESET);
+  $id('reload').onclick = load;
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await postJSON(`/api/cams/${id}`, { roi: editor.points.map((p) => [p[0], p[1]]) });
+      await pollCams();
+      toast('Area disimpan', 'Kamera mulai belajar latar.');
+      go(`#/pantau/${id}`);
+    } catch (err) { save.disabled = false; showError($id('aErr'), err); }
+  };
+  const redraw = () => editor.draw();
+  window.addEventListener('resize', redraw);
+  const prev = current.dispose;
+  current = { dispose() { prev(); window.removeEventListener('resize', redraw); } };
+}
+
+// ------------------------------------------------------------------------ kejadian semua kamera
+function viewFeed() {
+  const PAGE = 30;
+  let kind = '', offset = 0, dead = false, more = false, known = new Set(), firstLoad = true;
+  view.innerHTML = `<div class="stack-lg">
+    <div class="head-row"><div class="stack"><h1 class="h2">Kejadian</h1>
+      <p class="dim">Semua kendaraan yang parkir atau naik ke trotoar, dari semua kamera.</p></div>
+      <a class="btn line" href="/api/events.csv" download>${ICON.dl}<span>Unduh CSV</span></a></div>
+    <div class="seg fill" role="group" aria-label="Jenis kejadian">
+      <button type="button" data-f="" aria-pressed="true">Semua</button>
+      <button type="button" data-f="parkir" aria-pressed="false">Parkir</button>
+      <button type="button" data-f="naik_trotoar" aria-pressed="false">Naik trotoar</button></div>
+    <div class="events" id="feed"></div>
+    <button class="btn line block" id="more" type="button" hidden>Muat lebih banyak</button>
+    <div id="fErr"></div></div>`;
+  const feed = $id('feed');
+
+  const load = async (append) => {
+    if (!append) offset = 0;
+    try {
+      const { events } = await getJSON(`/api/events?limit=${PAGE}&offset=${offset}${kind ? `&kind=${kind}` : ''}`);
+      if (dead) return;
+      offset += events.length; more = events.length === PAGE;
+      const rows = events.map((e) => camEventRow(e, e.camera.name, !firstLoad && !append && !known.has(`${e.camera.id}:${e.no}`)));
+      if (append) feed.insertAdjacentHTML('beforeend', rows.join(''));
+      else feed.innerHTML = rows.length ? rows.join('') : `<div class="dropzone"><b>Belum ada kejadian</b>
+        <span>Kejadian muncul di sini begitu ada kendaraan yang parkir atau naik ke trotoar di salah satu kamera.</span>
+        <a class="btn primary" href="#/">Lihat kamera</a></div>`;
+      for (const e of events) known.add(`${e.camera.id}:${e.no}`);
+      firstLoad = false;
+      $id('more').hidden = !more;
+      wireEvents(feed);
+      $id('fErr').innerHTML = '';
+    } catch (e) { if (!dead) showError($id('fErr'), e); }
+  };
+
+  for (const b of view.querySelectorAll('[data-f]')) b.onclick = () => {
+    kind = b.dataset.f;
+    for (const o of view.querySelectorAll('[data-f]')) o.setAttribute('aria-pressed', String(o === b));
+    firstLoad = true; known = new Set(); load(false);
+  };
+  $id('more').onclick = () => load(true);
+
+  let total = P.cams.reduce((n, c) => n + c.seq, 0);   // ada kejadian baru: muat ulang halaman pertama saja
+  const off = subscribe(() => {
+    const now = P.cams.reduce((n, c) => n + c.seq, 0);
+    if (now !== total) { total = now; if (offset <= PAGE) load(false); }
+  });
+  current = { dispose() { dead = true; off(); } };
+  load(false);
+}
+
+// ------------------------------------------------------------------------------ mulai
+async function boot() {
+  try { S.info = await getJSON('/api/info'); } catch { /* penanda koneksi diurus pemantau */ }
+  await pollCams();                                  // isi daftar kamera sebelum halaman pertama digambar
   route();
+  startWatcher();
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 boot();

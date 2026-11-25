@@ -3,6 +3,7 @@
 
     python main.py                      # jalankan aplikasi web di http://localhost:8000
     python main.py serve --lan          # buka juga dari HP di Wi-Fi yang sama (tautan berkunci)
+    python main.py --cam "Depan=rtsp://user:sandi@192.168.1.20/stream1"   # kamera CCTV, dipantau terus
     python main.py analyze video.mp4    # analisis lewat baris perintah
     python main.py demo                 # buat video demo sintetis
 """
@@ -31,7 +32,7 @@ def cmd_serve(a) -> int:
     from sidewalk_sentinel.server import serve
     if not a.no_open and not a.lan:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{a.port}/")).start()
-    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan)
+    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan, cams=a.cam, retention_days=a.retention_days)
     return 0
 
 
@@ -78,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lan", action="store_true", help="dengarkan di semua antarmuka, tautan berkunci untuk HP")
     s.add_argument("--data", default="data", help="folder unggahan dan hasil (aman dihapus)")
     s.add_argument("--no-open", action="store_true", help="jangan buka browser otomatis")
+    s.add_argument("--cam", action="append", metavar="NAMA=SUMBER",
+                   help="daftarkan kamera: rtsp://..., http://..., device:0 (webcam USB), atau jalur berkas rekaman; boleh berulang")
+    s.add_argument("--retention-days", type=int, default=30, help="simpan kejadian dan foto bukti selama ini (hari)")
     s.set_defaults(fn=cmd_serve)
 
     a = sub.add_parser("analyze", help="analisis satu video dari baris perintah")

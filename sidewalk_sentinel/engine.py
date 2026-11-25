@@ -50,6 +50,7 @@ class Engine:
         self.counts = {"parkir": 0, "naik_trotoar": 0}
         self.events: list[Event] = []
         self.last: dict = {}
+        self.header_fn = None          # opsional: fungsi(t) -> teks judul HUD (mode CCTV: nama kamera dan jam)
 
     # --------------------------------------------------------------------- setup
     def _setup(self, h: int, w: int) -> None:
@@ -119,9 +120,10 @@ class Engine:
         if not self.last:
             raise RuntimeError("belum ada frame yang diproses")
         if self.last["annotated"] is None:
+            header = self.header_fn(self.last["t"]) if self.header_fn else None
             self.last["annotated"] = render.annotate(
                 self.last["bgr"], self.roi_px, self.last["tracks"], self.last["t"],
-                self.counts, self.cfg.park_seconds)
+                self.counts, self.cfg.park_seconds, header)
         return self.last["annotated"]
 
     def stages(self) -> np.ndarray:
