@@ -116,3 +116,138 @@ export class LiveLoop {
     }
   }
 }
+
+// ------------------------------------------------------------------------------ kamera perangkat
+// Perangkat ini menjadi kamera CCTV: video lokal diambil framenya ~5 kali per detik dan didorong ke server,
+// yang memantaunya seperti kamera lain. Pusher hidup selama aplikasi terbuka, bukan selama satu halaman,
+// jadi pindah dari halaman kamera ke Kejadian tidak mematikan kamera.
+export class Pusher {
+  constructor({ fps = 5, width = 640 } = {}) {
+    this.interval = 1000 / fps;
+    this.width = width;
+    this.camId = null;
+    this.facing = 'environment';
+    this.stream = null;
+    this.state = null;          // respons terakhir server: status, jejak, hitungan
+    this.error = '';
+    this.listeners = new Set();
+    this.timer = 0;
+    this.lock = null;
+    this.canvas = document.createElement('canvas');
+    // <video> tetap berada di dokumen (tersembunyi) agar terus berjalan di iOS; halaman memindahkannya sementara.
+    this.home = document.createElement('div');
+    this.home.setAttribute('aria-hidden', 'true');
+    this.home.style.cssText = 'position:fixed;left:0;bottom:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none';
+    this.video = document.createElement('video');
+    this.home.appendChild(this.video);
+    document.body.appendChild(this.home);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && this.active) this._wake(); });
+  }
+
+  get active() { return !!this.stream && this.camId !== null; }
+
+  on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+
+  _emit() { for (const fn of [...this.listeners]) { try { fn(this); } catch (e) { console.error(e); } } }
+
+  // Nyalakan kamera perangkat tanpa mengirim apa pun. Izin diminta di sini, sebelum kamera dibuat di server,
+  // supaya penolakan izin tidak meninggalkan kamera kosong.
+  async open(facing = this.facing) {
+    this.stop(false);
+    this.facing = facing;
+    try {
+      this.stream = await openCamera(this.video, facing);
+    } catch (e) {
+      this.stream = null;
+      this.error = e.name === 'NotAllowedError'
+        ? 'Izin kamera ditolak. Izinkan kamera untuk situs ini di pengaturan browser, lalu coba lagi.'
+        : `Kamera tidak bisa dinyalakan: ${e.message}`;
+      this._emit();
+      throw e;
+    }
+    this.error = '';
+  }
+
+  // Mulai mengirim frame ke kamera server `camId` (kamera sudah dinyalakan oleh open()).
+  begin(camId) {
+    this.camId = camId;
+    this.error = '';
+    this.state = null;
+    this._wake();
+    this._emit();
+    this._tick();
+  }
+
+  async start(camId, facing = this.facing) {
+    await this.open(facing);
+    this.begin(camId);
+  }
+
+  stop(emit = true) {
+    clearTimeout(this.timer);
+    if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.camId = null;
+    this.state = null;
+    this.video.srcObject = null;
+    if (this.lock) { this.lock.release().catch(() => {}); this.lock = null; }
+    if (emit) this._emit();
+  }
+
+  async flip() {
+    if (!this.active) return;
+    const id = this.camId;
+    await this.start(id, this.facing === 'environment' ? 'user' : 'environment');
+  }
+
+  // Pasang <video> ke bingkai halaman; kembalikan ke tempat tersembunyi saat halaman ditutup.
+  mount(host) { mountVideo(host, this.video); }
+
+  park() {
+    if (this.video.parentNode !== this.home) this.home.appendChild(this.video);
+    const p = this.video.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+
+  async _wake() {                // layar yang mati menghentikan kamera di HP; tahan layar selama kamera aktif
+    try {
+      if (navigator.wakeLock && !this.lock) {
+        this.lock = await navigator.wakeLock.request('screen');
+        this.lock.addEventListener('release', () => { this.lock = null; });
+      }
+    } catch { /* tidak wajib */ }
+  }
+
+  async _tick() {
+    if (!this.active) return;
+    const id = this.camId;
+    const t0 = performance.now();
+    try {
+      const v = this.video;
+      if (v.paused || v.ended) {                  // dijeda sistem (panggilan masuk, pindah tab): jangan kirim frame beku
+        const p = v.play();
+        if (p && p.catch) p.catch(() => {});
+      } else if (v.videoWidth) {
+        const w = Math.min(this.width, v.videoWidth);
+        this.canvas.width = w;
+        this.canvas.height = Math.round((v.videoHeight * w) / v.videoWidth);
+        this.canvas.getContext('2d').drawImage(v, 0, 0, this.canvas.width, this.canvas.height);
+        const blob = await toBlob(this.canvas, 0.7);
+        const data = await postBlob(`/api/cams/${id}/frame`, blob, 'image/jpeg');
+        if (this.camId === id) { this.state = data; this.error = ''; this._emit(); }
+      }
+    } catch (e) {
+      if (this.camId !== id) return;
+      if (e instanceof ApiError && [400, 404].includes(e.status)) {   // kamera dihapus atau bukan kamera perangkat
+        this.error = e.status === 404 ? 'Kamera ini sudah dihapus.' : e.message;
+        this.stop();
+        return;
+      }
+      this.error = 'Koneksi ke server bermasalah, mencoba lagi.';
+      this._emit();
+    }
+    if (this.active && this.camId === id) {
+      this.timer = setTimeout(() => this._tick(), Math.max(30, this.interval - (performance.now() - t0)));
+    }
+  }
+}

@@ -40,7 +40,7 @@ log = logging.getLogger("sidewalk")
 MAX_CAMERAS = 8
 MAX_STREAMS = 12                      # penonton siaran MJPEG serentak
 URL_SCHEMES = ("rtsp", "rtsps", "http", "https")
-STATUS = ("perlu_area", "menghubungkan", "belajar", "memantau", "terputus", "jeda", "selesai")
+STATUS = ("perlu_area", "menghubungkan", "menunggu", "belajar", "memantau", "terputus", "jeda", "selesai")
 
 
 class SourceError(Exception):
@@ -53,8 +53,8 @@ RECORDING_KINDS = ("demo", "upload", "file")
 def source_kind(text: str) -> str:
     """Jenis sumber dari teksnya, tanpa memeriksa keberadaan berkas (aman dipakai untuk menampilkan)."""
     s = text or ""
-    if s == "demo":
-        return "demo"
+    if s in ("demo", "browser"):
+        return s
     for prefix, kind in (("upload:", "upload"), ("device:", "device"), ("file:", "file")):
         if s.startswith(prefix):
             return kind
@@ -64,7 +64,7 @@ def source_kind(text: str) -> str:
 # ====================================================================== sumber kamera
 @dataclass(frozen=True)
 class Source:
-    kind: str            # demo | upload | device | url | file
+    kind: str            # demo | upload | device | url | file | browser
     value: str
 
     @property
@@ -80,6 +80,8 @@ def parse_source(text: str, trusted: bool = False) -> Source:
         raise ValueError("sumber kamera tidak valid")
     if s == "demo":
         return Source("demo", "")
+    if s == "browser":                          # kamera perangkat: frame didorong dari halaman web, bukan ditarik server
+        return Source("browser", "")
     if s.startswith("upload:"):
         if not valid_id(s[7:]):
             raise ValueError("id unggahan tidak valid")
@@ -102,7 +104,7 @@ def parse_source(text: str, trusted: bool = False) -> Source:
         raise ValueError("alamat kamera tidak valid") from e
     if scheme in URL_SCHEMES and host:
         return Source("url", s)
-    raise ValueError("sumber harus rtsp://..., http(s)://..., device:N, upload:ID, atau demo")
+    raise ValueError("sumber harus rtsp://..., http(s)://..., device:N, upload:ID, demo, atau browser")
 
 
 _USERINFO = re.compile(r"(://)[^/@\s]*@")
@@ -112,6 +114,90 @@ _SECRET_QS = re.compile(r"(?i)([?&](?:pass\w*|pwd|token|key|secret|auth\w*|sig\w
 def mask_source(text: str) -> str:
     """Samarkan kredensial (user:sandi@ dan parameter rahasia) sebelum ditampilkan atau dicatat."""
     return _SECRET_QS.sub(r"\1***", _USERINFO.sub(r"\1***@", text or ""))
+
+
+MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
+_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+def jpeg_size(data: bytes) -> tuple[int, int] | None:
+    """(lebar, tinggi) dari header JPEG tanpa mendekode. None bila bukan JPEG atau header tidak ditemukan.
+
+    Dipakai untuk menolak 'bom dekompresi' (JPEG kecil yang menyatakan puluhan ribu piksel per sisi) sebelum
+    cv2.imdecode mengalokasikan memori sebesar itu."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    i, n = 2, len(data)
+    while i + 4 <= n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        m = data[i + 1]
+        if m == 0xFF:
+            i += 1
+            continue
+        if m in (0x00, 0x01) or 0xD0 <= m <= 0xD8:
+            i += 2
+            continue
+        if m in (0xD9, 0xDA):                    # akhir berkas / awal data tanpa SOF
+            return None
+        if m in _SOF:
+            if i + 9 > n:
+                return None
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return None
+
+
+class PushCapture:
+    """Sumber yang frame-nya didorong dari luar (halaman web). Memakai bagian antarmuka cv2.VideoCapture yang
+    dipakai Camera._loop, sehingga alur pemantauan sama persis. Hanya frame terbaru yang disimpan: bila server
+    lebih lambat dari pengirim, frame lama dibuang, bukan menumpuk."""
+
+    push = True
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._frame: np.ndarray | None = None
+        self._cur: np.ndarray | None = None
+        self._seq = self._taken = 0
+        self._closed = False
+        self.last_push = 0.0
+
+    def put(self, frame: np.ndarray) -> None:
+        with self._cond:
+            self._frame, self._seq = frame, self._seq + 1
+            self.last_push = time.monotonic()
+            self._cond.notify_all()
+
+    def close(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def isOpened(self) -> bool:                  # noqa: N802 - meniru cv2.VideoCapture
+        return not self._closed
+
+    def grab(self, timeout: float = 1.0) -> bool:
+        with self._cond:
+            if self._seq == self._taken and not self._closed:
+                self._cond.wait(timeout)
+            if self._seq == self._taken:
+                return False
+            self._taken, self._cur = self._seq, self._frame
+            return True
+
+    def retrieve(self):
+        return (self._cur is not None), self._cur
+
+    def get(self, prop) -> float:
+        return 0.0
+
+    def set(self, prop, value) -> bool:
+        return False
+
+    def release(self) -> None:                   # saluran dimiliki Camera dan dipakai ulang antarsesi
+        pass
 
 
 def open_capture(src: Source, target) -> cv2.VideoCapture:
@@ -369,6 +455,9 @@ class Camera:
         self._frame: np.ndarray | None = None
         self._watch_until = 0.0
         self._last_proc: float | None = None
+        # kamera perangkat: frame didorong lewat push(); jejak terakhir dikirim balik agar halaman bisa menggambarnya
+        self.channel: PushCapture | None = PushCapture() if source_kind(spec.source) == "browser" else None
+        self._tracks: list[dict] = []
 
     # -------------------------------------------------------------- siklus hidup
     def start(self) -> None:
@@ -379,6 +468,8 @@ class Camera:
         self.removed = True
         self._stop.set()
         self._wake.set()
+        if self.channel:
+            self.channel.close()
         with self._cond:
             self._cond.notify_all()
         if self._thread and self._thread is not threading.current_thread():
@@ -442,6 +533,7 @@ class Camera:
         if jpg is not None:
             return jpg
         lines = {"menghubungkan": ["MENGHUBUNGKAN", "menunggu frame pertama"],
+                 "menunggu": ["MENUNGGU PERANGKAT", "buka halaman kamera ini lalu nyalakan kamera"],
                  "terputus": ["TERPUTUS", message or "mencoba lagi"],
                  "jeda": ["DIJEDA", "tekan Lanjutkan untuk memantau"],
                  "selesai": ["REKAMAN SELESAI", "tekan Putar ulang"]}.get(status, [status.upper(), message])
@@ -463,6 +555,30 @@ class Camera:
             if self._jpg_ver == last_ver and not self.removed:
                 self._cond.wait(timeout)
             return self._jpg, self._jpg_ver
+
+    # ------------------------------------------------------------------ kamera perangkat
+    def push(self, jpeg: bytes) -> dict:
+        """Terima satu frame dari halaman web. ValueError bila bukan kamera perangkat atau frame tidak wajar."""
+        if self.channel is None:
+            raise ValueError("kamera ini bukan kamera perangkat; frame hanya diterima dari sumber 'browser'")
+        size = jpeg_size(jpeg)
+        if size is None:
+            raise ValueError("frame bukan JPEG yang valid")
+        if size[0] * size[1] > MAX_FRAME_PIXELS or min(size) < 16:
+            raise ValueError(f"ukuran frame {size[0]}x{size[1]} terlalu besar atau terlalu kecil")
+        frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("frame bukan JPEG yang valid")
+        if self.spec.enabled:
+            self.channel.put(frame)
+        return self.live_state()
+
+    def live_state(self) -> dict:
+        with self._lock:
+            return {"status": self.status, "message": self.message,
+                    "learn_progress": {"have": self.learn[0], "need": self.learn[1]},
+                    "tracks": list(self._tracks), "seq": self.events.seq,
+                    "counts_today": self.events.counts_since(_now().replace(hour=0, minute=0, second=0, microsecond=0))}
 
     # ------------------------------------------------------------------ informasi
     def info(self) -> dict:
@@ -528,9 +644,13 @@ class Camera:
         try:
             src = parse_source(spec.source, trusted=True)
             cfg = Config.from_overrides(spec.settings)
-            target = self._resolver(src)
-            self._set("menghubungkan", "Menghubungkan ke kamera")
-            cap = open_capture(src, target)
+            if src.kind == "browser":
+                cap = self.channel
+                self._set("menunggu", "Menunggu kamera perangkat")
+            else:
+                target = self._resolver(src)
+                self._set("menghubungkan", "Menghubungkan ke kamera")
+                cap = open_capture(src, target)
         except (ValueError, SourceError) as e:
             self._set("terputus", str(e))
             return "putus"
@@ -557,6 +677,7 @@ class Camera:
         wall0 = time.monotonic()
         t = t_base = 0.0
         frame_i = loops = errors = 0
+        n_push = 0                          # kamera perangkat: jumlah frame yang pernah diterima
         last_proc = -1e9
         got = False
         self.learn, self.relearns = (0, 0), 0
@@ -572,6 +693,14 @@ class Camera:
             if self._take("recal") and monitor is not None:
                 monitor.recalibrate("diminta pengguna")
             if not cap.grab():
+                if getattr(cap, "push", False):
+                    # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu, JANGAN buang latar yang
+                    # sudah dipelajari. Gambar terakhir tetap tampil.
+                    if got and time.monotonic() - cap.last_push > 3.0:
+                        got = False
+                        self.connected_since = None
+                        self._set("menunggu", "Perangkat berhenti mengirim gambar. Buka lagi halaman kamera ini.")
+                    continue
                 if rec:
                     loops += 1
                     if spec.max_loops is not None and loops >= spec.max_loops:
@@ -606,6 +735,9 @@ class Camera:
             if not got:
                 got = True
                 self.connected_since = time.time()
+                if n_push and monitor is not None and monitor.state == "memantau":
+                    monitor.engine.tracker.reset()        # setelah jeda panjang, jejak lama tidak berlaku
+            n_push += 1
             self._note_frame(frame)
 
             if monitor is None:
@@ -645,6 +777,10 @@ class Camera:
                 self._publish_plain(frame, f"BELAJAR LATAR {have}/{need}")
             return
         self._set("memantau", "")
+        W, H = monitor.engine.size if rep.processed else (1, 1)
+        with self._lock:
+            self._tracks = [{"id": v["id"], "box": [v["bbox"][0] / W, v["bbox"][1] / H, v["bbox"][2] / W, v["bbox"][3] / H],
+                             "state": v["state"], "dwell": round(v["dwell"], 1)} for v in rep.tracks] if rep.processed else []
         for ev in rep.events:
             rec = self.events.append(ev.as_dict(), ev.snapshot)
             log.info("kamera %s: %s (kejadian #%d)", self.spec.name, ev.kind, rec["no"])

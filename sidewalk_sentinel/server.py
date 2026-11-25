@@ -12,6 +12,7 @@ import mimetypes
 import re
 import secrets
 import socket
+import ssl
 import sys
 import time
 from http import HTTPStatus
@@ -20,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from . import tls
 from . import video as vid
 from .cameras import MAX_CAMERAS, CameraManager, SourceError, parse_source
 from .config import Config
@@ -55,6 +57,7 @@ class App:
         self.port = 0
         self.host = "127.0.0.1"
         self.lan = False
+        self.https = False
         self.cams = CameraManager(self.store.root, self._resolve_source, retention_days)
         self.cams.start()
 
@@ -193,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.app.token is not None and path == "/" and "k" in query:
                 if hmac.compare_digest(query["k"][0], self.app.token):
                     cookie = f"ss_key={self.app.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                    if self.app.https:
+                        cookie += "; Secure"
                     self.send_response(302)
                     self.send_header("Location", "/")
                     self.send_header("Set-Cookie", cookie)
@@ -531,6 +536,13 @@ class Handler(BaseHTTPRequestHandler):
             cam.recalibrate()
             return self._json({"ok": True})
 
+        if n == 4 and seg[3] == "frame" and method == "POST":
+            body = self._read_body(3 * 1024 * 1024)
+            try:
+                return self._json(cam.push(body))
+            except ValueError as e:
+                return self._error(400, str(e))
+
         if n == 4 and seg[3] == "snapshot.jpg" and method in ("GET", "HEAD"):
             if query.get("raw", ["0"])[0] == "1":
                 jpg = cam.raw_jpeg()
@@ -606,13 +618,33 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 64
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        # Browser yang menolak sertifikat ditandatangani sendiri, atau klien yang memutus koneksi, bukan galat server.
+        if isinstance(sys.exc_info()[1], (ssl.SSLError, ConnectionError)):
+            log.debug("koneksi dari %s berakhir: %s", client_address[0], sys.exc_info()[1])
+            return
+        super().handle_error(request, client_address)
+
 
 def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
-                token: str | None = None, retention_days: int = 30) -> tuple[_Server, App]:
+                token: str | None = None, retention_days: int = 30, https: bool = False,
+                hosts: list[str] | None = None) -> tuple[_Server, App]:
     app = App(data_dir, token=token, retention_days=retention_days)
     app.lan = lan
-    handler = type("BoundHandler", (Handler,), {"app": app})
-    server = _Server((host, port), handler)
+    try:
+        ctx = None
+        if https:
+            ctx = tls.server_context(*tls.ensure_certificate(app.store.root / "tls", hosts or []))
+        handler = type("BoundHandler", (Handler,), {"app": app})
+        server = _Server((host, port), handler)
+    except BaseException:
+        app.close()                                  # jangan tinggalkan utas kamera bila server gagal dibuat
+        raise
+    if ctx is not None:
+        # Jabat tangan TLS ditunda ke utas penangan (do_handshake_on_connect=False). Bila dilakukan saat accept(),
+        # satu koneksi yang diam saja menahan semua koneksi lain.
+        server.socket = ctx.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+        app.https = True
     app.host, app.port = host, server.server_address[1]
     return server, app
 
@@ -638,20 +670,32 @@ def register_cli_cameras(app: App, specs: list[str]) -> None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "data", lan: bool = False,
-          cams: list[str] | None = None, retention_days: int = 30) -> None:
+          cams: list[str] | None = None, retention_days: int = 30, https: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
+    lan = lan or https                                # HTTPS dipakai agar HP bisa membuka kamera, jadi harus terjangkau dari LAN
     token = secrets.token_urlsafe(12) if lan else None
     if lan:
         host = "0.0.0.0"
-    server, app = make_server(host, port, data_dir, lan=lan, token=token, retention_days=retention_days)
+    ip = lan_ip()
+    try:
+        server, app = make_server(host, port, data_dir, lan=lan, token=token, retention_days=retention_days,
+                                  https=https, hosts=[ip, "localhost"])
+    except tls.TlsUnavailable as e:
+        raise SystemExit(str(e))
     register_cli_cameras(app, cams or [])
+    scheme = "https" if https else "http"
     bar = "=" * 62
     print(f"\n{bar}\n  SIDEWALK SENTINEL v{__version__}\n{bar}")
-    print(f"  Laptop : http://localhost:{app.port}/" + (f"?k={token}" if token else ""))
+    print(f"  Laptop : {scheme}://localhost:{app.port}/" + (f"?k={token}" if token else ""))
     if lan:
-        print(f"  HP     : http://{lan_ip()}:{app.port}/?k={token}")
+        print(f"  HP     : {scheme}://{ip}:{app.port}/?k={token}")
         print("           (HP dan laptop harus di Wi-Fi yang sama; tautan ini berkunci)")
-        print("  Catatan: kamera langsung di HP butuh HTTPS; unggah/rekam video tetap jalan.")
+        if https:
+            print("  HTTPS  : sertifikat ditandatangani sendiri, jadi browser memberi peringatan sekali.")
+            print("           Chrome: Lanjutan > Lanjutkan ke situs. Safari: Tampilkan Detail > buka situs web ini.")
+            print("           Sesudah itu izinkan kamera; tombol 'Jadikan perangkat ini CCTV' siap dipakai.")
+        else:
+            print("  Catatan: kamera langsung di HP butuh HTTPS. Jalankan ulang dengan --https untuk memakainya.")
     print(f"  Data   : {app.store.root}")
     print(f"  Kamera : {len(app.cams.list())} terdaftar; kejadian disimpan {retention_days} hari")
     print(f"  ffmpeg : {'ada' if vid.have_ffmpeg() else 'tidak ada (video beranotasi dinonaktifkan)'}")

@@ -1,6 +1,6 @@
 import { ApiError, getJSON, postJSON, upload } from './api.js';
 import { PRESET, RoiEditor } from './roi.js';
-import { LiveLoop, cameraSupported, drawTracks, openCamera, snapshot, mountVideo } from './live.js';
+import { LiveLoop, Pusher, cameraSupported, drawTracks, openCamera, snapshot, mountVideo } from './live.js';
 
 const view = document.getElementById('view');
 const S = {
@@ -14,6 +14,12 @@ const S = {
   },
 };
 let current = { dispose() {} };
+const pusher = new Pusher();                           // kamera perangkat ini; hidup selama aplikasi terbuka
+const keep = {                                         // localStorage bisa melempar galat (mode privat)
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* abaikan */ } },
+  del: (k) => { try { localStorage.removeItem(k); } catch { /* abaikan */ } },
+};
 
 // ---------------------------------------------------------------------------- util
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -193,11 +199,8 @@ async function viewHome() {
     <div class="actions">
       <label class="btn primary block" id="recBtn" tabindex="0" role="button">${ICON.rec}<span>Rekam video</span>
         <input id="rec" type="file" accept="video/*" capture="environment" hidden></label>
-      <div class="actions row">
-        <label class="btn line" tabindex="0" role="button">${ICON.up}<span>Pilih video</span>
-          <input id="pick" type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.avi" hidden></label>
-        <a class="btn line" href="#/live">${ICON.camera}<span>Kamera langsung</span></a>
-      </div>
+      <label class="btn line block" tabindex="0" role="button">${ICON.up}<span>Pilih video</span>
+        <input id="pick" type="file" accept="video/*,.mov,.mp4,.m4v,.webm,.mkv,.avi" hidden></label>
       <div class="actions row">
         <button class="btn quiet" id="demoBtn" type="button">Coba dengan video demo</button>
         <a class="btn quiet" href="#/riwayat">${ICON.history}<span>Riwayat analisis</span></a>
@@ -763,6 +766,40 @@ async function createCam(body) {
   return cam;
 }
 
+function secureNotice() {
+  return `<div class="notice" data-tone="warn"><b>Kamera butuh koneksi aman</b>
+    Browser hanya mengizinkan kamera di HTTPS atau localhost. Di laptop, buka <code>http://localhost:8000</code>.
+    Di HP, jalankan server dengan <code>python main.py --lan --https</code>, buka tautan https yang dicetak,
+    lalu terima peringatan sertifikat satu kali.</div>`;
+}
+
+// Jadikan perangkat ini kamera: minta izin dulu (agar penolakan tidak meninggalkan kamera kosong), buat kamera
+// bersumber `browser` di server, mulai mengirim frame, lalu minta pengguna menandai area.
+async function startDeviceCamera(host, name = '') {
+  if (!cameraSupported()) { host.innerHTML = secureNotice(); return false; }
+  const label = String(name).trim() || (matchMedia('(pointer: coarse)').matches ? 'Kamera HP' : 'Kamera laptop');
+  try { await pusher.open(); } catch { showError(host, new Error(pusher.error)); return false; }
+  let cam;
+  try { cam = await createCam({ source: 'browser', name: label.slice(0, 40) }); }
+  catch (e) { pusher.stop(); showError(host, e); return false; }
+  pusher.begin(cam.id);
+  keep.set('ss_push', cam.id);
+  go(`#/pantau/${cam.id}/area`);
+  return true;
+}
+
+// Penanda global: selama perangkat ini mengirim gambar, tampilkan di setiap halaman dan tautkan ke kameranya.
+function renderCamLive() {
+  const el = $id('camlive');
+  const cam = pusher.active ? camById(pusher.camId) : null;
+  if (!cam) { el.hidden = true; el.dataset.h = ''; return; }
+  const st = (pusher.state && pusher.state.status) || cam.status;
+  const markup = `<i class="dot" aria-hidden="true"></i><span>Perangkat ini sedang jadi CCTV: <b>${esc(cam.name)}</b>, ${esc((STATUS[st] || ['', st])[1].toLowerCase())}</span>`;
+  el.hidden = false;
+  el.href = `#/pantau/${cam.id}`;
+  if (el.dataset.h !== markup) { el.dataset.h = markup; el.innerHTML = markup; }
+}
+
 function camEventRow(ev, camName, fresh = false) {
   const src = ev.snapshot_url || '';
   return `<button class="event ${fresh ? 'fresh' : ''}" type="button" data-k="${ev.kind}" data-src="${esc(src)}">
@@ -773,6 +810,9 @@ function camEventRow(ev, camName, fresh = false) {
 }
 
 const $id = (q) => document.getElementById(q);
+// Isi ulang teks hanya bila berubah: <main> adalah wilayah aria-live, jadi menulis nilai yang sama
+// membuat pembaca layar mengumumkannya lagi tiap polling.
+const setText = (el, v) => { v = String(v); if (el.textContent !== v) el.textContent = v; };
 
 // -------------------------------------------------------------------------- daftar kamera
 function viewPantau() {
@@ -791,14 +831,21 @@ function viewPantau() {
     root.innerHTML = `<div class="hero">
       <div class="hero-scene">${HERO}</div>
       <div class="hero-copy stack">
-        <h1 class="h1">Trotoar dipantau tanpa henti.</h1>
-        <p class="lead">Hubungkan kamera CCTV, webcam, atau rekaman. Server belajar sendiri seperti apa trotoar kosong, lalu mencatat kendaraan yang parkir atau naik ke trotoar, lengkap dengan foto.</p>
+        <h1 class="h1">Perangkat ini jadi CCTV.</h1>
+        <p class="lead">Nyalakan kamera HP atau laptop, arahkan ke trotoar, dan tandai area sekali saja. Deteksi berjalan langsung dan otomatis: kendaraan yang parkir atau naik ke trotoar tercatat lengkap dengan foto.</p>
         <div class="actions">
-          <a class="btn primary block" href="#/tambah">${ICON.plus}<span>Tambah kamera</span></a>
-          <button class="btn line block" id="demoCam" type="button">${ICON.play}<span>Coba kamera demo</span></button>
+          <button class="btn primary block" id="useDevice" type="button">${ICON.camera}<span>Jadikan perangkat ini CCTV</span></button>
+          <div class="actions row">
+            <button class="btn line" id="demoCam" type="button">${ICON.play}<span>Coba demo</span></button>
+            <a class="btn line" href="#/tambah">${ICON.plus}<span>Sumber lain</span></a></div>
         </div>
         <div id="pmsg"></div>
       </div></div>`;
+    $id('useDevice').onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      if (!(await startDeviceCamera($id('pmsg')))) btn.disabled = false;
+    };
     $id('demoCam').onclick = async (e) => {
       e.currentTarget.disabled = true;
       try { const cam = await createCam({ source: 'demo' }); go(`#/pantau/${cam.id}`); }
@@ -837,8 +884,8 @@ function viewPantau() {
       set('name', c.name); set('park', c.counts_today.parkir); set('ride', c.counts_today.naik_trotoar);
       set('last', c.last_event ? `${KIND[c.last_event.kind]}, ${whenLabel(c.last_event.ts)}` : 'Belum ada kejadian');
     }
-    $id('tp').textContent = park; $id('tr').textContent = ride;
-    $id('psub').textContent = `${cams.length} kamera, ${on} sedang memantau. Server bekerja terus; halaman ini hanya menampilkan.`;
+    setText($id('tp'), park); setText($id('tr'), ride);
+    setText($id('psub'), `${cams.length} kamera, ${on} sedang memantau. Server bekerja terus; halaman ini hanya menampilkan.`);
     const full = cams.length >= P.max;
     $id('addBtn').setAttribute('aria-disabled', String(full));
     if (full) $id('addBtn').setAttribute('tabindex', '-1'); else $id('addBtn').removeAttribute('tabindex');
@@ -862,13 +909,18 @@ function viewAddCam() {
   view.innerHTML = `<div class="stack-lg" style="max-width:640px">
     <div class="stack"><a class="back" href="#/">${ICON.back}<span>Semua kamera</span></a>
       <h1 class="h2">Tambah kamera</h1>
-      <p class="dim">Server yang membaca kamera, jadi HP atau laptop ini hanya melihat hasilnya dan tidak perlu HTTPS.</p></div>
-    <div class="stack">
+      <p class="dim">Kamera bisa berasal dari perangkat ini, atau dari sumber lain yang dibaca server.</p></div>
+    <div class="field"><label for="cname">Nama kamera</label>
+      <input class="input" id="cname" type="text" maxlength="40" autocomplete="off" placeholder="Contoh: Depan toko"></div>
+    <div class="panel stack"><b>Perangkat ini</b>
+      <p class="dim small">Pakai kamera HP atau laptop yang sedang membuka aplikasi. Taruh di tempat yang stabil menghadap trotoar dan biarkan layar menyala.</p>
+      <button class="btn primary block" id="useDevice" type="button">${ICON.camera}<span>Jadikan perangkat ini CCTV</span></button>
+      <div id="devMsg"></div></div>
+    <div class="stack"><h2 class="h3">Sumber lain</h2>
+      <p class="dim small">Server membaca kamera ini sendiri. HP atau laptop hanya menampilkan hasilnya.</p>
       <div class="seg fill" role="group" aria-label="Jenis sumber">${KINDS.map(([k, t]) => `<button type="button" data-t="${k}" aria-pressed="${k === type}">${t}</button>`).join('')}</div>
-      <div class="field"><label for="cname">Nama kamera</label>
-        <input class="input" id="cname" type="text" maxlength="40" autocomplete="off" placeholder="Contoh: Depan toko"></div>
       <div id="src"></div>
-      <button class="btn primary block" id="add" type="button">Tambah dan tandai area</button>
+      <button class="btn line block" id="add" type="button">Tambah sumber dan tandai area</button>
       <div id="addMsg"></div>
     </div>
     <div class="panel stack"><b>Belum punya kamera?</b>
@@ -905,6 +957,11 @@ function viewAddCam() {
   for (const b of view.querySelectorAll('[data-t]')) b.onclick = () => { type = b.dataset.t; draw(); };
   draw();
 
+  $id('useDevice').onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    if (!(await startDeviceCamera($id('devMsg'), $id('cname').value))) btn.disabled = false;
+  };
   $id('demo').onclick = async (e) => {
     e.currentTarget.disabled = true;
     try { const cam = await createCam({ source: 'demo' }); go(`#/pantau/${cam.id}`); }
@@ -954,7 +1011,8 @@ function viewCam(id) {
       <h1 class="h2">Kamera tidak ditemukan</h1><p class="dim">Kamera ini mungkin sudah dihapus.</p></div>`;
     return;
   }
-  let dead = false, lastSeq = -1, known = null, snapTimer = 0, confirmDel = 0;
+  const isDevice = cam.kind === 'browser';
+  let dead = false, lastSeq = -1, known = null, snapTimer = 0, confirmDel = 0, mode = '', offPush = () => {};
   const stream = document.createElement('img');
   stream.id = 'stream';
   const detach = () => { stream.onerror = null; clearInterval(snapTimer); stream.removeAttribute('src'); };
@@ -966,9 +1024,15 @@ function viewCam(id) {
     };
     stream.src = `/api/cams/${id}/stream.mjpg?_=${Date.now()}`;
   };
-  const onVis = () => { if (document.hidden) detach(); else if (!dead) attach(); };
+  const onVis = () => { if (document.hidden) detach(); else if (!dead && mode === 'stream') attach(); };
   const off = subscribe(() => tick());
-  current = { dispose() { dead = true; clearTimeout(confirmDel); document.removeEventListener('visibilitychange', onVis); off(); detach(); } };
+  current = {
+    dispose() {
+      dead = true; clearTimeout(confirmDel); document.removeEventListener('visibilitychange', onVis);
+      off(); offPush(); detach();
+      if (mode === 'local') pusher.park();               // video kamera kembali ke tempat tersembunyi, tetap berjalan
+    },
+  };
 
   view.innerHTML = `<div class="stack-lg">
     <a class="back" href="#/">${ICON.back}<span>Semua kamera</span></a>
@@ -989,15 +1053,32 @@ function viewCam(id) {
         <div class="actions row">
           <button class="btn line" id="toggle" type="button"></button>
           <button class="btn line" id="cfg" type="button" aria-expanded="false" aria-controls="cfgPanel">${ICON.sliders}<span>Atur</span></button></div>
+        <div id="devctl" class="stack"></div>
         <div id="cfgPanel" hidden></div>
       </div>
     </div>
     <div class="stack"><h2 class="h3">Kejadian terbaru</h2><div class="events" id="evs"><p class="dim">Memuat…</p></div></div>
   </div>`;
-  $id('live').prepend(stream);
+  const live = $id('live');
   stream.alt = `Siaran langsung kamera ${cam.name}`; stream.width = 640; stream.height = 360;
+  const overlay = document.createElement('canvas');
+  overlay.className = 'overlay';
+  const showFeed = () => {                             // video lokal bila perangkat ini kameranya, selain itu siaran server
+    const want = isDevice && pusher.active && pusher.camId === id ? 'local' : 'stream';
+    if (want === mode) return;
+    mode = want;
+    if (want === 'local') { detach(); stream.remove(); pusher.mount(live); live.appendChild(overlay); }
+    else { overlay.remove(); pusher.park(); live.prepend(stream); attach(); }
+  };
+  const drawLive = () => {
+    if (mode !== 'local') return;
+    const v = pusher.video;
+    const h = Math.round((640 * (v.videoHeight || 360)) / (v.videoWidth || 640));
+    if (overlay.width !== 640 || overlay.height !== h) { overlay.width = 640; overlay.height = h; }
+    drawTracks(overlay, (pusher.state && pusher.state.tracks) || [], Number((cam.settings || {}).park_seconds) || 10);
+  };
   document.addEventListener('visibilitychange', onVis);
-  attach();
+  showFeed();
 
   const html = {};                                     // isi terakhir tiap bagian: hindari menyusun ulang DOM yang sama
   const put = (key, el, markup) => { if (html[key] !== markup) { html[key] = markup; el.innerHTML = markup; } };
@@ -1007,16 +1088,18 @@ function viewCam(id) {
     put('chip', $id('chip'), statusChip(c));
     const label = (STATUS[c.status] || ['', c.status])[1];
     if (html.live !== label) { html.live = label; $id('stLive').textContent = `${c.name}: ${label}`; }   // hanya saat status berganti
-    $id('cname').textContent = c.name;
-    $id('csrc').textContent = c.kind === 'demo' ? 'Adegan sintetis bawaan' : c.kind === 'upload'
-      ? 'Rekaman video yang diunggah'
-      : `${{ file: 'Rekaman video', device: 'Webcam USB' }[c.kind] || 'Kamera IP'}: ${c.source}`;
-    $id('tp').textContent = c.counts_today.parkir; $id('tr').textContent = c.counts_today.naik_trotoar;
+    setText($id('cname'), c.name);
+    setText($id('csrc'), c.kind === 'demo' ? 'Adegan sintetis bawaan' : c.kind === 'upload' ? 'Rekaman video yang diunggah'
+      : c.kind === 'browser' ? 'Kamera perangkat (HP atau laptop)'
+      : `${{ file: 'Rekaman video', device: 'Webcam USB' }[c.kind] || 'Kamera IP'}: ${c.source}`);
+    setText($id('tp'), c.counts_today.parkir); setText($id('tr'), c.counts_today.naik_trotoar);
     const lp = c.learn_progress || { have: 0, need: 1 };
     let body = `<b>${esc(c.message || (STATUS[c.status] || ['', c.status])[1])}</b>`;
     if (c.status === 'belajar') {
       body += `<div class="kerb" role="progressbar" aria-valuemin="0" aria-valuemax="${lp.need}" aria-valuenow="${lp.have}"><i style="width:${Math.round((lp.have / Math.max(1, lp.need)) * 100)}%;transition:none"></i></div>
         <span class="dim small">Cuplikan ${lp.have} dari ${lp.need}. Biarkan kamera tetap diam; kendaraan yang lewat tidak ikut tersimpan sebagai latar.</span>`;
+    } else if (c.status === 'menunggu' && !(pusher.active && pusher.camId === id)) {
+      body += `<span class="dim small">Buka halaman ini di HP atau laptop yang akan jadi kamera, lalu pilih Pakai perangkat ini sebagai kamera.</span>`;
     } else if (c.status === 'perlu_area') {
       body += `<a class="btn primary block" href="#/pantau/${id}/area">${ICON.area}<span>Tandai area trotoar</span></a>`;
     } else if (c.status === 'memantau') {
@@ -1028,7 +1111,35 @@ function viewCam(id) {
     put('recal', $id('recal'), c.status === 'selesai' ? `${ICON.play}<span>Putar ulang</span>` : `${ICON.sync}<span>Kalibrasi lagi</span>`);
     $id('recal').disabled = c.status === 'perlu_area';
     put('toggle', $id('toggle'), c.enabled ? `${ICON.pause}<span>Jeda</span>` : `${ICON.play}<span>Lanjutkan</span>`);
+    renderDev();
   };
+
+  const renderDev = () => {                            // kontrol khusus kamera perangkat
+    if (!isDevice) return;
+    const here = pusher.active && pusher.camId === id;
+    const warn = pusher.error ? `<div class="notice" data-tone="warn" role="alert">${esc(pusher.error)}</div>` : '';
+    let markup;
+    if (here) {
+      markup = `<div class="actions row"><button class="btn line" data-a="flip" type="button">${ICON.flip}<span>Ganti kamera</span></button>
+        <button class="btn line" data-a="stop" type="button">${ICON.stop}<span>Berhenti</span></button></div>
+        <p class="faint small">Biarkan layar menyala dan halaman aplikasi terbuka. HP yang terkunci menghentikan kamera.</p>${warn}`;
+    } else if (!cameraSupported()) {
+      markup = secureNotice();
+    } else {
+      markup = `<button class="btn primary block" data-a="here" type="button">${ICON.camera}<span>Pakai perangkat ini sebagai kamera</span></button>${warn}`;
+    }
+    put('dev', $id('devctl'), markup);
+  };
+  $id('devctl').onclick = async (e) => {
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    if (b.dataset.a === 'flip') pusher.flip().catch((err) => toast('Kamera tidak bisa diganti', err.message, 'error'));
+    if (b.dataset.a === 'stop') { pusher.stop(); keep.del('ss_push'); }
+    if (b.dataset.a === 'here') {
+      try { await pusher.start(id); keep.set('ss_push', id); } catch { renderDev(); }
+    }
+  };
+  offPush = pusher.on(() => { showFeed(); drawLive(); renderDev(); });
 
   const loadEvents = async () => {
     try {
@@ -1158,6 +1269,13 @@ function viewCamArea(id) {
 
   const load = () => {
     clearTimeout(retry);
+    if (cam.kind === 'browser' && pusher.active && pusher.camId === id && pusher.video.videoWidth) {
+      loaded = true;                                   // kamera ada di perangkat ini: pakai frame lokal, tanpa lewat server
+      editor.setImage(snapshot(pusher.video, 960));
+      editor.onChange(editor.points);
+      setText($id('aMsg'), 'Gambar dari kamera perangkat ini.');
+      return;
+    }
     const img = new Image();
     img.onload = () => {
       if (dead) return;
@@ -1249,6 +1367,12 @@ function viewFeed() {
 async function boot() {
   try { S.info = await getJSON('/api/info'); } catch { /* penanda koneksi diurus pemantau */ }
   await pollCams();                                  // isi daftar kamera sebelum halaman pertama digambar
+  pusher.on(renderCamLive);
+  subscribe(renderCamLive);
+  const saved = keep.get('ss_push');                 // perangkat ini sebelumnya dipakai sebagai kamera: lanjutkan
+  const savedCam = saved && camById(saved);
+  if (saved && (!savedCam || savedCam.kind !== 'browser')) keep.del('ss_push');
+  else if (savedCam && cameraSupported()) pusher.start(saved).catch(() => { /* halaman kamera menawarkan tombol */ });
   route();
   startWatcher();
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});

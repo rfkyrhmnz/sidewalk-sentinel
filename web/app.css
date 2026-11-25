@@ -276,6 +276,13 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
 @keyframes tag-parkir { 0%, 68% { opacity: 0; } 72%, 100% { opacity: 1; } }
 @keyframes dwell { 0%, 68% { opacity: 0; transform: scaleX(0); } 72% { opacity: 1; transform: scaleX(0); } 92%, 100% { opacity: 1; transform: scaleX(1); } }
 /* ------------------------------------------------------------------ pantau (mode CCTV) */
+code { font: 600 .92em/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; padding: 1px 6px; border-radius: 6px; background: var(--asphalt-3); overflow-wrap: anywhere; }
+.cam-live {
+  display: flex; align-items: center; gap: 10px; justify-content: center; padding: 8px 16px;
+  background: #3a1217; border-bottom: 1px solid #6b2f33; color: #ffd0d3; text-decoration: none; font-size: 14px;
+}
+.cam-live b { color: #fff; }
+.cam-live .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--flare); flex: none; animation: pulse 1.6s ease-in-out infinite; }
 .panel.stack > b, .panel.stack > span { display: block; }
 .seg.fill { display: grid; grid-auto-columns: 1fr; width: 100%; }
 .seg.fill button { white-space: nowrap; padding-left: 8px; padding-right: 8px; }
@@ -328,5 +335,5 @@ select.input { appearance: none; -webkit-appearance: none; background-image: lin
   .bar-dwell { animation: none; opacity: 1; }
   .kerb > i { transition: none; }
   .event.fresh, .toast { animation: none; }
-  .chip .dot { animation: none !important; }
+  .chip .dot, .cam-live .dot { animation: none !important; }
 }
