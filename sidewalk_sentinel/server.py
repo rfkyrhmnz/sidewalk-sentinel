@@ -374,6 +374,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "parameter limit/offset tidak valid")
             return self._json({"events": rows})
 
+        if n == 2 and seg[1] == "report" and method == "GET":
+            camera = query.get("kamera", [None])[0]
+            if camera is not None and not valid_id(camera):
+                return self._error(400, "id kamera tidak valid")
+            try:
+                return self._json(app.cams.report(query.get("periode", ["hari_ini"])[0], camera))
+            except ValueError as e:
+                return self._error(400, str(e))
+            except KeyError:
+                return self._error(404, "kamera tidak ditemukan")
+
         if n == 2 and seg[1] == "events.csv" and method in ("GET", "HEAD"):
             return self._send(200, app.cams.csv().encode("utf-8-sig"), "text/csv; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="sidewalk-kejadian.csv"'})

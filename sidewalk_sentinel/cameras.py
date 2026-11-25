@@ -33,6 +33,7 @@ from . import render  # noqa: E402
 from .config import Config  # noqa: E402
 from .jobs import check_roi, new_id, valid_id  # noqa: E402
 from .monitor import LEARN, Monitor  # noqa: E402
+from .report import compute_report  # noqa: E402
 from .synthetic import ROI as DEMO_ROI  # noqa: E402
 
 log = logging.getLogger("sidewalk")
@@ -298,8 +299,26 @@ def _now() -> datetime:
     return datetime.now().astimezone()
 
 
+MAX_DURATION_S = 7 * 24 * 3600
+PATCH_KEYS = ("durasi_s",)
+
+
+def _clean_patch(fields: dict) -> dict:
+    """Hanya kolom yang dikenal dan bernilai wajar. Berkas events.jsonl bisa rusak atau diedit tangan."""
+    out = {}
+    for k in PATCH_KEYS:
+        v = fields.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= MAX_DURATION_S:
+            out[k] = round(float(v), 1)
+    return out
+
+
 class EventStore:
-    """Kejadian satu kamera: events.jsonl (satu baris per kejadian) dan bukti foto di events/NNN.jpg."""
+    """Kejadian satu kamera: events.jsonl (satu baris per kejadian) dan bukti foto di events/NNN.jpg.
+
+    Kejadian dicatat sekali, saat terkonfirmasi. Hal yang baru diketahui kemudian (berapa lama kendaraan akhirnya
+    berada di trotoar) ditambahkan sebagai baris `{"no": N, "patch": {...}}` di akhir berkas, lalu dilebur ke
+    rekamannya saat dimuat. Berkas tetap hanya bertambah, jadi mati listrik tidak merusak catatan lama."""
 
     def __init__(self, folder: Path):
         self.folder = folder
@@ -314,14 +333,21 @@ class EventStore:
 
     def _load(self) -> None:
         if self._file.exists():
+            index: dict[int, int] = {}
             for line in self._file.read_text(encoding="utf-8", errors="replace").splitlines():
                 try:
                     rec = json.loads(line)
+                    if isinstance(rec, dict) and isinstance(rec.get("patch"), dict):
+                        i = index.get(rec.get("no"))
+                        if i is not None:
+                            self.records[i] = {**self.records[i], **_clean_patch(rec["patch"])}
+                        continue
                     dt = datetime.fromisoformat(rec["ts"])
                     if not isinstance(rec.get("no"), int):
                         continue
-                except (ValueError, KeyError, TypeError):      # baris rusak (mis. mati listrik): lewati
+                except (ValueError, KeyError, TypeError, AttributeError):   # baris rusak (mis. mati listrik): lewati
                     continue
+                index[rec["no"]] = len(self.records)
                 self.records.append(rec)
                 self._dts.append(dt)
         nxt = 1 + max((r["no"] for r in self.records), default=0)
@@ -331,11 +357,12 @@ class EventStore:
             pass
         self.next_no = nxt
 
-    def append(self, ev: dict, snapshot: bytes | None) -> dict:
+    def append(self, ev: dict, snapshot: bytes | None, when: datetime | None = None) -> dict:
+        """Catat satu kejadian. `when` (berzona waktu) hanya untuk mengimpor atau menyiapkan data uji; bawaannya sekarang."""
         with self._lock:
             no = self.next_no
             self.next_no += 1
-            now = _now()
+            now = when or _now()
             rec = {"no": no, "ts": now.isoformat(timespec="seconds"), "kind": ev["kind"], "label": ev["label"],
                    "reason": ev["reason"], "track_id": ev["track_id"],
                    "snapshot": f"events/{no}.jpg" if snapshot else None}
@@ -347,6 +374,25 @@ class EventStore:
             self.records.append(rec)
             self._dts.append(now)
             return rec
+
+    def patch(self, no: int, **fields) -> bool:
+        """Tambahkan keterangan baru (mis. durasi_s) ke kejadian yang sudah dicatat. False bila tidak ada yang
+        diterapkan. Rekaman diganti dengan salinan, bukan diubah di tempat: pembaca di utas lain (API) masih memegang
+        objek lama dan tidak boleh melihat kamus yang berubah ukuran saat sedang diserialisasi."""
+        clean = _clean_patch(fields)
+        if not clean:
+            return False
+        with self._lock:
+            i = next((j for j in range(len(self.records) - 1, -1, -1) if self.records[j]["no"] == no), None)
+            if i is None:
+                return False
+            try:
+                with open(self._file, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"no": no, "patch": clean}) + "\n")
+            except OSError:                                    # folder kamera sudah dihapus
+                return False
+            self.records[i] = {**self.records[i], **clean}
+            return True
 
     def snapshot_path(self, no: int) -> Path | None:
         p = self.events_dir / f"{int(no)}.jpg"
@@ -399,6 +445,43 @@ class EventStore:
             return removed
 
 
+# ================================================================ lama kejadian
+GRACE_S = 3.0           # kendaraan dianggap sudah pergi bila tidak terlihat di trotoar selama ini (waktu mesin)
+
+
+class DurationTracker:
+    """Mencatat berapa lama tiap kejadian berlangsung. Kejadian dibuka saat terkonfirmasi; selama pelacaknya masih
+    terlihat di zona trotoar, waktu terakhir terlihat diperbarui. Lepas dari zona lebih dari GRACE_S (atau sesi
+    berakhir), durasi = terakhir terlihat - mulai kondisi terpenuhi, lalu ditulis ke kejadian.
+
+    Jeda GRACE_S mencegah satu-dua frame yang meleset (kontak dengan trotoar sempat di bawah ambang) memotong
+    durasi kendaraan yang sebenarnya masih ada. Kuncinya (track, jenis): satu pelacak bisa punya dua kejadian,
+    misalnya pengendara naik ke trotoar lalu berhenti di sana."""
+
+    def __init__(self, store: EventStore, grace: float = GRACE_S):
+        self.store, self.grace = store, grace
+        self._open: dict[tuple[int, str], list] = {}      # (track, jenis) -> [no, mulai, terakhir terlihat]
+
+    def begin(self, track_id: int, kind: str, no: int, t_start: float, t: float) -> None:
+        self._open[(track_id, kind)] = [no, t_start, t]
+
+    def update(self, present: set[int], t: float) -> None:
+        for key in list(self._open):
+            o = self._open[key]
+            if key[0] in present:
+                o[2] = t
+            elif t - o[2] >= self.grace:
+                self._finish(key)
+
+    def finish_all(self) -> None:
+        for key in list(self._open):
+            self._finish(key)
+
+    def _finish(self, key: tuple[int, str]) -> None:
+        no, t0, last = self._open.pop(key)
+        self.store.patch(no, durasi_s=max(0.0, last - t0))
+
+
 # ======================================================================= gambar
 def status_card(lines: list[str], size=(640, 360)) -> np.ndarray:
     """Gambar pengganti saat belum ada frame: teks status di atas panel gelap bergaya HUD."""
@@ -412,6 +495,13 @@ def status_card(lines: list[str], size=(640, 360)) -> np.ndarray:
         cv2.putText(img, line, (max(10, (w - tw) // 2), y + i * 26), render.FONT, scale,
                     render.CYAN if i == 0 else render.DIM, 1, cv2.LINE_AA)
     return img
+
+
+def _cell(value):
+    """Nama kamera berasal dari pengguna. Sel yang diawali = + - @ dibaca Excel sebagai rumus, jadi diberi tanda petik."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 def _ascii(text: str, limit: int = 24) -> str:
@@ -433,6 +523,7 @@ class Camera:
         self.spec = spec
         self.dir = root / spec.id
         self.events = EventStore(self.dir)
+        self._durations = DurationTracker(self.events)
         self._resolver = resolver
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
@@ -666,6 +757,7 @@ class Camera:
             return "putus"
         finally:
             cap.release()
+            self._durations.finish_all()                 # sesi berakhir (jeda, putus, hapus): tutup yang masih terbuka
 
     def _loop(self, cap: cv2.VideoCapture, src: Source, spec: CameraSpec, cfg: Config) -> str:
         rec = src.is_recording
@@ -771,6 +863,7 @@ class Camera:
         with self._lock:
             self.learn, self.relearns = rep.learn, monitor.relearns
         if rep.state == "belajar":
+            self._durations.finish_all()                 # pelacak direset saat belajar ulang
             have, need = rep.learn
             self._set("belajar", f"Belajar latar {have} dari {need}" + (f" ({rep.note})" if rep.note else ""))
             if self._want_image():
@@ -783,7 +876,10 @@ class Camera:
                              "state": v["state"], "dwell": round(v["dwell"], 1)} for v in rep.tracks] if rep.processed else []
         for ev in rep.events:
             rec = self.events.append(ev.as_dict(), ev.snapshot)
+            self._durations.begin(ev.track_id, ev.kind, rec["no"], ev.t_start, ev.t)
             log.info("kamera %s: %s (kejadian #%d)", self.spec.name, ev.kind, rec["no"])
+        if rep.processed:
+            self._durations.update({v["id"] for v in rep.tracks if v["in_roi"]}, monitor.engine.last["t"])
         if self._want_image():
             if rep.processed:
                 self._publish(monitor.engine.annotated())
@@ -918,10 +1014,21 @@ class CameraManager:
         rows.sort(key=lambda x: (x[0], x[1]["no"]), reverse=True)
         return [r for _, r in rows[offset:offset + limit]]
 
+    def report(self, periode: str, camera_id: str | None = None, now: datetime | None = None) -> dict:
+        """Laporan ringkasan. ValueError bila periode tidak dikenal, KeyError bila kamera tidak ada."""
+        cams = self.list()
+        if camera_id is not None:
+            cams = [c for c in cams if c.spec.id == camera_id]
+            if not cams:
+                raise KeyError(camera_id)
+        entries = [(c.spec.id, c.spec.name, c.events.pairs()) for c in cams]
+        return compute_report(entries, periode, now or _now(), camera_id)
+
     def csv(self) -> str:
         out = io.StringIO()
         w = csv.writer(out)
-        w.writerow(["waktu", "kamera", "jenis", "alasan", "nomor"])
+        w.writerow(["waktu", "kamera", "jenis", "alasan", "nomor", "durasi_detik"])
         for r in reversed(self.feed(limit=100000)):
-            w.writerow([r["ts"], r["camera"]["name"], r["label"], r["reason"], r["no"]])
+            w.writerow([_cell(c) for c in (r["ts"], r["camera"]["name"], r["label"], r["reason"], r["no"],
+                                           r.get("durasi_s", ""))])
         return out.getvalue()

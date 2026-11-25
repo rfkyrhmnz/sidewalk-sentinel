@@ -1,6 +1,7 @@
 import { ApiError, getJSON, postJSON, upload } from './api.js';
 import { PRESET, RoiEditor } from './roi.js';
 import { LiveLoop, Pusher, cameraSupported, drawTracks, openCamera, snapshot, mountVideo } from './live.js';
+import { HOUR_TICKS, dayTicks, daySlots, fmtDur, hourSlots, perCameraHTML, periodText, stackedColumns, summaryHTML } from './laporan.js';
 
 const view = document.getElementById('view');
 const S = {
@@ -42,6 +43,8 @@ const ICON = {
   stop: I('<rect x="6" y="6" width="12" height="12" rx="2"/>'),
   sync: I('<path d="M20 12a8 8 0 01-14 5M4 12a8 8 0 0114-5"/><path d="M18 3v4h-4M6 21v-4h4"/>'),
   radar: I('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.5-5.5"/>'),
+  report: I('<path d="M4 20h16"/><path d="M6 20v-7M11 20V5M16 20v-10M21 20v-4" transform="translate(-1.5 0)"/>'),
+  print: I('<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="8" rx="2"/><path d="M7 14h10v6H7z"/>'),
   list: I('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
   film: I('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9.5h18M3 14.5h18M8 5v14M16 5v14"/>'),
   plus: I('<path d="M12 5v14M5 12h14"/>'),
@@ -108,6 +111,7 @@ function showError(host, err, tone = 'bad') {
 // --------------------------------------------------------------------------- router
 const NAV = [
   ['#/', 'Pantau', ICON.radar, /^#\/?$|^#\/(pantau|tambah)/, false],
+  ['#/laporan', 'Laporan', ICON.report, /^#\/laporan/, false],
   ['#/kejadian', 'Kejadian', ICON.list, /^#\/kejadian/, true],
   ['#/analisis', 'Analisis', ICON.film, /^#\/(analisis|area|atur|proses|hasil|live|riwayat)/, false],
   ['#/tahapan', 'Tahapan', ICON.layers, /^#\/tahapan/, false],
@@ -127,6 +131,7 @@ const ROUTES = [
   [/^#\/tambah$/, viewAddCam],
   [/^#\/pantau\/([0-9a-f]{12})$/, viewCam],
   [/^#\/pantau\/([0-9a-f]{12})\/area$/, viewCamArea],
+  [/^#\/laporan$/, viewLaporan],
   [/^#\/kejadian$/, viewFeed],
   [/^#\/analisis$/, viewHome],
   [/^#\/area$/, viewArea],
@@ -806,7 +811,8 @@ function camEventRow(ev, camName, fresh = false) {
     ${src ? `<img src="${esc(src)}" alt="Bukti ${esc(KIND[ev.kind])}" loading="lazy">` : '<span></span>'}
     <span class="stack"><b>${KIND[ev.kind]}</b>
       <span class="dim small">${camName ? `${esc(camName)}, ` : ''}${whenLabel(ev.ts)}</span>
-      <span class="dim small">${esc(ev.reason)}.</span></span></button>`;
+      <span class="dim small">${esc(ev.reason)}.</span>
+      ${typeof ev.durasi_s === 'number' ? `<span class="dim small">Berlangsung ${fmtDur(ev.durasi_s)}.</span>` : ''}</span></button>`;
 }
 
 const $id = (q) => document.getElementById(q);
@@ -1075,7 +1081,8 @@ function viewCam(id) {
     const v = pusher.video;
     const h = Math.round((640 * (v.videoHeight || 360)) / (v.videoWidth || 640));
     if (overlay.width !== 640 || overlay.height !== h) { overlay.width = 640; overlay.height = h; }
-    drawTracks(overlay, (pusher.state && pusher.state.tracks) || [], Number((cam.settings || {}).park_seconds) || 10);
+    const st = pusher.state || {};
+    drawTracks(overlay, st.tracks || [], Number((cam.settings || {}).park_seconds) || 10, st.counts_today || null);
   };
   document.addEventListener('visibilitychange', onVis);
   showFeed();
@@ -1361,6 +1368,115 @@ function viewFeed() {
   });
   current = { dispose() { dead = true; off(); } };
   load(false);
+}
+
+// ---------------------------------------------------------------------------- laporan
+const PERIODS = [['hari_ini', 'Hari ini'], ['7_hari', '7 hari'], ['30_hari', '30 hari']];
+
+function viewLaporan() {
+  let periode = keep.get('ss_rp_periode');
+  if (!PERIODS.some(([k]) => k === periode)) periode = 'hari_ini';
+  let kamera = keep.get('ss_rp_kamera') || '';
+  let dead = false, ticket = 0, sig = '', charts = {}, camSig = '';
+
+  view.innerHTML = `<div class="rp stack-lg" id="rp">
+    <div class="rp-print"><b>Laporan Sidewalk Sentinel</b><div class="small" id="rpMeta"></div></div>
+    <div class="stack rp-noprint"><h1 class="h2">Laporan</h1>
+      <p class="dim">Ringkasan kendaraan yang parkir atau naik ke trotoar.</p></div>
+    <div class="rp-filters rp-noprint">
+      <div class="seg fill" role="group" aria-label="Periode">${PERIODS.map(([k, t]) =>
+        `<button type="button" data-p="${k}" aria-pressed="${k === periode}">${t}</button>`).join('')}</div>
+      <div class="field"><label class="sr-only" for="rpCam">Kamera</label><select class="input" id="rpCam"></select></div>
+    </div>
+    <div id="rpBody" class="stack-lg"></div>
+    <div id="rpErr"></div></div>`;
+  const root = $id('rp'), body = $id('rpBody'), select = $id('rpCam');
+
+  const fillCameras = () => {                          // daftar kamera mengikuti penyimpanan pemantau
+    const next = P.cams.map((c) => `${c.id}:${c.name}`).join('|');
+    if (next === camSig) return;
+    camSig = next;
+    select.textContent = '';
+    for (const [value, label] of [['', 'Semua kamera'], ...P.cams.map((c) => [c.id, c.name])]) {
+      const o = document.createElement('option');
+      o.value = value; o.textContent = label;
+      select.append(o);
+    }
+    if (kamera && !camById(kamera)) { kamera = ''; keep.del('ss_rp_kamera'); }
+    select.value = kamera;
+  };
+
+  const empty = (r) => {
+    if (!P.cams.length) return `<div class="dropzone"><b>Belum ada kamera</b>
+      <span>Laporan dibuat dari kejadian yang dideteksi kamera. Nyalakan kamera HP atau laptop ini sebagai CCTV untuk mulai.</span>
+      <a class="btn primary" href="#/">Buka halaman Pantau</a></div>`;
+    return `<div class="dropzone"><b>Belum ada kejadian pada periode ini</b>
+      <span>${esc(periodText(r))}. Kejadian muncul di sini begitu ada kendaraan yang parkir atau naik ke trotoar.</span>
+      <a class="btn primary" href="#/">Buka halaman Pantau</a></div>`;
+  };
+
+  const render = (r) => {
+    const open = {};                                   // tabel yang sedang terbuka tetap terbuka setelah data diperbarui
+    for (const k of Object.keys(charts)) open[k] = charts[k].isTableOpen();
+    charts = {};
+    const camName = r.kamera === 'semua' ? 'semua kamera' : ((r.per_kamera[0] || {}).nama || '');
+    setText($id('rpMeta'), `${periodText(r)}. Kamera: ${camName}. Dibuat ${new Date().toLocaleString('id-ID')}.`);
+    if (r.total === 0) { body.innerHTML = empty(r); return; }
+    const days = r.per_hari.length > 1;
+    body.innerHTML = `${summaryHTML(r)}
+      <section class="stack" aria-labelledby="rpJamH"><h2 class="h3" id="rpJamH">Kejadian per jam</h2>
+        <div class="panel"><div id="rpJam"></div></div></section>
+      ${days ? `<section class="stack" aria-labelledby="rpHariH"><h2 class="h3" id="rpHariH">Kejadian per hari</h2>
+        <div class="panel"><div id="rpHari"></div></div></section>` : ''}
+      ${perCameraHTML(r)}
+      <section class="stack" aria-labelledby="rpBukti"><div class="head-row"><h2 class="h3" id="rpBukti">Bukti terbaru</h2>
+        <a class="btn quiet rp-noprint" href="#/kejadian">Lihat semua</a></div>
+        <div class="panel"><div class="events" id="rpEv">${r.terbaru.map((e) => camEventRow(e, e.camera.name)).join('')}</div></div></section>
+      <div class="actions row rp-noprint">
+        <a class="btn line" href="/api/events.csv" download>${ICON.dl}<span>Unduh CSV</span></a>
+        <button class="btn primary" id="rpPrint" type="button">${ICON.print}<span>Cetak laporan</span></button></div>`;
+    charts.jam = stackedColumns($id('rpJam'), { slots: hourSlots(r), xTicks: HOUR_TICKS, caption: `Kejadian per jam, ${periodText(r)}` });
+    if (open.jam) charts.jam.setTableOpen(true);
+    if (days) {
+      const slots = daySlots(r);
+      charts.hari = stackedColumns($id('rpHari'), { slots, xTicks: dayTicks(slots), caption: `Kejadian per hari, ${periodText(r)}` });
+      if (open.hari) charts.hari.setTableOpen(true);
+    }
+    wireEvents($id('rpEv'));
+    $id('rpPrint').onclick = () => window.print();
+  };
+
+  const load = async () => {
+    const mine = ++ticket;
+    try {
+      const r = await getJSON(`/api/report?periode=${periode}${kamera ? `&kamera=${kamera}` : ''}`);
+      if (dead || mine !== ticket) return;
+      root.classList.remove('rp-loading');
+      $id('rpErr').textContent = '';
+      const next = JSON.stringify({ ...r, sampai: 0 });
+      if (next !== sig) { sig = next; render(r); }
+    } catch (e) {
+      if (dead || mine !== ticket) return;
+      root.classList.remove('rp-loading');
+      if (e.status === 404 && kamera) { kamera = ''; keep.del('ss_rp_kamera'); select.value = ''; sig = ''; load(); return; }
+      showError($id('rpErr'), e);
+    }
+  };
+  const reload = () => { sig = ''; root.classList.add('rp-loading'); load(); };
+
+  for (const b of view.querySelectorAll('[data-p]')) b.onclick = () => {
+    periode = b.dataset.p;
+    keep.set('ss_rp_periode', periode);
+    for (const o of view.querySelectorAll('[data-p]')) o.setAttribute('aria-pressed', String(o === b));
+    reload();
+  };
+  select.onchange = () => { kamera = select.value; if (kamera) keep.set('ss_rp_kamera', kamera); else keep.del('ss_rp_kamera'); reload(); };
+
+  fillCameras();
+  const off = subscribe(fillCameras);
+  const timer = setInterval(() => { if (!document.hidden) load(); }, 10000);   // kejadian baru dan lama yang baru terukur
+  current = { dispose() { dead = true; clearInterval(timer); off(); } };
+  load();
 }
 
 // ------------------------------------------------------------------------------ mulai

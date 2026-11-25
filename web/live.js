@@ -38,12 +38,32 @@ export function snapshot(video, maxW = 960) {
 const COLORS = { parkir: '#ff5a5f', naik_trotoar: '#e056ff', diam: '#ffb020', bergerak: '#38e1ff', luar: '#8da2c0' };
 const NAMES = { parkir: 'Parkir', naik_trotoar: 'Naik trotoar', diam: 'Diam', bergerak: 'Bergerak', luar: '' };
 
-export function drawTracks(canvas, tracks, parkSeconds) {
+/** Penghitung kecil di kiri atas gambar: hitungan hari ini per jenis kejadian. */
+function drawHud(ctx, k, counts) {
+  const rows = [['parkir', 'Parkir'], ['naik_trotoar', 'Naik trotoar']];
+  const pad = 8 * k, line = 20 * k, x = 40 * k, y = 12 * k;      // di sebelah siku penanda bingkai, tidak menimpanya
+  ctx.font = `700 ${Math.round(14 * k)}px Bahnschrift, "DIN Alternate", "Roboto Condensed", system-ui, sans-serif`;
+  const width = Math.max(...rows.map(([key, name]) => ctx.measureText(`${name}  ${counts[key] || 0}`).width)) + pad * 2 + 16 * k;
+  ctx.fillStyle = 'rgba(10,20,36,.82)';
+  ctx.fillRect(x, y, width, pad * 2 + line * (rows.length + 1) - 4 * k);
+  ctx.fillStyle = '#9db0cf';
+  ctx.fillText('Hari ini', x + pad, y + pad + 12 * k);
+  rows.forEach(([key, name], i) => {
+    const yy = y + pad + line * (i + 1) + 12 * k;
+    ctx.fillStyle = COLORS[key];
+    ctx.fillRect(x + pad, yy - 10 * k, 8 * k, 8 * k);
+    ctx.fillStyle = '#e9f0fb';
+    ctx.fillText(`${name}  ${counts[key] || 0}`, x + pad + 16 * k, yy);
+  });
+}
+
+export function drawTracks(canvas, tracks, parkSeconds, counts = null) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
   const k = W / 640;
   ctx.font = `700 ${Math.round(15 * k)}px Bahnschrift, "DIN Alternate", "Roboto Condensed", system-ui, sans-serif`;
+  if (counts) drawHud(ctx, k, counts);
   for (const t of tracks) {
     const [bx, by, bw, bh] = t.box;
     const x = bx * W, y = by * H, w = bw * W, h = bh * H;
@@ -57,6 +77,7 @@ export function drawTracks(canvas, tracks, parkSeconds) {
     });
     ctx.stroke();
     let label = NAMES[t.state];
+    if (label && t.state === 'parkir' && t.dwell >= 1) label = `${label} ${Math.round(t.dwell)} dtk`;   // lama parkir berjalan
     if (t.state === 'diam') {
       label = `Diam ${Math.round(t.dwell)}/${Math.round(parkSeconds)} dtk`;
       ctx.fillStyle = 'rgba(40,40,40,.9)';
@@ -65,11 +86,14 @@ export function drawTracks(canvas, tracks, parkSeconds) {
       ctx.fillRect(x, y + h + 4 * k, w * Math.min(1, t.dwell / parkSeconds), 4 * k);
     }
     if (label) {
+      if (t.id != null) label = `#${t.id} ${label}`;
       const tw = ctx.measureText(label).width;
+      const lx = Math.max(0, Math.min(x, W - tw - 12 * k));                       // label tetap di dalam gambar
+      const ly = y - 22 * k < 0 ? y + h + 10 * k : y - 22 * k;                    // di bawah kotak bila tak muat di atas
       ctx.fillStyle = 'rgba(10,20,36,.85)';
-      ctx.fillRect(x, y - 22 * k, tw + 12 * k, 20 * k);
+      ctx.fillRect(lx, ly, tw + 12 * k, 20 * k);
       ctx.fillStyle = color;
-      ctx.fillText(label, x + 6 * k, y - 7 * k);
+      ctx.fillText(label, lx + 6 * k, ly + 15 * k);
     }
   }
 }

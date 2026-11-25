@@ -222,7 +222,7 @@ def test_umpan_kejadian_lintas_kamera_dan_csv(srv, demo_selesai):
     assert c.req("GET", "/api/events?kind=sembarang")[0] == 400
     resp, body = c.req("GET", "/api/events.csv", raw=True)
     text = body.decode("utf-8-sig")
-    assert resp.status == 200 and text.splitlines()[0] == "waktu,kamera,jenis,alasan,nomor"
+    assert resp.status == 200 and text.splitlines()[0] == "waktu,kamera,jenis,alasan,nomor,durasi_detik"
     assert "PARKIR DI TROTOAR" in text and "Kamera demo" in text
     assert "attachment" in resp.getheader("Content-Disposition")
 
@@ -650,3 +650,221 @@ def test_frame_perangkat_menolak_masukan_buruk(srv):
     finally:
         c.req("DELETE", f"/api/cams/{cid}")
         c.req("DELETE", f"/api/cams/{demo['id']}")
+
+
+# ============================================================ lama kejadian (durasi_s) untuk laporan
+def _ev(kind="parkir", track_id=1):
+    return {"kind": kind, "label": kind, "reason": "uji", "track_id": track_id}
+
+
+def _lines(folder):
+    return (folder / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+
+def test_patch_disimpan_ditambahkan_ke_berkas_dan_dimuat_ulang(tmp_path):
+    store = EventStore(tmp_path)
+    rec = store.append(_ev(), None)
+    assert store.patch(rec["no"], durasi_s=12.34) is True
+    assert store.latest(1)[0]["durasi_s"] == 12.3
+    assert len(_lines(tmp_path)) == 2, "berkas hanya bertambah: satu baris kejadian, satu baris patch"
+    assert EventStore(tmp_path).latest(1)[0]["durasi_s"] == 12.3
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "12", True, None, 7 * 24 * 3600 + 1])
+def test_patch_menolak_nilai_tak_wajar(tmp_path, value):
+    store = EventStore(tmp_path)
+    rec = store.append(_ev(), None)
+    assert store.patch(rec["no"], durasi_s=value) is False
+    assert "durasi_s" not in store.latest(1)[0] and len(_lines(tmp_path)) == 1
+
+
+def test_patch_mengabaikan_kolom_asing_dan_kejadian_tak_dikenal(tmp_path):
+    store = EventStore(tmp_path)
+    rec = store.append(_ev(), None)
+    assert store.patch(rec["no"], kind="naik_trotoar", reason="palsu") is False
+    assert store.latest(1)[0]["kind"] == "parkir" and store.latest(1)[0]["reason"] == "uji"
+    assert store.patch(999, durasi_s=5) is False
+
+
+def test_baris_patch_rusak_di_berkas_dilewati_yang_sah_tetap_berlaku(tmp_path):
+    store = EventStore(tmp_path)
+    a, b = store.append(_ev(), None), store.append(_ev(track_id=2), None)
+    with open(tmp_path / "events.jsonl", "a", encoding="utf-8") as fh:
+        for bad in ('{"no": 1, "patch": "bukan kamus"}', '{"no": 77, "patch": {"durasi_s": 3}}',
+                    '{"no": 1, "patch": {"durasi_s": -5}}', '{"no": "1", "patch": {"durasi_s": 4}}',
+                    '{"no": 1, "patch": {"kind": "naik_trotoar"}}', '[1, 2]', '{"patch": {"durasi_s": 1}}', "{rusak"):
+            fh.write(bad + "\n")
+        fh.write(json.dumps({"no": b["no"], "patch": {"durasi_s": 8.0}}) + "\n")
+    loaded = {r["no"]: r for r in EventStore(tmp_path).latest(10)}
+    assert "durasi_s" not in loaded[a["no"]] and loaded[a["no"]]["kind"] == "parkir"
+    assert loaded[b["no"]]["durasi_s"] == 8.0
+
+
+def test_patch_tidak_mengubah_objek_yang_sedang_dipegang_pembaca(tmp_path):
+    store = EventStore(tmp_path)
+    rec = store.append(_ev(), None)
+    held = store.latest(1)[0]                          # mis. API sedang menserialisasi objek ini di utas lain
+    store.patch(rec["no"], durasi_s=9)
+    assert "durasi_s" not in held, "mengubah kamus di tempat bisa memicu 'dictionary changed size' di utas pembaca"
+    assert store.latest(1)[0]["durasi_s"] == 9.0
+
+
+def test_patch_setelah_folder_kamera_dihapus_tidak_melempar(tmp_path):
+    import shutil
+    folder = tmp_path / "kamera"
+    store = EventStore(folder)
+    rec = store.append(_ev(), None)
+    shutil.rmtree(folder)
+    assert store.patch(rec["no"], durasi_s=3) is False
+
+
+def test_prune_melebur_patch_ke_berkas_baru(tmp_path):
+    store = EventStore(tmp_path)
+    for i in range(3):
+        rec = store.append(_ev(track_id=i), None)
+        store.patch(rec["no"], durasi_s=10 + i)
+    assert store.prune(cam_mod._now() - timedelta(days=1), max_events=2) == 1
+    assert len(_lines(tmp_path)) == 2, "setelah dipangkas, patch sudah menyatu ke baris kejadian"
+    assert [r["durasi_s"] for r in EventStore(tmp_path).latest(5)] == [12.0, 11.0]
+
+
+class Pelacak:
+    """EventStore palsu: merekam patch yang diminta."""
+
+    def __init__(self):
+        self.patches = []
+
+    def patch(self, no, **fields):
+        self.patches.append((no, fields))
+        return True
+
+
+def test_durasi_dihitung_dari_mulai_hingga_terakhir_terlihat_setelah_jeda():
+    from sidewalk_sentinel.cameras import DurationTracker
+    st = Pelacak()
+    d = DurationTracker(st, grace=3.0)
+    d.begin(1, "parkir", no=5, t_start=10.0, t=20.0)
+    d.update({1}, 25.0)
+    d.update(set(), 26.0)                              # hilang 1 detik: belum dianggap pergi
+    d.update(set(), 27.9)
+    assert st.patches == []
+    d.update(set(), 28.0)                              # tepat 3 detik sejak terakhir terlihat (25): pergi
+    assert st.patches == [(5, {"durasi_s": 15.0})], "durasi = terakhir terlihat (25) - mulai (10), bukan saat dinyatakan pergi"
+    d.update(set(), 99.0)
+    assert len(st.patches) == 1, "tidak ditulis dua kali"
+
+
+def test_kontak_trotoar_yang_sempat_putus_tidak_memotong_durasi():
+    from sidewalk_sentinel.cameras import DurationTracker
+    st = Pelacak()
+    d = DurationTracker(st, grace=3.0)
+    d.begin(1, "parkir", 5, 0.0, 10.0)
+    d.update(set(), 11.0)
+    d.update(set(), 12.5)                              # meleset 2,5 detik...
+    d.update({1}, 13.0)                                # ...lalu terlihat lagi
+    d.update({1}, 20.0)
+    d.update(set(), 24.0)
+    assert st.patches == [(5, {"durasi_s": 20.0})]
+
+
+def test_satu_pelacak_dengan_dua_jenis_kejadian_dicatat_terpisah():
+    from sidewalk_sentinel.cameras import DurationTracker
+    st = Pelacak()
+    d = DurationTracker(st)
+    d.begin(1, "naik_trotoar", no=1, t_start=2.0, t=3.0)
+    d.begin(1, "parkir", no=2, t_start=8.0, t=18.0)    # pengendara naik, lalu berhenti dan parkir
+    d.update({1}, 30.0)
+    d.finish_all()
+    assert sorted(st.patches) == [(1, {"durasi_s": 28.0}), (2, {"durasi_s": 22.0})]
+
+
+def test_pelacak_lain_tidak_memperpanjang_durasi_dan_finish_all_menutup_semua():
+    from sidewalk_sentinel.cameras import DurationTracker
+    st = Pelacak()
+    d = DurationTracker(st)
+    d.begin(1, "parkir", 1, 0.0, 10.0)
+    d.begin(2, "parkir", 2, 5.0, 15.0)
+    d.update({2}, 20.0)
+    d.update({2}, 40.0)                                # 1 sudah pergi sejak 10; 2 masih terlihat
+    d.finish_all()
+    assert sorted(st.patches) == [(1, {"durasi_s": 10.0}), (2, {"durasi_s": 35.0})]
+
+
+def test_kamera_demo_menulis_durasi_tiap_kejadian_saat_sesi_selesai(srv, demo_selesai):
+    import re
+    app, c = srv
+    st, ev = c.req("GET", f"/api/cams/{demo_selesai['id']}/events?limit=10")
+    assert len(ev["events"]) == 3
+    for e in ev["events"]:
+        assert e.get("durasi_s", 0) > 0, f"kejadian #{e['no']} ({e['kind']}) belum punya durasi"
+        konfirmasi = re.search(r"selama ([\d.]+) detik", e["reason"])
+        if konfirmasi:                                 # sudah diam/bergerak sekian detik saat dikonfirmasi
+            assert e["durasi_s"] >= float(konfirmasi.group(1)) - 0.1, e
+    pengendara = next(e for e in ev["events"] if e["kind"] == "naik_trotoar" and "jalan ke trotoar" in e["reason"]
+                      and e["durasi_s"] < 20)
+    assert 2 < pengendara["durasi_s"] < 15, "pengendara hijau melintas trotoar sekitar 7 detik lalu pergi"
+
+
+# ============================================================ API laporan dan kolom CSV
+def test_api_laporan_ringkasan_dari_kamera_demo(srv, demo_selesai):
+    app, c = srv
+    cid = demo_selesai["id"]
+    st, r = c.req("GET", f"/api/report?periode=hari_ini&kamera={cid}")
+    assert st == 200, r
+    assert (r["total"], r["parkir"], r["naik_trotoar"]) == (3, 1, 2) and r["kamera"] == cid
+    assert r["lama"]["semua"]["n"] == 3 and r["lama"]["parkir"]["n"] == 1 and r["lama"]["naik_trotoar"]["n"] == 2
+    assert r["lama"]["semua"]["maks"] >= r["lama"]["semua"]["rata"] >= r["lama"]["semua"]["min"] > 0
+    assert [k["id"] for k in r["per_kamera"]] == [cid] and r["per_kamera"][0]["total"] == 3
+    assert len(r["terbaru"]) == 3 and r["jam_puncak"]["jumlah"] == 3
+    assert sum(r["per_jam"]["parkir"]) == 1 and sum(r["per_jam"]["naik_trotoar"]) == 2
+    resp, jpg = c.req("GET", r["terbaru"][0]["snapshot_url"], raw=True)
+    assert resp.status == 200 and jpg[:2] == b"\xff\xd8", "foto bukti di laporan harus bisa dibuka"
+    st, semua = c.req("GET", "/api/report")                   # tanpa parameter: hari ini, semua kamera
+    assert st == 200 and semua["periode"] == "hari_ini" and semua["kamera"] == "semua" and semua["total"] >= 3
+
+
+def test_api_laporan_parameter_tidak_valid(srv, demo_selesai):
+    app, c = srv
+    assert c.req("GET", "/api/report?periode=tahun_ini")[0] == 400
+    assert c.req("GET", "/api/report?kamera=../etc")[0] == 400
+    assert c.req("GET", "/api/report?kamera=" + "a" * 12)[0] == 404
+    assert c.req("POST", "/api/report", {})[0] in (404, 405)
+
+
+def test_csv_memuat_durasi_dan_sel_berawalan_rumus_dinetralkan(srv, demo_selesai, monkeypatch):
+    app, c = srv
+    resp, body = c.req("GET", "/api/events.csv", raw=True)
+    rows = list(__import__("csv").reader(body.decode("utf-8-sig").splitlines()))
+    assert rows[0][-1] == "durasi_detik"
+    demo = [r for r in rows[1:] if r[1] == "Kamera demo"]
+    assert demo and all(float(r[-1]) > 0 for r in demo), "tiap kejadian demo punya durasi di CSV"
+
+    row = {"ts": "2026-11-26T08:00:00+07:00", "camera": {"id": "x", "name": "=HYPERLINK(\"http://jahat\")"},
+           "label": "+PARKIR", "reason": "@alasan", "no": 1}
+    monkeypatch.setattr(app.cams, "feed", lambda **kw: [row])
+    out = list(__import__("csv").reader(app.cams.csv().splitlines()))[1]
+    assert out[1].startswith("'=HYPERLINK") and out[2] == "'+PARKIR" and out[3] == "'@alasan" and out[5] == ""
+    assert cam_mod._cell("Depan toko") == "Depan toko" and cam_mod._cell(7) == 7
+
+
+def test_append_dengan_waktu_tertentu_tercatat_dan_dimuat_ulang(tmp_path):
+    when = cam_mod._now().replace(hour=7, minute=15, second=0, microsecond=0) - timedelta(days=3)
+    store = EventStore(tmp_path)
+    rec = store.append(_ev(), None, when=when)
+    assert rec["ts"] == when.isoformat(timespec="seconds")
+    assert store.counts_since(when - timedelta(minutes=1))["parkir"] == 1
+    assert store.counts_since(when + timedelta(minutes=1))["parkir"] == 0, "waktu yang diberikan dipakai, bukan jam sekarang"
+    assert EventStore(tmp_path).pairs()[0][0] == when
+
+
+def test_api_laporan_tertutup_tanpa_kunci_pada_mode_lan(tmp_path):
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token="kunci-uji")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert Client(app.port).req("GET", "/api/report")[0] == 403, "laporan memuat nama kamera dan foto bukti: butuh kunci"
+        st, body = Client(app.port, cookie="ss_key=kunci-uji").req("GET", "/api/report")
+        assert st == 200 and body["total"] == 0
+    finally:
+        app.close()
+        server.shutdown()
+        server.server_close()
