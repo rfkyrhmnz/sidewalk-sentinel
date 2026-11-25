@@ -178,6 +178,7 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
   opacity: .8;
 }
 .frame .badge { position: absolute; left: 14px; top: 14px; z-index: 2; }
+.frame .badge.end { left: auto; right: 14px; }      /* kiri atas dipakai teks header dari engine */
 .frame canvas.editor { touch-action: none; cursor: crosshair; }
 .frame .overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
@@ -274,6 +275,52 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
 @keyframes tag-naik { 0%, 46% { opacity: 0; } 50%, 66% { opacity: 1; } 70%, 100% { opacity: 0; } }
 @keyframes tag-parkir { 0%, 68% { opacity: 0; } 72%, 100% { opacity: 1; } }
 @keyframes dwell { 0%, 68% { opacity: 0; transform: scaleX(0); } 72% { opacity: 1; transform: scaleX(0); } 92%, 100% { opacity: 1; transform: scaleX(1); } }
+/* ------------------------------------------------------------------ pantau (mode CCTV) */
+.panel.stack > b, .panel.stack > span { display: block; }
+.seg.fill { display: grid; grid-auto-columns: 1fr; width: 100%; }
+.seg.fill button { white-space: nowrap; padding-left: 8px; padding-right: 8px; }
+.event > .stack { display: grid; gap: 4px; align-content: start; }
+.event > .stack > * + * { margin-top: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+.back { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; margin-left: -6px; padding-right: 10px; color: var(--text-dim); text-decoration: none; font-weight: 600; }
+.back svg { width: 20px; height: 20px; }
+.back:hover { color: var(--text); }
+.head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.head-row .stack { flex: 1 1 280px; }
+.head-row .btn { flex: none; }
+
+.input {
+  width: 100%; min-height: 52px; padding: 0 14px; border-radius: 12px; border: 1.5px solid var(--line);
+  background: var(--asphalt-2); color: var(--text); font-size: 16px;
+}
+.input::placeholder { color: var(--text-faint); }
+.input:focus-visible { outline-offset: 0; border-color: var(--scan); }
+select.input { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%), linear-gradient(135deg, var(--text-dim) 50%, transparent 50%); background-position: calc(100% - 22px) 50%, calc(100% - 16px) 50%; background-size: 6px 6px; background-repeat: no-repeat; padding-right: 40px; }
+
+.cam-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
+.cam-tile { display: grid; align-content: start; background: var(--asphalt-2); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; color: inherit; text-decoration: none; }
+.cam-tile:hover { border-color: var(--text-faint); }
+.cam-tile .frame { border-radius: 0; }
+.cam-tile .frame > img { aspect-ratio: 16 / 9; object-fit: cover; }
+.cam-meta { display: grid; gap: 6px; padding: 12px 14px 14px; }
+.cam-name { font: 700 20px/1.15 var(--din); overflow-wrap: anywhere; }
+.cam-counts { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--text-dim); font-size: 15px; }
+.cam-counts b { font: 700 22px/1 var(--din); font-variant-numeric: tabular-nums; margin-right: 2px; }
+.cam-counts [data-k="parkir"] b { color: var(--flare); }
+.cam-counts [data-k="naik_trotoar"] b { color: var(--rider); }
+
+.chip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.chip[data-st="memantau"] .dot, .chip[data-st="belajar"] .dot, .chip[data-st="menghubungkan"] .dot { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.frame .chip { background: rgba(10, 20, 36, .88); }
+
+.nav a .nav-badge {
+  position: absolute; top: 7px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--flare); color: #fff; font: 700 11px/18px var(--din); font-style: normal; text-align: center;
+}
+@media (min-width: 900px) { .nav a .nav-badge { position: static; margin-left: 2px; } }
+
 @media (prefers-reduced-motion: reduce) {
   .veh { animation: none; transform: translate(206px, 130px); opacity: 1; }
   .tag-naik { animation: none; opacity: 0; }
@@ -281,4 +328,5 @@ input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius
   .bar-dwell { animation: none; opacity: 1; }
   .kerb > i { transition: none; }
   .event.fresh, .toast { animation: none; }
+  .chip .dot { animation: none !important; }
 }

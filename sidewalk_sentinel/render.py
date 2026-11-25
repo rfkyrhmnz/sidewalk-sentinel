@@ -60,7 +60,7 @@ def draw_progress(img, bbox, frac, color):
     cv2.rectangle(img, (x, y0), (x + int(w * frac), y0 + 3), color, -1)
 
 
-def annotate(frame, roi_px, tracks, t, counts, park_seconds):
+def annotate(frame, roi_px, tracks, t, counts, park_seconds, header=None):
     out = frame.copy()
     draw_roi(out, roi_px)
     for tr in tracks:
@@ -75,7 +75,7 @@ def annotate(frame, roi_px, tracks, t, counts, park_seconds):
         else:
             label = f"#{tr['id']}"
         put_text(out, label, (x, y - 6), color, 0.42)
-    put_text(out, f"SIDEWALK SENTINEL  T+{t:06.1f}s  PARKIR:{counts['parkir']}  NAIK:{counts['naik_trotoar']}",
+    put_text(out, header or f"SIDEWALK SENTINEL  T+{t:06.1f}s  PARKIR:{counts['parkir']}  NAIK:{counts['naik_trotoar']}",
              (8, 18), CYAN, 0.45)
     return out
 

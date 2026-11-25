@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from . import video as vid
+from .cameras import MAX_CAMERAS, CameraManager, SourceError, parse_source
 from .config import Config
 from .jobs import (ALLOWED_EXT, JobManager, LiveManager, Store, Uploads, check_roi, new_id,
                    valid_id)
@@ -45,7 +46,7 @@ def lan_ip() -> str:
 
 
 class App:
-    def __init__(self, data_dir: str | Path, token: str | None = None):
+    def __init__(self, data_dir: str | Path, token: str | None = None, retention_days: int = 30):
         self.store = Store(data_dir)
         self.uploads = Uploads(self.store)
         self.jobs = JobManager(self.store, self.uploads)
@@ -54,6 +55,24 @@ class App:
         self.port = 0
         self.host = "127.0.0.1"
         self.lan = False
+        self.cams = CameraManager(self.store.root, self._resolve_source, retention_days)
+        self.cams.start()
+
+    def close(self) -> None:
+        self.cams.shutdown()
+
+    def _resolve_source(self, src):
+        """Ubah sumber kamera menjadi yang dipahami OpenCV (jalur berkas, nomor perangkat, atau URL)."""
+        if src.kind == "demo":
+            return str(self.ensure_demo()["path"])
+        if src.kind == "upload":
+            item = self.uploads.get(src.value)
+            if not item:
+                raise SourceError("video unggahan tidak ditemukan (mungkin sudah dihapus)")
+            return str(item["path"])
+        if src.kind == "device":
+            return int(src.value)
+        return src.value
 
     def ensure_demo(self) -> dict:
         path = self.store.demo / "demo.mp4"
@@ -335,6 +354,25 @@ class Handler(BaseHTTPRequestHandler):
         if n >= 3 and seg[1] == "live":
             return self._live_routes(method, seg)
 
+        if n >= 2 and seg[1] == "cams":
+            return self._cam_routes(method, seg, query)
+
+        if n == 2 and seg[1] == "events" and method == "GET":
+            kind = query.get("kind", [None])[0]
+            if kind not in (None, "parkir", "naik_trotoar"):
+                return self._error(400, "kind harus parkir atau naik_trotoar")
+            try:
+                limit = max(1, min(200, int(query.get("limit", ["40"])[0])))
+                offset = max(0, int(query.get("offset", ["0"])[0]))
+                rows = app.cams.feed(limit, offset, kind)
+            except ValueError:
+                return self._error(400, "parameter limit/offset tidak valid")
+            return self._json({"events": rows})
+
+        if n == 2 and seg[1] == "events.csv" and method in ("GET", "HEAD"):
+            return self._send(200, app.cams.csv().encode("utf-8-sig"), "text/csv; charset=utf-8",
+                              {"Content-Disposition": 'attachment; filename="sidewalk-kejadian.csv"'})
+
         return self._error(404, "endpoint tidak dikenal")
 
     # ------------------------------------------------------------------ unggahan
@@ -455,6 +493,108 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(404, "endpoint tidak dikenal")
 
 
+    # ------------------------------------------------------------------- kamera
+    def _cam_routes(self, method: str, seg: list[str], query: dict) -> None:
+        mgr = self.app.cams
+        n = len(seg)
+
+        if n == 2:
+            if method == "GET":
+                return self._json({"cams": [c.info() for c in mgr.list()], "max": MAX_CAMERAS,
+                                   "now": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+            if method == "POST":
+                try:
+                    cam = mgr.create(self._read_json())
+                except (ValueError, TypeError) as e:
+                    return self._error(400, str(e))
+                return self._json(cam.info(), 201)
+            return self._error(405, "metode tidak diizinkan")
+
+        cam = mgr.get(seg[2]) if valid_id(seg[2]) else None
+        if cam is None:
+            return self._error(404, "kamera tidak ditemukan")
+
+        if n == 3:
+            if method == "GET":
+                return self._json(cam.info())
+            if method == "POST":
+                try:
+                    updated = mgr.update(cam.spec.id, self._read_json())
+                except (ValueError, TypeError) as e:
+                    return self._error(400, str(e))
+                return self._json(updated.info()) if updated else self._error(404, "kamera tidak ditemukan")
+            if method == "DELETE":
+                return self._json({"deleted": mgr.delete(cam.spec.id)})
+            return self._error(405, "metode tidak diizinkan")
+
+        if n == 4 and seg[3] == "recalibrate" and method == "POST":
+            cam.recalibrate()
+            return self._json({"ok": True})
+
+        if n == 4 and seg[3] == "snapshot.jpg" and method in ("GET", "HEAD"):
+            if query.get("raw", ["0"])[0] == "1":
+                jpg = cam.raw_jpeg()
+                if jpg is None:
+                    return self._error(503, "kamera belum mengirim frame")
+                return self._send(200, jpg, "image/jpeg")
+            return self._send(200, cam.jpeg(), "image/jpeg")
+
+        if n == 4 and seg[3] == "stream.mjpg" and method == "GET":
+            return self._stream(cam)
+
+        if n == 4 and seg[3] == "events" and method == "GET":
+            try:
+                limit = max(1, min(200, int(query.get("limit", ["30"])[0])))
+                if "after" in query:
+                    rows = cam.events.after(int(query["after"][0]), limit)
+                else:
+                    before = int(query["before"][0]) if "before" in query else None
+                    rows = cam.events.latest(limit, before, query.get("kind", [None])[0])
+            except ValueError:
+                return self._error(400, "parameter limit/after/before tidak valid")
+            out = [{**r, "snapshot_url": f"/api/cams/{cam.spec.id}/{r['snapshot']}" if r["snapshot"] else None}
+                   for r in rows]
+            return self._json({"events": out, "seq": cam.events.seq})
+
+        if n == 5 and seg[3] == "events" and method in ("GET", "HEAD"):
+            m = re.fullmatch(r"(\d{1,9})\.jpg", seg[4])
+            f = cam.events.snapshot_path(int(m.group(1))) if m else None
+            if f is None:
+                return self._error(404, "bukti tidak ditemukan")
+            return self._send_file(f, "image/jpeg", cache="private, max-age=3600")
+
+        return self._error(404, "endpoint tidak dikenal")
+
+    def _stream(self, cam) -> None:
+        """Siaran MJPEG (multipart/x-mixed-replace): didukung <img> di iOS Safari dan Android Chrome."""
+        mgr = self.app.cams
+        if not mgr.acquire_stream():
+            return self._error(503, "terlalu banyak penonton siaran; tutup salah satu tampilan")
+        try:
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=ssframe")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(b"--ssframe\r\n")
+            ver, sent = -1, 0
+            while not cam.removed:
+                cam.touch()
+                # Bagian pertama baru digambar peramban ketika bagian berikutnya mulai datang. Kamera statis
+                # (selesai/jeda) tak punya frame baru, jadi frame pertama dikirim dua kali berselang singkat;
+                # selanjutnya habis waktu = kirim ulang sebagai penanda hidup.
+                jpg, ver = cam.wait_frame(ver, timeout=0.15 if sent == 1 else 3.0)
+                sent += 1
+                self.wfile.write(b"Content-Type: image/jpeg\r\nContent-Length: "
+                                 + str(len(jpg := jpg or cam.jpeg())).encode() + b"\r\n\r\n" + jpg + b"\r\n--ssframe\r\n")
+                self.wfile.flush()
+                time.sleep(0.12)                                  # batasi sekitar 8 gambar per detik
+        finally:
+            mgr.release_stream()
+
+
 class _HttpError(Exception):
     def __init__(self, status: int, message: str, close: bool = False):
         super().__init__(message)
@@ -468,8 +608,8 @@ class _Server(ThreadingHTTPServer):
 
 
 def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
-                token: str | None = None) -> tuple[_Server, App]:
-    app = App(data_dir, token=token)
+                token: str | None = None, retention_days: int = 30) -> tuple[_Server, App]:
+    app = App(data_dir, token=token, retention_days=retention_days)
     app.lan = lan
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = _Server((host, port), handler)
@@ -477,12 +617,34 @@ def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
     return server, app
 
 
-def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "data", lan: bool = False) -> None:
+def register_cli_cameras(app: App, specs: list[str]) -> None:
+    """`--cam NAMA=SUMBER`: sumber dari operator boleh berupa jalur berkas. Idempoten menurut nama."""
+    known = {c.spec.name for c in app.cams.list()}
+    for text in specs:
+        name, sep, source = text.partition("=")
+        name, source = name.strip(), source.strip()
+        if not sep or not name or not source:
+            print(f"  [lewati] --cam harus berbentuk NAMA=SUMBER: {text!r}", file=sys.stderr)
+            continue
+        if name in known:
+            continue
+        if Path(source).expanduser().is_file():
+            source = f"file:{Path(source).expanduser().resolve()}"
+        try:
+            app.cams.create({"name": name, "source": source, "max_loops": None}, trusted=True)
+            known.add(name)
+        except ValueError as e:
+            print(f"  [lewati] kamera {name!r}: {e}", file=sys.stderr)
+
+
+def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "data", lan: bool = False,
+          cams: list[str] | None = None, retention_days: int = 30) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     token = secrets.token_urlsafe(12) if lan else None
     if lan:
         host = "0.0.0.0"
-    server, app = make_server(host, port, data_dir, lan=lan, token=token)
+    server, app = make_server(host, port, data_dir, lan=lan, token=token, retention_days=retention_days)
+    register_cli_cameras(app, cams or [])
     bar = "=" * 62
     print(f"\n{bar}\n  SIDEWALK SENTINEL v{__version__}\n{bar}")
     print(f"  Laptop : http://localhost:{app.port}/" + (f"?k={token}" if token else ""))
@@ -491,6 +653,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
         print("           (HP dan laptop harus di Wi-Fi yang sama; tautan ini berkunci)")
         print("  Catatan: kamera langsung di HP butuh HTTPS; unggah/rekam video tetap jalan.")
     print(f"  Data   : {app.store.root}")
+    print(f"  Kamera : {len(app.cams.list())} terdaftar; kejadian disimpan {retention_days} hari")
     print(f"  ffmpeg : {'ada' if vid.have_ffmpeg() else 'tidak ada (video beranotasi dinonaktifkan)'}")
     print(f"{bar}\n  Tekan Ctrl+C untuk berhenti.\n")
     try:
@@ -498,4 +661,5 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
     except KeyboardInterrupt:
         print("\nBerhenti.")
     finally:
+        app.close()
         server.server_close()

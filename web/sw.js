@@ -1,5 +1,5 @@
 // Service worker: cangkang aplikasi tersedia offline. API tidak pernah di-cache.
-const CACHE = 'sentinel-v1';
+const CACHE = 'sentinel-v2';
 const SHELL = ['/', '/app.css', '/app.js', '/api.js', '/roi.js', '/live.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

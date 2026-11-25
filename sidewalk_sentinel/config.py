@@ -69,6 +69,11 @@ class Config:
     ride_min_seconds: float = 0.6    # kategori 2: bergerak setelah naik dari jalan
     ride_standalone_seconds: float = 1.5  # bergerak di trotoar tanpa terlihat naik
 
+    # ---- pemantauan terus-menerus (mode CCTV) ---------------------------------------
+    use_scene_guard: bool = True       # tahan kejadian dan belajar ulang saat seluruh frame berubah
+    scene_change_frac: float = 0.5     # frame berbeda di mana-mana DAN zona penuh foreground => bukan kendaraan
+    scene_change_seconds: float = 3.0  # bertahan selama ini => belajar latar ulang (siang/malam, kamera bergeser)
+
     # ------------------------------------------------------------------------------
     def to_dict(self) -> dict:
         return asdict(self)
@@ -111,5 +116,9 @@ class Config:
             raise ValueError("ref_update_rate harus 0..0.5")
         if not 0 < self.min_area_frac < 0.5:
             raise ValueError("min_area_frac harus 0..0.5")
+        if not 0.1 <= self.scene_change_frac <= 0.95:
+            raise ValueError("scene_change_frac harus 0.1..0.95")
+        if not 0.5 <= self.scene_change_seconds <= 120:
+            raise ValueError("scene_change_seconds harus 0.5..120")
         if self.still_speed >= self.move_speed:
             raise ValueError("still_speed harus lebih kecil dari move_speed")
