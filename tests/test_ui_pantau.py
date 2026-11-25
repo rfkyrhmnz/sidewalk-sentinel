@@ -363,3 +363,241 @@ def test_perangkat_jadi_cctv_lewat_https_dengan_kunci(tmp_path, browser):
         srv.shutdown()
         srv.server_close()
     assert not errors, errors
+
+
+# ====================================================================== laporan
+def jpeg() -> bytes:
+    import cv2
+    import numpy as np
+    img = np.full((360, 640, 3), (90, 90, 96), np.uint8)
+    img[230:] = (160, 148, 140)
+    return cv2.imencode(".jpg", img)[1].tobytes()
+
+
+def seed(app, cid, kind, when, durasi=None):
+    """Kejadian dengan waktu tertentu lewat API publik EventStore (tanpa menunggu kamera mendeteksi apa pun)."""
+    store = app.cams.get(cid).events
+    rec = store.append({"kind": kind, "label": kind, "reason": "uji laporan", "track_id": 1}, jpeg(), when=when)
+    if durasi is not None:
+        store.patch(rec["no"], durasi_s=durasi)
+    return rec
+
+
+def midnight():
+    from sidewalk_sentinel import cameras as cm
+    return cm._now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def tile(page, label):
+    """Nilai kartu ringkasan menurut labelnya; spasi tak terputus dinormalkan."""
+    return page.locator(f".rp-tile:has(span:text-is('{label}')) b").inner_text().replace(" ", " ")
+
+
+def add_cam(api, name):
+    st, d = api("POST", "/api/cams", {"source": "browser", "name": name})
+    assert st == 201, d
+    return d["id"]
+
+
+def test_laporan_ringkasan_periode_dan_filter_kamera(server, api, page):
+    from datetime import timedelta
+    app, url = server
+    a, b = add_cam(api, "Depan toko"), add_cam(api, "Pojok jalan")
+    m = midnight()
+    seed(app, a, "parkir", m + timedelta(seconds=5), 10)
+    seed(app, a, "parkir", m + timedelta(seconds=6), 20)
+    seed(app, a, "naik_trotoar", m + timedelta(seconds=7), 6)
+    seed(app, b, "parkir", m + timedelta(seconds=8), 60)
+    seed(app, b, "naik_trotoar", m + timedelta(seconds=9))                       # belum terukur
+    seed(app, a, "parkir", (m - timedelta(days=3)).replace(hour=7, minute=30), 120)
+    seed(app, b, "naik_trotoar", (m - timedelta(days=20)).replace(hour=9))
+
+    page.goto(url + "#/laporan")
+    page.wait_for_selector(".rp-total")
+    assert page.inner_text(".rp-total") == "5"
+    judul, tanggal = page.locator(".rp-total-l").bounding_box(), page.locator(".rp-hero .dim").bounding_box()
+    assert tanggal["y"] >= judul["y"] + judul["height"] - 1, "teks hero tidak boleh bertumpuk"
+    assert [page.inner_text(f".rp-kinds [data-k='{k}'] b") for k in ("parkir", "naik_trotoar")] == ["3", "2"]
+    assert tile(page, "Rata-rata") == "24 dtk" and tile(page, "Terlama") == "1 mnt"
+    assert tile(page, "Tersingkat") == "6 dtk" and tile(page, "Total waktu") == "1 mnt 36 dtk"
+    assert tile(page, "Rata-rata parkir") == "30 dtk" and tile(page, "Rata-rata naik trotoar") == "6 dtk"
+    assert "Lama diukur dari 4 dari 5 kejadian" in page.inner_text(".rp")
+    rows = {r.locator("th").inner_text(): [c.inner_text() for c in r.locator("td").all()] for r in page.locator(".rp-cams tbody tr").all()}
+    assert rows == {"Depan toko": ["2", "1", "3"], "Pojok jalan": ["1", "1", "2"]}
+    assert page.locator("#rpEv .event").count() == 5 and page.locator("#rpEv .event img").first.get_attribute("src")
+    assert page.locator("#rpHari").count() == 0, "satu hari saja: tidak perlu grafik per hari"
+
+    page.click("[data-p='7_hari']")
+    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '6'")
+    assert page.locator("#rpHari .rc-hit").count() == 7
+
+    page.click("[data-p='30_hari']")
+    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '7'")
+    assert page.locator("#rpHari .rc-hit").count() == 30
+
+    page.select_option("#rpCam", b)                                              # hanya kamera kedua: 2 hari ini + 1 dua puluh hari lalu
+    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '3'")
+    assert page.locator(".rp-cams").count() == 0, "satu kamera: tabel per kamera tidak perlu"
+
+    page.reload()                                                                # pilihan periode dan kamera diingat
+    page.wait_for_selector(".rp-total")
+    assert page.get_attribute("[data-p='30_hari']", "aria-pressed") == "true" and page.input_value("#rpCam") == b
+    assert page.inner_text(".rp-total") == "3"
+
+    api("DELETE", f"/api/cams/{b}")                                              # kamera yang diingat sudah dihapus
+    page.reload()
+    page.wait_for_selector(".rp-total")
+    assert page.input_value("#rpCam") == "" and page.locator(".notice").count() == 0
+    assert page.inner_text(".rp-total") == "4", "30 hari tanpa kamera yang dihapus: 3 hari ini + 1 tiga hari lalu"
+
+
+def test_laporan_grafik_per_jam_tooltip_papan_ketik_dan_tabel(server, api, page):
+    from datetime import timedelta
+    app, url = server
+    cid = add_cam(api, "Depan toko")
+    day = midnight() - timedelta(days=3)
+    seed(app, cid, "parkir", day.replace(hour=7, minute=10))
+    seed(app, cid, "naik_trotoar", day.replace(hour=7, minute=40))
+    seed(app, cid, "parkir", day.replace(hour=8, minute=5))
+
+    page.goto(url + "#/laporan")
+    page.click("[data-p='7_hari']")
+    page.wait_for_selector("#rpJam .rc-hit")
+    assert page.locator("#rpJam .rc-hit").count() == 24
+    assert page.locator("#rpJam .rc-peak").text_content() == "2" and "Paling ramai pukul 07.00, 2 kejadian" in page.inner_text(".rp")
+    hit = page.locator("#rpJam .rc-hit")
+    assert hit.nth(7).get_attribute("aria-label") == "Pukul 07.00: 1 parkir, 1 naik trotoar"
+    assert page.locator("#rpJam .rc-tip").is_hidden()
+
+    hit.nth(7).focus()                                                           # papan ketik: sama seperti hover
+    tip = page.locator("#rpJam .rc-tip")
+    tip.wait_for(state="visible")
+    flat = lambda: " ".join(tip.inner_text().split())                            # noqa: E731 - nilai dan nama jenis adalah item flex terpisah
+    assert flat() == "Pukul 07.00 1 parkir 1 naik trotoar"
+    page.keyboard.press("Tab")
+    assert flat() == "Pukul 08.00 1 parkir 0 naik trotoar"
+    page.locator("#rpJam .rc-toggle").focus()
+    assert tip.is_hidden(), "tooltip tertutup saat fokus pergi"
+
+    toggle = page.locator("#rpJam .rc-toggle")
+    assert toggle.get_attribute("aria-expanded") == "false" and page.locator("#rpJam .rc-table").is_hidden()
+    toggle.click()
+    assert toggle.get_attribute("aria-expanded") == "true"
+    rows = [[c.inner_text() for c in r.locator("td").all()] for r in page.locator("#rpJam .rc-table tbody tr").all()]
+    assert rows == [["Pukul 07.00", "1", "1", "2"], ["Pukul 08.00", "1", "0", "1"]], "hanya jam yang ada kejadiannya"
+
+    box = hit.nth(7).bounding_box()                                              # sentuhan di luar grafik menutup tooltip
+    page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + 20)
+    tip.wait_for(state="visible")
+    page.touchscreen.tap(10, 10)
+    tip.wait_for(state="hidden")
+
+
+def test_laporan_keadaan_kosong_memberi_arah(server, api, page):
+    app, url = server
+    page.goto(url + "#/laporan")
+    page.wait_for_selector(".dropzone")
+    assert "Belum ada kamera" in page.inner_text(".dropzone") and page.locator(".dropzone a[href='#/']").count() == 1
+    add_cam(api, "Sepi")
+    page.reload()
+    page.wait_for_selector(".dropzone")
+    assert "Belum ada kejadian pada periode ini" in page.inner_text(".dropzone")
+    assert page.locator("#rpJam").count() == 0 and page.locator(".notice").count() == 0
+
+
+@pytest.mark.parametrize("width", [360, 390])
+def test_menu_bawah_lima_tab_tetap_satu_baris(server, page, width):
+    app, url = server
+    page.set_viewport_size({"width": width, "height": 800})
+    page.goto(url + "#/laporan")
+    page.wait_for_selector("#nav a")
+    boxes = [a.bounding_box() for a in page.locator("#nav a").all()]
+    assert len(boxes) == 5
+    assert len({round(b["y"]) for b in boxes}) == 1, f"tab menu jatuh ke baris lain: {[round(b['y']) for b in boxes]}"
+    assert all(b["x"] >= 0 and b["x"] + b["width"] <= width + 1 for b in boxes)
+    assert page.locator("#nav a[aria-current='page']").inner_text().strip().startswith("Laporan")
+
+
+def test_laporan_dicetak_putih_dengan_tabel_dan_tanpa_menu(server, api, page, tmp_path):
+    from datetime import timedelta
+    app, url = server
+    cid = add_cam(api, "Depan toko")
+    day = midnight() - timedelta(days=2)
+    seed(app, cid, "parkir", day.replace(hour=7, minute=10), 30)
+    seed(app, cid, "naik_trotoar", day.replace(hour=17, minute=40), 5)
+    page.goto(url + "#/laporan")
+    page.click("[data-p='7_hari']")
+    page.wait_for_selector("#rpJam .rc-hit")
+    page.emulate_media(media="print")
+    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(255, 255, 255)"
+    assert page.locator("#nav").is_hidden() and page.locator(".rc-table").first.is_visible(), "tabel angka ikut tercetak"
+    assert page.locator(".rp-print").is_visible() and "Kamera: semua kamera" in page.inner_text(".rp-print")
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--text').trim()") == "#111"
+    out = tmp_path / "laporan.pdf"
+    page.pdf(path=str(out), format="A4", print_background=True)
+    assert out.read_bytes()[:5] == b"%PDF-"
+    pypdf = pytest.importorskip("pypdf")
+    text = "\n".join(p.extract_text() for p in pypdf.PdfReader(str(out)).pages)
+    for needle in ("Laporan Sidewalk Sentinel", "Kejadian per jam", "Pukul 07.00", "Pukul 17.00", "Bukti terbaru"):
+        assert needle in text, needle
+    assert "Tahapan" not in text, "menu navigasi tidak boleh ikut tercetak"
+
+
+def test_hp_jadi_cctv_kendaraan_parkir_lalu_pergi_dan_lamanya_masuk_laporan(server, api, page):
+    page.add_init_script(SCENE)
+    page.goto(server[1])
+    page.click("#useDevice")
+    page.wait_for_function("() => document.getElementById('aMsg') && document.getElementById('aMsg').textContent.includes('perangkat ini')",
+                           timeout=15000)
+    cid = page.url.split("/pantau/")[1].split("/")[0]
+    page.click("#preset")
+    page.click("#save")
+    page.wait_for_selector("#live video")
+    assert api("POST", f"/api/cams/{cid}", {"learn": "cepat", "settings": {"park_seconds": 2}})[0] == 200
+    page.wait_for_selector("#chip .chip[data-st='memantau']", timeout=30000)
+
+    hud = "() => { const c = document.querySelector('#live canvas.overlay'); " \
+          "return !!c && c.getContext('2d').getImageData(60, 24, 1, 1).data[3] > 0; }"
+    page.wait_for_function(hud, timeout=5000)                         # penghitung 'Hari ini' tergambar di kiri atas gambar
+
+    page.evaluate("window.__vehicle = true")                          # kendaraan datang, diam, terkonfirmasi parkir
+    page.wait_for_selector("#evs .event[data-k='parkir']", timeout=30000)
+    assert api.cam(cid)["counts_today"]["parkir"] == 1
+    assert "durasi_s" not in api("GET", f"/api/cams/{cid}/events?limit=5")[1]["events"][0], "masih parkir: lama belum diketahui"
+    page.wait_for_timeout(2000)
+    page.evaluate("window.__vehicle = false")                         # kendaraan pergi
+
+    def lamanya():
+        ev = api("GET", f"/api/cams/{cid}/events?limit=5")[1]["events"][0]
+        return ev.get("durasi_s")
+
+    durasi = api.wait(lamanya, 30, "lama parkir harus tercatat setelah kendaraan pergi")
+    assert 2.0 <= durasi <= 20.0, durasi
+    assert api.cam(cid)["counts_today"]["parkir"] == 1, "pergi tidak menambah kejadian baru"
+
+    page.click("#nav a[href='#/laporan']")                            # laporannya muncul dengan angka yang sama
+    page.wait_for_selector(".rp-total")
+    assert page.inner_text(".rp-total") == "1" and page.inner_text(".rp-kinds [data-k='parkir'] b") == "1"
+    assert tile(page, "Terlama") != "—" and tile(page, "Rata-rata parkir") == tile(page, "Terlama")
+    assert "Berlangsung" in page.inner_text("#rpEv .event") and "Kamera HP" in page.inner_text("#rpEv .event")
+    assert page.is_visible("#camlive"), "kamera tetap menyala saat membuka laporan"
+
+
+def test_laporan_menampilkan_nama_kamera_sebagai_teks_bukan_html(server, api, page):
+    from datetime import timedelta
+    app, url = server
+    jahat = '<img src=x onerror="window.__xss=1">'
+    a, b = add_cam(api, jahat), add_cam(api, "Normal")
+    m = midnight()
+    seed(app, a, "parkir", m + timedelta(seconds=5), 10)
+    seed(app, b, "parkir", m + timedelta(seconds=6), 10)
+    page.goto(url + "#/laporan")
+    page.wait_for_selector(".rp-cams")
+    page.wait_for_timeout(300)
+    assert page.evaluate("window.__xss") is None, "nama kamera dijalankan sebagai HTML"
+    assert page.locator(".rp img[src='x']").count() == 0 and page.locator("#rpCam img").count() == 0
+    assert jahat in page.inner_text(".rp-cams") and jahat in page.inner_text("#rpEv")
+    assert jahat in [o.text_content() for o in page.locator("#rpCam option").all()]
+    page.select_option("#rpCam", a)
+    page.wait_for_function("() => document.querySelector('#rpEv')")
+    assert page.evaluate("window.__xss") is None and page.locator("#rpEv img[src='x']").count() == 0

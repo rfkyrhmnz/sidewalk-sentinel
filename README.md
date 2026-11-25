@@ -122,7 +122,40 @@ python main.py --cam "Depan=rtsp://user:sandi@192.168.1.20:554/stream1" --cam "M
 Titik akhir utama: `GET/POST /api/cams`, `GET/POST/DELETE /api/cams/<id>`, `POST /api/cams/<id>/recalibrate`,
 `POST /api/cams/<id>/frame` (satu frame JPEG dari kamera perangkat; dijawab status, kotak deteksi, dan hitungan hari ini),
 `GET /api/cams/<id>/snapshot.jpg` (`?raw=1` tanpa anotasi), `GET /api/cams/<id>/stream.mjpg`,
-`GET /api/cams/<id>/events?after=<no>`, `GET /api/events?kind=&limit=&offset=`, dan `GET /api/events.csv`.
+`GET /api/cams/<id>/events?after=<no>`, `GET /api/events?kind=&limit=&offset=`, `GET /api/events.csv`, dan
+`GET /api/report?periode=hari_ini|7_hari|30_hari&kamera=<id>` (laporan ringkasan; `kamera` opsional).
+Sel CSV yang berawalan `=`, `+`, `-`, atau `@` diberi tanda petik di depan agar Excel tidak menjalankannya sebagai rumus
+(nama kamera berasal dari pengguna).
+
+## Laporan
+
+Setelah kamera mendeteksi, halaman **Laporan** merangkum hasilnya. Pilih periode (hari ini, 7 hari, 30 hari) dan satu
+kamera atau semuanya; pilihan itu diingat. Isinya:
+
+- **Total kejadian**, dipecah menjadi parkir di trotoar dan naik trotoar.
+- **Lama di trotoar**: rata-rata, terlama, tersingkat, total waktu, serta rata-rata per jenis kejadian.
+- **Kejadian per jam** dan **per hari** (grafik batang bertumpuk; sentuh, arahkan, atau fokuskan dengan papan ketik
+  untuk membaca angka, atau buka **Lihat sebagai tabel**), jam tersibuk, ringkasan **per kamera**, dan **bukti foto
+  terbaru** yang bisa dibuka.
+- **Unduh CSV** (kolom `durasi_detik` ikut) dan **Cetak laporan**: tampilan cetak berlatar putih dengan warna yang
+  divalidasi untuk kertas, tabel angka ikut tercetak, tanpa menu. Di dialog cetak pilih *Simpan sebagai PDF*.
+
+Halaman memperbarui diri tiap 10 detik selama terbuka.
+
+**Arti "lama di trotoar".** Dihitung sejak kondisi kejadian terpenuhi (mulai diam atau mulai bergerak di trotoar)
+sampai kendaraan terakhir terlihat di area trotoar. Kendaraan dianggap pergi bila tidak terlihat di area itu selama
+3 detik; jeda ini mencegah satu-dua frame yang meleset memotong durasi. Durasi ditulis ke kejadian saat kendaraan
+pergi atau sesi berakhir, sebagai baris tambahan di `events.jsonl` (berkas hanya bertambah, jadi aman dari mati
+listrik). Kejadian yang kendaraannya belum pergi, atau yang tercatat sebelum pengukuran ini ada, belum punya durasi dan
+tidak ikut statistik lama; laporan menyebut berapa kejadian yang terukur ("diukur dari 40 dari 42 kejadian").
+
+**Apa yang sengaja tidak ada.** Laporan tidak membagi kendaraan menjadi mobil, motor, atau truk, dan tidak
+menampilkan kecepatan dalam km/jam. Pipeline klasik ini memisahkan kendaraan dari latar, bayangan, dan pejalan kaki,
+tetapi tidak mengenali jenisnya (ukuran blob bergantung jarak kamera), dan kecepatan nyata butuh kalibrasi jarak per
+kamera. Angka yang tidak terukur tidak dikarang. Ini bisa dibahas sebagai celah penelitian di laporan skripsi.
+
+Di gambar kamera, tiap kotak berlabel `#ID status`: *Diam 4/10 dtk* (menuju batas parkir), *Parkir 12 dtk* (lama
+parkir berjalan), atau *Naik trotoar*. Pojok kiri atas memuat hitungan hari ini per jenis.
 
 ## Alur analisis video
 
@@ -204,6 +237,11 @@ hitung presisi, recall, dan galat waktu.
 - Dengan `--https`, browser memberi peringatan sertifikat sekali (lihat "Membuka dari HP"). Cara ini baru diuji pada
   Chrome di Linux (sertifikat dan alur kamera lewat kamera tiruan), belum pada HP sungguhan.
 - Pemberitahuan kejadian hanya muncul selama halaman terbuka. Web Push (notifikasi saat aplikasi tertutup) belum ada.
+- Lama di trotoar hanya tercatat untuk kejadian yang kendaraannya sudah pergi. Bila server dimatikan saat kendaraan
+  masih di trotoar, durasi kejadian itu tidak pernah tercatat. Pengukuran pada rekaman nyata belum ada; angka
+  yang dilaporkan sejauh ini berasal dari adegan sintetis dan kamera tiruan.
+- Satu kendaraan yang pelacaknya terputus lalu dilacak ulang dengan ID baru bisa tercatat sebagai dua kejadian
+  (dan dua durasi). Ini perilaku pelacak sejak awal, belum diukur frekuensinya pada video nyata.
 - **Seluruh validasi memakai adegan sintetis.** Alamat RTSP belum diuji pada kamera sungguhan; jalur sumber URL
   diuji lewat siaran MJPEG http dari kamera lain. Beban CPU untuk banyak kamera belum diukur pada perangkat lemah.
 
@@ -226,8 +264,10 @@ main.py                     titik masuk (serve, analyze, demo)
 sidewalk_sentinel/          engine (config, preprocess, segmentation, morphology, features,
                             tracker, decision, render, engine), synthetic, video, analysis, jobs, server;
                             monitor (belajar latar otomatis + penjaga perubahan adegan),
-                            cameras (sumber, kamera, penyimpanan kejadian, manajer)
-web/                        PWA: index.html, app.css, app.js, roi.js, live.js, api.js, sw.js, manifest, ikon
+                            cameras (sumber, kamera, penyimpanan kejadian, lama kejadian, manajer),
+                            report (agregasi laporan, fungsi murni), tls (sertifikat untuk --https)
+web/                        PWA: index.html, app.css, app.js, roi.js, live.js, laporan.js (grafik dan ringkasan),
+                            api.js, sw.js, manifest, ikon
 tools/make_icons.py         membuat ikon PNG dari desain SVG
 tests/                      pytest: engine, server, monitor, kamera, antarmuka kamera langsung dan pantau
 ```
@@ -244,11 +284,16 @@ python -m pytest -q
 `tests/test_monitor.py` menguji belajar latar otomatis dan penjaga perubahan adegan. `tests/test_cameras.py` menguji
 validasi sumber (termasuk penolakan sumber berbahaya dan penyamaran sandi), penyimpanan kejadian, siklus kamera
 (demo, unggahan, jeda, hapus, pemulihan setelah restart), siaran MJPEG, dan API.
+`tests/test_laporan.py` menguji agregasi laporan dengan data buatan (batas periode tepat tengah malam, zona waktu, jam
+puncak, durasi yang tidak terukur, keadaan kosong). Lama kejadian (patch berkas, pelacak durasi, kamera demo) diuji di
+`tests/test_cameras.py`.
 `tests/test_tls.py` menguji sertifikat HTTPS (alamat LAN, pemakaian ulang, pembuatan ulang, izin kunci) dan server TLS
 (termasuk koneksi yang diam saat jabat tangan dan cookie `Secure`).
 `tests/test_ui_live.py` dan `tests/test_ui_pantau.py` memakai Playwright dan Chrome untuk mengecek kamera langsung
 dan seluruh alur Pantau, termasuk perangkat jadi CCTV dengan kamera tiruan (kanvas yang menggambar jalan dan kendaraan),
-juga lewat HTTPS; otomatis dilewati bila keduanya tidak ada (`pip install playwright` dan Chrome terpasang).
+juga lewat HTTPS, serta halaman Laporan (ringkasan, filter, grafik dengan tooltip dan papan ketik, tabel, keadaan
+kosong, menu lima tab, hasil cetak PDF) dan alur utuh: kamera perangkat mendeteksi kendaraan parkir, kendaraan pergi,
+lalu lamanya muncul di Laporan; otomatis dilewati bila keduanya tidak ada (`pip install playwright` dan Chrome terpasang).
 Seluruh rangkaian butuh sekitar 5 menit karena kamera demo diputar sungguhan.
 
 ## Privasi
