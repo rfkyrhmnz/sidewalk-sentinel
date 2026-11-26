@@ -24,6 +24,7 @@ export const ICON = {
   play: I('<path d="M8 5l11 7-11 7z"/>'),
   zone: I('<path d="M4 7l8-4 8 4v9l-8 5-8-5z"/>'),
   sync: I('<path d="M20 12a8 8 0 01-14 5M4 12a8 8 0 0114-5"/><path d="M18 3v4h-4M6 21v-4h4"/>'),
+  auto: I('<path d="M5 19L15 9"/><path d="M14 4v3M18 8h3M17 5l2-2M10 6l-1.5-1.5M20 12l1.5 1.5"/>'),
   flip: I('<path d="M4 8h13l-3-3M20 16H7l3 3"/>'),
   dl: I('<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>'),
   print: I('<path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="8" rx="1.5"/><path d="M7 14h10v6H7z"/>'),

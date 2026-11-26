@@ -6,6 +6,7 @@ import { $id, ICON, clock, eventRow, setText, showError, toast } from './core.js
 import { Overlay, PRESET } from './overlay.js';
 
 const EDIT_HINT = 'Seret titik kuning sampai garis menutupi trotoar. Seret titik kecil di tengah sisi untuk menambah sudut, ketuk dua kali sebuah titik untuk menghapusnya.';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const BLOCKED = {
   insecure: {
@@ -36,7 +37,6 @@ export function viewPantau({ view, device: D, info, onEvent }) {
         </div>
         <div class="vf-banner" id="banner" hidden>
           <b id="bTitle"></b><span id="bText"></span>
-          <div class="bar" id="bBar" hidden><i></i></div>
         </div>
         <div class="vf-blocked" id="blocked" hidden></div>
       </div>
@@ -69,6 +69,10 @@ export function viewPantau({ view, device: D, info, onEvent }) {
   let lastSeq = null;
   let recentKey = '';
   let dead = false;
+  let proposing = false;                                   // usulan zona sedang diminta
+  let touched = false;                                     // pengguna sudah menyentuh zona; usulan otomatis tidak menimpanya
+  let note = '';                                           // catatan tambahan di bawah gambar saat menata zona
+  const canPropose = !!(info.detector && info.detector.sidewalk_model);
 
   const parkSeconds = () => Number((D.cam && D.cam.settings && D.cam.settings.park_seconds) || info.defaults.park_seconds);
   const hasZone = () => !!(D.cam && D.cam.roi && D.cam.roi.length >= 3);
@@ -88,6 +92,8 @@ export function viewPantau({ view, device: D, info, onEvent }) {
   // ----------------------------------------------------------------------- penyunting zona
   const enterEdit = () => {
     editing = true;
+    touched = false;
+    note = '';
     overlay.setZone(hasZone() ? D.cam.roi : PRESET);
     overlay.setMode('edit');
     overlay.setScan(false);
@@ -106,8 +112,8 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     if (!roi || roi.length < 3) return;
     btn.disabled = true;
     try {
-      await D.save({ roi, learn: 'normal' });
-      toast('Zona disimpan', 'Mempelajari latar. Biarkan trotoar kosong sebentar.');
+      await D.save({ roi });
+      toast('Zona disimpan', 'Kendaraan yang berhenti atau naik di zona ini akan dicatat.');
       leaveEdit();
     } catch (e) {
       btn.disabled = false;
@@ -115,50 +121,95 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     }
   };
 
+  // Usulan zona dari model segmentasi trotoar. `auto` = dipicu otomatis saat zona belum pernah ditata: tidak menimpa
+  // titik yang sudah disentuh pengguna dan diam bila gagal. Server perlu minimal satu gambar, jadi 409 dicoba lagi.
+  const propose = async ({ auto = false } = {}) => {
+    if (proposing) return;
+    proposing = true;
+    note = 'Mencari trotoar di gambar.';
+    render();
+    try {
+      for (let i = 0; ; i++) {
+        try {
+          const r = await D.proposeZone();
+          if (dead || !editing) return;
+          if (r.roi) {
+            if (auto && touched) return;
+            overlay.setZone(r.roi);
+            note = 'Zona diusulkan dari gambar kamera. Periksa dulu sebelum menyimpan.';
+          } else {
+            note = auto ? '' : r.message;
+          }
+          return;
+        } catch (e) {
+          if (e.status === 409 && i < 5) { await sleep(1000); continue; }
+          throw e;
+        }
+      }
+    } catch (e) {
+      note = '';
+      if (!auto) showError($id('err'), e);
+    } finally {
+      proposing = false;
+      if (!dead) render();
+    }
+  };
+  vf.addEventListener('pointerdown', () => { if (editing) touched = true; });
+
   // ------------------------------------------------------------------------ tombol
   const button = (id, icon, text, cls = 'btn line') => `<button type="button" class="${cls}" id="${id}">${icon}<span>${text}</span></button>`;
 
   const buildTools = () => {
     const enabled = !!(D.cam && D.cam.enabled);
-    const sig = [D.live, editing, enabled, hasZone(), D.cameras > 1].join();
+    const modelErr = !editing && !!(D.state && D.state.status === 'model_galat');
+    const sig = [D.live, editing, enabled, hasZone(), D.cameras > 1, canPropose, proposing, modelErr].join();
     if (sig === toolsSig) return;
     toolsSig = sig;
     const host = $id('tools');
     if (!D.live) { host.innerHTML = ''; return; }
     if (editing) {
       host.innerHTML = button('zSave', ICON.check, hasZone() ? 'Simpan zona' : 'Mulai pantau', 'btn primary')
+        + (canPropose ? button('zAuto', ICON.auto, proposing ? 'Mencari trotoar' : 'Usulkan otomatis') : '')
         + button('zReset', ICON.undo, 'Atur ulang') + (hasZone() ? button('zCancel', ICON.close, 'Batal') : '');
       $id('zSave').onclick = (e) => saveZone(e.currentTarget);
+      if (canPropose) {
+        $id('zAuto').disabled = proposing;
+        $id('zAuto').onclick = () => propose();
+      }
       $id('zReset').onclick = () => overlay.setZone(PRESET);
       if (hasZone()) $id('zCancel').onclick = leaveEdit;
       return;
     }
     host.innerHTML = button('toggle', enabled ? ICON.pause : ICON.play, enabled ? 'Jeda' : 'Lanjut')
       + button('zoneBtn', ICON.zone, 'Atur zona')
-      + button('recal', ICON.sync, 'Pelajari ulang latar')
+      + (modelErr ? button('retryModel', ICON.sync, 'Muat ulang model') : '')
       + (D.cameras > 1 ? button('flip', ICON.flip, 'Balik kamera') : '');
     $id('toggle').onclick = async (e) => {
       e.currentTarget.disabled = true;
       try { await D.save({ enabled: !enabled }); } catch (err) { showError($id('err'), err); }
     };
     $id('zoneBtn').onclick = enterEdit;
-    $id('recal').onclick = async () => {
-      try { await D.recalibrate(); toast('Mempelajari ulang latar', 'Biarkan trotoar kosong sebentar.'); } catch (err) { showError($id('err'), err); }
-    };
+    if (modelErr) {
+      $id('retryModel').onclick = async () => {
+        try { await D.retryModel(); toast('Memuat ulang model'); } catch (err) { showError($id('err'), err); }
+      };
+    }
     if (D.cameras > 1) $id('flip').onclick = () => D.flip();
   };
 
   // ------------------------------------------------------------------ keadaan
   const describe = (code, st) => {
-    const lp = st && st.learn_progress;
+    const dmsg = (st && st.detector && st.detector.message) || '';
     switch (code) {
       case 'asking': return ['Standby', 'Menunggu izin', 'Pilih Izinkan pada pesan browser', 'Menunggu izin kamera', 'Pilih Izinkan pada pesan browser agar pemantauan bisa mulai.'];
       case 'connecting': return ['Standby', 'Menyambung', 'Menghubungi server', 'Menyambung ke server', 'Kamera sudah menyala. Menunggu server menjawab.'];
       case 'offline': return ['Terputus', 'Terputus', D.error, 'Koneksi bermasalah', `${D.error} Pemantauan lanjut sendiri begitu server terjangkau.`];
       case 'edit':
       case 'perlu_area': return ['Atur zona', 'Tandai trotoar', 'Zona belum disimpan', 'Tandai trotoar', EDIT_HINT];
-      case 'belajar': return ['Kalibrasi', 'Mempelajari latar', lp ? `${lp.have} dari ${lp.need}` : '', 'Mempelajari latar',
-        'Jaga agar trotoar kosong dan perangkat tidak bergerak.'];
+      case 'memuat': return ['Standby', 'Memuat model', 'Menyiapkan YOLO', 'Memuat model deteksi',
+        'Saat pertama dijalankan, model kendaraan diunduh sekali dan butuh internet. Pemantauan mulai sendiri begitu model siap.'];
+      case 'model_galat': return ['Galat', 'Model belum siap', 'Deteksi kendaraan belum bisa jalan', 'Model deteksi belum siap',
+        dmsg || 'Model YOLO tidak bisa dimuat.'];
       case 'memantau': return ['Live', 'Memantau', 'Mengawasi zona trotoar', '', ''];
       case 'jeda': return ['Jeda', 'Dijeda', 'Tekan Lanjut untuk memantau', 'Pemantauan dijeda', 'Tidak ada kejadian yang dicatat selama dijeda.'];
       default: return ['Standby', 'Menunggu', 'Server menunggu gambar', 'Menunggu gambar', 'Server sedang menunggu gambar dari kamera ini.'];
@@ -192,7 +243,12 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     const st = D.state;
     const cam = D.cam;
 
-    if (D.live && !autoEdited && !hasZone()) { autoEdited = true; enterEdit(); return; }
+    if (D.live && !autoEdited && !hasZone()) {
+      autoEdited = true;
+      enterEdit();
+      if (canPropose) propose({ auto: true });
+      return;
+    }
 
     let code = 'idle';
     if (D.phase === 'asking') code = 'asking';
@@ -213,13 +269,9 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     const zoning = code === 'edit' || code === 'perlu_area';   // petunjuk zona tampil di bawah gambar agar trotoar tetap terlihat
     banner.hidden = !bTitle || blocked || zoning;
     $id('hint').hidden = !zoning || blocked;
-    setText($id('hint'), zoning ? bText : '');
+    setText($id('hint'), zoning ? (note ? `${note} ${bText}` : bText) : '');
     setText($id('bTitle'), bTitle);
     setText($id('bText'), bText);
-    const bar = $id('bBar');
-    const lp = st && st.learn_progress;
-    bar.hidden = code !== 'belajar' || !lp || !lp.need;
-    if (!bar.hidden) bar.firstElementChild.style.width = `${Math.round((100 * lp.have) / lp.need)}%`;
 
     const counts = (st && st.counts_today) || (cam && cam.counts_today) || { parkir: 0, naik_trotoar: 0 };
     setText($id('cP'), String(counts.parkir));
@@ -229,7 +281,7 @@ export function viewPantau({ view, device: D, info, onEvent }) {
       const sig = JSON.stringify(cam && cam.roi);
       if (sig !== zoneSig) { zoneSig = sig; overlay.setZone(cam && cam.roi); }
       overlay.setTracks(code === 'memantau' && st ? st.tracks : [], parkSeconds());
-      overlay.setScan(code === 'belajar');
+      overlay.setScan(code === 'memuat');
     }
     buildTools();
     if (st && cam) loadRecent(st.seq);

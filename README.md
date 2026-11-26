@@ -5,17 +5,18 @@ Buka aplikasi di laptop dan kamera laptop menjadi CCTV-nya. Buka di HP dan kamer
 alamat kamera, tidak ada berkas video, dan tidak ada mode contoh: begitu halaman terbuka, kamera menyala dan
 pemantauan dimulai.
 
-Yang dideteksi pada area trotoar:
+Yang dideteksi hanya **kendaraan** (mobil, motor, bus, truk, sepeda) dan **trotoar**. Tangan, orang, dan benda lain
+tidak pernah dihitung, karena model mengenali kendaraan menurut kelasnya, bukan sekadar "ada yang berubah di gambar".
 
 - **Parkir di trotoar**: kendaraan diam di atas area trotoar selama batas waktu tertentu (bawaan 10 detik).
 - **Naik trotoar**: kendaraan bergerak yang masuk ke area trotoar dari luar (dari jalan).
 
-Setiap kejadian disimpan dengan foto bukti beranotasi, waktu, dan lamanya kendaraan berada di trotoar. Semuanya
-diringkas pada halaman **Laporan**.
+Setiap kejadian disimpan dengan foto bukti beranotasi, waktu, jenis kendaraan, dan lamanya berada di trotoar.
+Semuanya diringkas pada halaman **Laporan**.
 
 ## Menjalankan
 
-Butuh Python 3.10 atau lebih baru (diuji pada 3.13). Di Windows (terminal PowerShell di VS Code):
+Butuh Python 3.10 atau lebih baru. Di Windows (terminal PowerShell di VS Code):
 
 ```powershell
 python -m venv .venv
@@ -24,7 +25,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Browser terbuka di `http://localhost:8000/`. Izinkan kamera, tandai area trotoar pada gambar, lalu biarkan.
+`pip install` memasang `ultralytics` (YOLO) beserta PyTorch, jadi unduhannya besar. Pada **jalan pertama**, model
+kendaraan `yolo11n.pt` diunduh sekali oleh ultralytics dan butuh internet; sesudahnya tersimpan di komputer. Selama model
+dimuat, layar pantau berstatus **Memuat model**, lalu pemantauan mulai sendiri.
+
+Browser terbuka di `http://localhost:8000/`. Izinkan kamera. Zona trotoar diusulkan otomatis dari gambar kamera
+(lihat di bawah); periksa, seret titik bila belum pas, lalu tekan **Mulai pantau**.
 
 ### Memakai HP sebagai kamera
 
@@ -45,73 +51,92 @@ peringatan satu kali:
 
 Sesudah itu izinkan kamera, tambahkan ke layar utama bila perlu, dan taruh HP di dudukan.
 
+### Model sendiri
+
+```powershell
+python main.py --weights yolo11s.pt                      # model kendaraan yang lebih besar: lebih akurat, lebih lambat
+python main.py --weights runs\detect\train\weights\best.pt   # hasil fine-tune sendiri (harus punya kelas kendaraan COCO)
+python main.py --sidewalk-weights models\trotoar.pt      # model segmentasi trotoar untuk usulan zona
+python main.py --device 0                                # GPU pertama (bawaan: ditentukan ultralytics)
+```
+
 ## Cara memakai
 
-1. **Pantau**: kamera menyala sendiri. Seret titik kuning sampai garis menutupi trotoar, lalu tekan **Mulai pantau**.
-   Di HP, kamera belakang dipakai lebih dulu dan **Ganti kamera** menukar depan dan belakang.
-2. Aplikasi **mempelajari latar sendiri** selama sekitar 12 detik (median dari beberapa cuplikan berjarak waktu), jadi
-   kendaraan yang kebetulan lewat tidak ikut tersimpan sebagai latar. Jaga agar perangkat tidak bergerak.
-3. Status berubah menjadi **Memantau**. Kendaraan yang parkir atau naik trotoar diberi kotak berlabel di gambar,
+1. **Pantau**: kamera menyala sendiri. Model trotoar mengusulkan zona dari gambar; **Usulkan otomatis** meminta
+   usulan ulang, misalnya setelah kamera digeser. Seret titik kuning sampai garis menutupi trotoar, lalu tekan
+   **Mulai pantau**. Bila model trotoar tidak ada atau trotoar tidak terlihat, tandai zona sendiri.
+   Di HP, kamera belakang dipakai lebih dulu dan **Balik kamera** menukar depan dan belakang.
+2. Status langsung **Memantau**. Kendaraan yang parkir atau naik trotoar diberi kotak berlabel di gambar,
    dihitung pada meter, dan masuk ke **Kejadian**. Pemberitahuan muncul di semua halaman, disertai getar di HP.
-4. **Laporan** merangkum hari ini, 7 hari, atau 30 hari: total kejadian per jenis, lama di trotoar (rata-rata,
+3. **Laporan** merangkum hari ini, 7 hari, atau 30 hari: total kejadian per jenis, lama di trotoar (rata-rata,
    terlama, tersingkat, total), grafik per jam dan per hari, bukti foto terbaru, unduhan CSV, dan cetak ke PDF.
-5. **Setelan**: nama perangkat, lama diam sampai dianggap parkir, kepekaan, ukuran minimum kendaraan, dan
-   pengabaian pejalan kaki.
+4. **Setelan**: nama perangkat, lama diam sampai dianggap parkir, kepekaan (ambang keyakinan YOLO), ukuran minimum
+   kendaraan, dan status model.
 
-Bila halaman dimuat ulang atau dibuka lagi, perangkat yang sama melanjutkan sendiri tanpa belajar ulang. Satu
-perangkat hanya bisa mengirim dari satu tab; tab kedua menawarkan untuk mengambil alih.
+Bila halaman dimuat ulang atau dibuka lagi, perangkat yang sama melanjutkan sendiri. Satu perangkat hanya bisa
+mengirim dari satu tab; tab kedua menawarkan untuk mengambil alih.
 
-## Cara kerja deteksi
-
-Seluruhnya pengolahan citra klasik dengan NumPy dan OpenCV, tanpa model pembelajaran mesin. Tiap tahap bisa diuji
-dan disetel sendiri-sendiri.
+## Cara kerja
 
 ```
-kamera perangkat -> browser (JPEG ~5 fps, lebar 640 px) -> server -> mesin deteksi -> kejadian -> laporan
+kamera perangkat -> browser (JPEG ~5 fps, lebar 640 px) -> server -> YOLO -> pelacak -> keputusan -> kejadian -> laporan
+                                                                       zona trotoar ^
 ```
 
-1. **Praproses**: Gaussian untuk meredam derau, koreksi gamma, CLAHE, dan filter homomorfik (log, FFT, penekanan
-   frekuensi rendah, invers FFT) untuk meredam gradien cahaya yang pelan.
-2. **Segmentasi**: selisih terhadap citra latar yang dipelajari, ambang Otsu yang dijepit, dan penyaringan per area
-   pada zona trotoar. Bayangan dibuang lewat ruang warna CIELAB dan HSV (kecerahan turun, warna tetap).
-3. **Morfologi**: opening untuk membuang bintik, closing untuk menyambung kendaraan yang maskernya terbelah, dan
-   pengisian lubang.
-4. **Deskripsi objek**: kontur, luas, keliling, centroid, rasio aspek, extent, solidity, dan momen Hu; pelacak centroid
-   memberi ID dan kecepatan pada tiap kendaraan.
-5. **Keputusan**: bagian bawah kotak objek harus menyentuh zona minimal 50 persen. Diam sejak `park_seconds`
-   menghasilkan **parkir**. Bergerak dan masuk dari luar zona selama minimal 0,6 detik menghasilkan **naik trotoar**
-   (1,5 detik bila muncul langsung di dalam zona). Satu jenis kejadian dicatat sekali per kendaraan.
-
-Latar diperbarui pelan-pelan hanya pada piksel yang bukan objek, supaya kendaraan yang parkir tidak terserap ke
-latar. Bila cahaya berubah drastis atau perangkat bergeser, penjaga adegan mengulang pembelajaran latar hanya jika dua
-syarat terpenuhi bersamaan selama 3 detik: gambar berbeda di mana-mana dan zona trotoar dibanjiri foreground.
+1. **Deteksi kendaraan (YOLO)**: model COCO dijalankan dengan filter kelas `bicycle`, `motorcycle`, `car`, `bus`,
+   `truck`. Kelas lain (orang, ponsel, anjing, kursi, dan seterusnya) tidak diminta dari model dan dibuang lagi saat
+   hasilnya dibaca. Kotak yang luasnya di bawah ukuran minimum dibuang.
+2. **Zona trotoar**: poligon yang disimpan per perangkat. Usulannya berasal dari model segmentasi trotoar
+   (`models/trotoar.pt`, YOLO11n-seg satu kelas `sidewalk`): mask komponen terbesar disederhanakan menjadi paling banyak
+   10 titik. Model ini hanya dipakai saat zona ditandai, bukan di tiap frame, dan hasilnya selalu bisa diubah.
+3. **Pelacak**: kotak dicocokkan antar-frame menurut jarak pusat terdekat. Kotak diperhalus (rata-rata bergerak
+   eksponensial) supaya getar kotak YOLO beberapa piksel tidak terbaca sebagai gerak, dan jejak bertahan sampai 2 detik
+   tanpa deteksi supaya satu frame yang terlewat tidak mengulang hitungan diam.
+4. **Keputusan**: bagian bawah kotak (tempat roda menyentuh tanah) harus berada di zona minimal 50 persen.
+   Diam sejak `park_seconds` menghasilkan **parkir**. Bergerak dan masuk dari luar zona selama minimal 0,6 detik
+   menghasilkan **naik trotoar** (1,5 detik bila muncul langsung di dalam zona). Satu jenis kejadian dicatat sekali
+   per kendaraan.
 
 Semua ambang ada di `sidewalk_sentinel/config.py` sebagai pecahan frame atau detik, sehingga tidak bergantung pada
-resolusi kamera.
+resolusi kamera. Laju inferensi dibatasi `target_fps` (bawaan 8) agar CPU tidak kewalahan.
 
 **Arti "lama di trotoar".** Dihitung sejak syarat kejadian terpenuhi sampai kendaraan terakhir terlihat di zona.
 Kendaraan dianggap pergi bila tidak terlihat selama 3 detik. Lama ditulis sebagai baris tambahan pada
 `events.jsonl` (berkas hanya bertambah, aman dari mati listrik). Kejadian yang kendaraannya belum pergi belum punya
 lama, dan laporan menyebut berapa kejadian yang terukur.
 
+## Lisensi model
+
+`ultralytics` berlisensi **AGPL-3.0**. Untuk tugas kuliah dan penelitian pribadi ini tidak jadi masalah. Bila aplikasi
+ini dibagikan atau dilayankan ke orang lain, AGPL mewajibkan kode sumbernya (termasuk perubahan) tersedia dengan
+lisensi yang sama, atau memakai lisensi Enterprise dari Ultralytics. Bobot hasil latihan dengan ultralytics, termasuk
+`models/trotoar.pt`, ikut berada di bawah ketentuan itu. Ini ringkasan teknis, bukan nasihat hukum.
+
 ## Batasan
 
-- **Validasi baru memakai adegan sintetis dan kamera tiruan.** Belum ada pengukuran pada rekaman trotoar sungguhan,
-  jadi angka presisi dan recall belum ada. Langkah yang menentukan: rekam trotoar nyata, beri label kejadian secara
-  manual, lalu hitung presisi, recall, dan galat waktu.
-- **Tidak ada jenis kendaraan dan kecepatan.** Pipeline klasik memisahkan kendaraan dari latar, bayangan, dan
-  pejalan kaki, tetapi tidak mengenali jenisnya. Kecepatan dalam km/jam butuh kalibrasi jarak untuk tiap kamera.
-- **Kamera harus diam.** Gerak kamera terbaca sebagai gerak kendaraan. Pergeseran besar memicu pembelajaran latar
-  ulang; pakai **Pelajari ulang latar** setelah perangkat disentuh. Memutar HP mengubah rasio gambar, jadi tandai
-  zona lagi lewat **Atur zona**.
+- **YOLO sungguhan belum diuji end-to-end di lingkungan pengembangan.** Lingkungan itu tidak punya PyTorch, jadi
+  seluruh tes memakai detektor tiruan berbentuk sama. Yang teruji: pembacaan keluaran `Results`, penyaring kelas,
+  konversi mask ke poligon, mesin, kamera, server, dan antarmuka. Yang belum: kecepatan, ketepatan kotak, dan perilaku
+  model asli pada trotoar nyata. Jalan pertama di komputer Anda adalah ujian sesungguhnya.
+- **Model trotoar bawaan masih lemah.** `models/trotoar.pt` hasil latihan 3 epoch dari YOLO11n-seg; pada data validasi
+  saat itu mAP50 mask sekitar 0,56 dan recall sekitar 0,49, dan nilainya masih naik di epoch terakhir. Anggap
+  usulan zona sebagai titik awal yang harus diperiksa, terutama bila sudut kamera berbeda dari data latih. Latih lebih
+  lama dan tambah data trotoar dari sudut kamera Anda untuk hasil yang lebih baik.
+- **Belum ada pengukuran pada rekaman trotoar sungguhan.** Angka presisi dan recall belum ada, dan parameter peredam
+  getar (`smooth`, `track_max_missed_s`) belum disetel pada keluaran YOLO asli. Langkah yang menentukan: rekam
+  trotoar nyata, beri label kejadian secara manual, lalu hitung presisi, recall, dan galat waktu.
+- **Model kecil (`yolo11n`) bisa melewatkan kendaraan yang jauh, kecil, atau gelap**, dan kecepatannya di CPU laptop
+  belum diukur. Bila akurasi kurang, coba `--weights yolo11s.pt`; bila terlalu lambat, turunkan `target_fps`
+  atau pakai GPU (`--device 0`).
+- **Sepeda ikut dihitung sebagai kendaraan.** Bila hanya kendaraan bermotor yang dimaksud, hapus `bicycle` dari
+  `VEHICLES` di `sidewalk_sentinel/detector.py`. Pengendara motor terdeteksi sebagai orang dan motor sekaligus; yang
+  dihitung hanya kotak motornya.
+- **Kamera harus diam.** Gerak kamera terbaca sebagai gerak kendaraan. Setelah perangkat digeser atau diputar,
+  gunakan **Usulkan otomatis** atau **Atur zona** lagi, karena zona disimpan relatif terhadap gambar.
 - **Kamera hidup selama halaman terbuka di layar.** Web tidak bisa menjaga kamera menyala saat HP terkunci atau
   aplikasi pindah ke latar. Aplikasi meminta layar tetap menyala, tetapi HP sebaiknya dicolok ke pengisi daya.
-- Kendaraan yang warnanya hampir sama dengan latar pada gambar sangat gelap atau hampir monokrom bisa lolos.
-  Kendaraan gelap di bawah bayangan pekat bisa terbaca sebagai bayangan. Pengendara yang tampak dari depan bisa mirip
-  pejalan kaki dan tersaring.
-- Kendaraan yang diam sepanjang jendela belajar latar menjadi bagian latar. Saat ia pergi, bekasnya bisa terbaca
-  sebagai objek sampai latar dipelajari ulang.
-- Satu kendaraan yang pelacaknya terputus lalu dilacak ulang dengan ID baru bisa tercatat dua kali.
+- Satu kendaraan yang jejaknya terputus lebih dari 2 detik lalu terdeteksi lagi mendapat ID baru dan bisa tercatat
+  dua kali.
 - Jalur HTTPS baru diuji pada Chrome di Linux dengan kamera tiruan, belum pada HP sungguhan. Pemberitahuan hanya
   muncul selama halaman terbuka; notifikasi saat aplikasi tertutup belum ada.
 
@@ -121,10 +146,12 @@ Aplikasi web dan API dilayani pustaka standar Python. Titik akhir utama:
 
 | Titik akhir | Fungsi |
 |---|---|
+| `GET /api/info` | versi, nilai bawaan, dan status model (`state`: belum, memuat, siap, galat) |
+| `POST /api/detector/retry` | memuat ulang model kendaraan setelah galat |
 | `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya |
 | `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini |
+| `POST /api/cams/<id>/propose-zone` | usulan poligon trotoar dari gambar terbaru perangkat |
 | `GET/POST/DELETE /api/cams/<id>` | informasi, setelan, dan penghapusan data perangkat |
-| `POST /api/cams/<id>/recalibrate` | mengulang pembelajaran latar |
 | `GET /api/cams/<id>/events` | kejadian perangkat (`?after=<no>`) |
 | `GET /api/events` | semua kejadian (`kind`, `limit`, `offset`) |
 | `GET /api/events.csv` | unduhan CSV, kolom `durasi_detik` ikut |
@@ -138,6 +165,7 @@ Opsi baris perintah:
 
 ```powershell
 python main.py [--host H] [--port P] [--https] [--lan] [--data DIR] [--no-open] [--retention-days 30]
+               [--weights W] [--sidewalk-weights W] [--device D]
 ```
 
 `--https` otomatis ikut `--lan`. Kejadian yang lebih tua dari `--retention-days` dan yang melebihi 5000 per perangkat
@@ -147,10 +175,11 @@ dihapus bersama fotonya.
 
 ```
 main.py                     titik masuk
-sidewalk_sentinel/          config, preprocess, segmentation, morphology, features, tracker, decision, render, engine
-                            (mesin deteksi); monitor (belajar latar otomatis dan penjaga perubahan adegan);
-                            cameras (kamera perangkat, manajer); store (kejadian, lama kejadian); report (laporan);
-                            server; tls (sertifikat untuk --https); util
+models/trotoar.pt           model segmentasi trotoar (YOLO11n-seg) untuk usulan zona
+sidewalk_sentinel/          detector (YOLO kendaraan, model trotoar, mask ke poligon); engine (kotak -> pelacak ->
+                            keputusan); config, features, tracker, decision, render; cameras (kamera perangkat,
+                            manajer); store (kejadian, lama kejadian); report (laporan); server; tls (sertifikat
+                            untuk --https); util
 web/                        aplikasi web (PWA): index.html, app.css, app.js (kerangka dan navigasi), device.js (kamera),
                             pantau.js (layar pantau), overlay.js (zona dan kotak deteksi), views.js (Kejadian, Laporan,
                             Setelan), laporan.js (grafik dan ringkasan), api.js, core.js, sw.js, manifest, ikon
@@ -165,24 +194,32 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-- `test_engine.py` dan `test_monitor.py`: mesin deteksi pada adegan sintetis (termasuk pejalan kaki, bayangan, dan
-  gradien cahaya), pengaruh tiap tahap, serta belajar latar otomatis dan penjaga perubahan adegan.
-- `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart, validasi frame,
-  penyimpanan kejadian, dan pelacak lama kejadian.
+Tes tidak pernah memuat atau mengunduh model YOLO: `conftest.py` membuat `ultralytics` tidak bisa diimpor selama tes,
+dan detektor diganti tiruan (`tests/support.py`).
+
+- `test_detector.py`: penyaring kelas (tangan, orang, ponsel, dan benda lain dibuang), konversi mask ke poligon, status
+  pemuatan model (memuat, galat, coba lagi), dan usulan zona dari keluaran model trotoar tiruan.
+- `test_engine.py`: mesin dengan detektor berskrip: parkir, naik trotoar, kendaraan di luar zona, getar kotak, deteksi
+  yang terlewat sebentar, kendaraan yang pergi, ukuran minimum, dan pengaturan yang diteruskan ke detektor.
+- `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart (termasuk setelan
+  versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, dan pelacak lama kejadian.
 - `test_server.py` dan `test_tls.py`: API, kunci LAN, keamanan masukan, sertifikat HTTPS, dan cookie `Secure`.
 - `test_laporan.py`: agregasi laporan dengan data buatan (batas tengah malam, zona waktu, jam puncak, lama yang belum
   terukur, keadaan kosong).
 - `test_ui_pantau.py`: antarmuka di Chrome lewat Playwright dengan kamera tiruan (kanvas yang menggambar jalan dan
-  kendaraan): kamera menyala sendiri, alur dari zona sampai parkir terdeteksi dan lamanya masuk Laporan, izin kamera
-  ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak HP dan desktop, serta hasil cetak PDF. Tes ini
-  dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  kendaraan): kamera menyala sendiri, usulan zona otomatis, alur dari zona sampai parkir terdeteksi dan lamanya masuk
+  Laporan, model memuat atau galat, izin kamera ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak
+  HP dan desktop, serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 
-Foto bukti hanya disimpan di folder `data/` pada komputer yang menjalankan server dan tidak dikirim ke layanan lain.
-Foto memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days` sesuai kebutuhan dan jangan arahkan kamera
-ke area yang tidak boleh direkam. Tanpa `--lan`, server hanya menerima koneksi dari komputer itu sendiri. Folder
-`data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
+Gambar kamera dan foto bukti hanya diproses dan disimpan di folder `data/` pada komputer yang menjalankan server;
+aplikasi ini tidak mengirimnya ke layanan lain. Dua hal di luar kendali aplikasi: ultralytics mengunduh bobot model
+pada jalan pertama, dan secara bawaan (`sync=True`) mengirim statistik pemakaian anonim ke Ultralytics (bukan gambar).
+Matikan statistik itu dengan `yolo settings sync=False` di terminal yang memakai lingkungan Python proyek ini.
+Foto bukti memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days` sesuai kebutuhan dan jangan
+arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan`, server hanya menerima koneksi dari komputer itu
+sendiri. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
 
 ## Riwayat repositori
 
@@ -190,3 +227,4 @@ Repositori dibersihkan pada 25 November 2026. Riwayat git tidak dihapus.
 
 - Isi sebelum dibersihkan: `git checkout c4ecf80`
 - Isi sebelum reset 24 November: `git checkout 05542b4`
+- Versi dengan deteksi pengurangan latar (tanpa YOLO): `git checkout 1d6d25c`

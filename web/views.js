@@ -203,9 +203,9 @@ export function viewKejadian({ view, markSeen }) {
 }
 
 // ======================================================================== setelan
-const SENS = { 1: 34, 2: 28, 3: 22, 4: 17, 5: 13 };                  // kepekaan -> diff_floor
+const SENS = { 1: 0.55, 2: 0.42, 3: 0.30, 4: 0.22, 5: 0.15 };         // kepekaan -> conf (ambang keyakinan YOLO; makin rendah makin peka)
 const SENS_LABEL = { 1: 'Sangat rendah', 2: 'Rendah', 3: 'Sedang', 4: 'Tinggi', 5: 'Sangat tinggi' };
-const SIZE = { kecil: 0.0008, sedang: 0.0015, besar: 0.004 };         // ukuran minimum -> min_area_frac
+const SIZE = { kecil: 0.0008, sedang: 0.0015, besar: 0.004 };         // ukuran minimum -> min_box_frac
 const nearest = (map, v, dflt) => {
   const n = Number(v);
   if (!Number.isFinite(n)) return dflt;
@@ -223,16 +223,16 @@ export function viewSetelan({ view, device: D, info }) {
   }
   const s = cam.settings || {};
   const d = info.defaults;
+  const det = info.detector || {};
   const st = {
     park: Number(s.park_seconds ?? d.park_seconds),
-    sens: Number(nearest(SENS, s.diff_floor, 3)),
-    size: nearest(SIZE, s.min_area_frac ?? d.min_area_frac, 'sedang'),
-    ped: s.filter_pedestrians ?? true,
+    sens: Number(nearest(SENS, s.conf ?? d.conf, 3)),
+    size: nearest(SIZE, s.min_box_frac ?? d.min_box_frac, 'sedang'),
   };
   let dead = false;
 
   view.innerHTML = `<div class="stack-lg">
-    <div class="stack"><h1 class="h2">Setelan</h1><p class="dim">Pengaturan untuk perangkat ini. Perubahan deteksi membuat latar dipelajari ulang.</p></div>
+    <div class="stack"><h1 class="h2">Setelan</h1><p class="dim">Pengaturan untuk perangkat ini. Mengubah deteksi mengulang pelacakan kendaraan yang sedang dipantau.</p></div>
 
     <section class="stack" aria-labelledby="sPerangkat"><h2 class="h3" id="sPerangkat">Perangkat ini</h2>
       <div class="panel stack">
@@ -248,15 +248,20 @@ export function viewSetelan({ view, device: D, info }) {
           <span class="faint small">Kendaraan yang diam lebih lama dari ini di zona trotoar dicatat sebagai parkir.</span></div>
         <div class="field"><label for="sSens">Kepekaan <b id="sSensV"></b></label>
           <input type="range" id="sSens" min="1" max="5" step="1" value="${st.sens}">
-          <span class="faint small">Naikkan bila kendaraan gelap atau berwarna mirip trotoar tidak terdeteksi. Turunkan bila terlalu sering salah deteksi.</span></div>
+          <span class="faint small">Naikkan bila kendaraan sering terlewat. Turunkan bila benda lain sering salah dikenali sebagai kendaraan.</span></div>
         <div class="field"><span class="label" id="sSizeL">Ukuran minimum kendaraan</span>
           <div class="seg fill" role="group" aria-labelledby="sSizeL">${['kecil', 'sedang', 'besar'].map((k) =>
             `<button type="button" data-size="${k}" aria-pressed="${k === st.size}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>
-          <span class="faint small">Objek yang lebih kecil dari ini diabaikan. Pilih Besar bila kamera dekat dan sering menangkap benda kecil.</span></div>
-        <label class="switch"><input type="checkbox" id="sPed" ${st.ped ? 'checked' : ''}><span><b>Abaikan pejalan kaki</b>
-          <span class="faint small">Sosok tinggi dan sempit tidak dihitung sebagai kendaraan.</span></span></label>
-        <div class="row"><button class="btn primary" id="sSave" type="button">Simpan dan pelajari ulang</button></div>
+          <span class="faint small">Kendaraan yang tampak lebih kecil dari ini diabaikan. Pilih Besar bila hanya kendaraan yang dekat dengan kamera yang perlu dihitung.</span></div>
+        <div class="row"><button class="btn primary" id="sSave" type="button">Simpan setelan</button></div>
         <div id="sMsg"></div>
+      </div></section>
+
+    <section class="stack" aria-labelledby="sModel"><h2 class="h3" id="sModel">Model deteksi</h2>
+      <div class="panel stack">
+        <p class="small"><b>Kendaraan</b> (mobil, motor, bus, truk, sepeda): YOLO <span class="num">${esc(det.weights || 'yolo11n.pt')}</span>. <span id="sModelState"></span></p>
+        <p class="small"><b>Zona trotoar otomatis</b>: ${det.sidewalk_model ? 'tersedia, model trotoar ditemukan.' : 'tidak tersedia. Letakkan model segmentasi di <span class="num">models/trotoar.pt</span>, atau tandai zona sendiri di layar pantau.'}</p>
+        <p class="faint small">Tangan, orang, dan benda lain tidak pernah dihitung sebagai kendaraan karena bukan kelas kendaraan model.</p>
       </div></section>
 
     <section class="stack" aria-labelledby="sData"><h2 class="h3" id="sData">Data</h2>
@@ -282,8 +287,10 @@ export function viewSetelan({ view, device: D, info }) {
     st.size = b.dataset.size;
     for (const o of view.querySelectorAll('[data-size]')) o.setAttribute('aria-pressed', String(o === b));
   };
-  $id('sPed').onchange = () => { st.ped = $id('sPed').checked; };
   sync();
+  const MODEL_STATE = { siap: 'Siap dipakai.', memuat: 'Sedang dimuat.', galat: 'Belum siap. Lihat layar pantau untuk penyebabnya.', belum: 'Belum dimuat.' };
+  const ms = D.state && D.state.detector;
+  setText($id('sModelState'), ms ? (MODEL_STATE[ms.state] || '') : '');
 
   $id('sNameSave').onclick = async (e) => {
     const btn = e.currentTarget;
@@ -297,8 +304,8 @@ export function viewSetelan({ view, device: D, info }) {
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      await D.save({ settings: { park_seconds: st.park, diff_floor: SENS[st.sens], min_area_frac: SIZE[st.size], filter_pedestrians: st.ped }, learn: 'normal' });
-      toast('Setelan disimpan', 'Mempelajari latar dengan pengaturan baru.');
+      await D.save({ settings: { park_seconds: st.park, conf: SENS[st.sens], min_box_frac: SIZE[st.size] } });
+      toast('Setelan disimpan', 'Berlaku langsung pada pemantauan.');
       $id('sMsg').textContent = '';
     } catch (err) { showError($id('sMsg'), err); }
     btn.disabled = false;
