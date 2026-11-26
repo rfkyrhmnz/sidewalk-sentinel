@@ -1,4 +1,4 @@
-"""Pembersihan mask dengan operasi morfologi (Materi 3).
+"""Pembersihan mask dengan operasi morfologi.
 
 * opening  = erosi lalu dilasi  -> membuang bintik derau kecil
 * closing  = dilasi lalu erosi  -> menyambung pecahan blob satu kendaraan

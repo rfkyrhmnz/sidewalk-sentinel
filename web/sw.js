@@ -1,6 +1,6 @@
-// Service worker: cangkang aplikasi tersedia offline. API tidak pernah di-cache.
-const CACHE = 'sentinel-v3';
-const SHELL = ['/', '/app.css', '/app.js', '/api.js', '/roi.js', '/live.js', '/laporan.js', '/icon.svg', '/manifest.webmanifest'];
+// Service worker: cangkang aplikasi tetap bisa dibuka tanpa jaringan. API tidak pernah di-cache.
+const CACHE = 'sentinel-v4';
+const SHELL = ['/', '/app.css', '/app.js', '/api.js', '/core.js', '/device.js', '/overlay.js', '/pantau.js', '/views.js', '/laporan.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

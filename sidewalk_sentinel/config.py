@@ -19,22 +19,22 @@ class Config:
     ref_frames: int = 8              # jumlah frame yang di-median untuk referensi
     ref_update_rate: float = 0.002   # running average selektif (0 = referensi statis)
 
-    # ---- Materi 1, 2, 6: praproses --------------------------------------------------
-    blur_ksize: int = 5              # M1: penghalusan Gaussian (filter spasial)
-    gamma: float = 1.0               # M1: transformasi pangkat; 1.0 = nonaktif
-    use_homomorphic: bool = True     # M2: filter homomorfik di domain frekuensi
+    # ---- praproses ------------------------------------------------------------------
+    blur_ksize: int = 5              # penghalusan Gaussian (filter spasial)
+    gamma: float = 1.0               # transformasi pangkat; 1.0 = nonaktif
+    use_homomorphic: bool = True     # filter homomorfik di domain frekuensi
     # Nilai gain di bawah dipilih lewat eksperimen ablation pada adegan SINTETIS (lihat README,
     # bagian Hasil Eksperimen); wajib ditinjau ulang pada rekaman lapangan.
     homo_gamma_low: float = 0.5      # gain frekuensi rendah (iluminasi)
     homo_gamma_high: float = 1.3     # gain frekuensi tinggi (reflektansi/tepi)
     homo_cutoff: float = 0.012       # frekuensi potong, siklus/piksel
-    use_clahe: bool = False          # M1: equalisasi histogram adaptif (opsional)
+    use_clahe: bool = False          # equalisasi histogram adaptif (opsional)
 
-    # ---- Materi 4 (+6): segmentasi --------------------------------------------------
+    # ---- segmentasi -----------------------------------------------------------------
     diff_floor: float = 22.0         # batas bawah ambang selisih (menahan derau)
     diff_cap: float = 70.0           # batas atas ambang Otsu
     chroma_weight: float = 1.5       # bobot selisih warna (a,b) terhadap selisih L
-    use_shadow_removal: bool = True  # M6: buang bayangan lewat rasio V + selisih kroma
+    use_shadow_removal: bool = True  # buang bayangan lewat rasio V + selisih kroma
     shadow_v_lo: float = 0.55
     shadow_v_hi: float = 0.93
     shadow_chroma_tol: float = 9.0
@@ -43,12 +43,12 @@ class Config:
     evidence_chroma: float = 8.0     # atau selisih kroma (a,b) minimal
     zone_margin_frac: float = 0.10   # zona perhatian = ROI dilebarkan sebesar ini
 
-    # ---- Materi 3: morfologi --------------------------------------------------------
+    # ---- morfologi ------------------------------------------------------------------
     use_morphology: bool = True
     open_frac: float = 0.006         # elemen struktur opening (pecahan lebar)
     close_frac: float = 0.030        # elemen struktur closing (pecahan lebar)
 
-    # ---- Materi 5: representasi dan deskripsi ---------------------------------------
+    # ---- representasi dan deskripsi objek -------------------------------------------
     min_area_frac: float = 0.0015    # luas minimum objek (pecahan luas frame)
     max_area_frac: float = 0.40      # lebih besar dari ini dianggap perubahan cahaya
     min_solidity: float = 0.35
@@ -65,11 +65,11 @@ class Config:
     still_speed: float = 0.015       # lebar frame per detik; di bawah ini = diam
     move_speed: float = 0.040        # di atas ini = bergerak
     contact_ratio_min: float = 0.5   # porsi jalur kaki kendaraan yang harus di ROI
-    park_seconds: float = 10.0       # kategori 1: diam >= T detik di trotoar
-    ride_min_seconds: float = 0.6    # kategori 2: bergerak setelah naik dari jalan
+    park_seconds: float = 10.0       # parkir: diam >= T detik di trotoar
+    ride_min_seconds: float = 0.6    # naik trotoar: bergerak setelah naik dari jalan
     ride_standalone_seconds: float = 1.5  # bergerak di trotoar tanpa terlihat naik
 
-    # ---- pemantauan terus-menerus (mode CCTV) ---------------------------------------
+    # ---- pemantauan terus-menerus ---------------------------------------------------
     use_scene_guard: bool = True       # tahan kejadian dan belajar ulang saat seluruh frame berubah
     scene_change_frac: float = 0.5     # frame berbeda di mana-mana DAN zona penuh foreground => bukan kendaraan
     scene_change_seconds: float = 3.0  # bertahan selama ini => belajar latar ulang (siang/malam, kamera bergeser)

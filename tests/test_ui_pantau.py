@@ -1,227 +1,34 @@
-"""Uji peramban untuk mode pantau (kamera CCTV). Dilewati bila Playwright atau Chrome tidak tersedia.
+"""Uji peramban untuk antarmuka. Dilewati bila Playwright atau Chrome tidak tersedia.
 
 Yang dijaga:
-- alur utama: keadaan kosong -> kamera demo -> memantau -> kejadian, dengan toast dan lencana kejadian baru;
-- kejadian lama tidak diumumkan ulang saat halaman dibuka;
-- kamera statis (selesai/jeda) menampilkan gambarnya segera (Chrome baru menggambar bagian multipart
-  setelah bagian berikutnya mulai datang);
-- siaran MJPEG dilepas saat pindah halaman (penonton siaran dibatasi);
-- tandai area untuk kamera rekaman, jeda/lanjut, simpan pengaturan, hapus dengan dua ketukan;
-- galat formulir tampil sebagai pesan, bukan diam;
-- perangkat ini menjadi CCTV: kamera dinyalakan, area ditandai dari frame lokal, latar dipelajari sendiri, kendaraan
-  yang parkir terdeteksi live, tetap berjalan saat pindah halaman, dan pulih otomatis setelah muat ulang.
+- aplikasi dibuka -> kamera perangkat ini menyala dan terhubung tanpa tombol mulai, tanpa demo, tanpa pilihan sumber;
+- alur utama: tandai zona -> belajar latar -> kendaraan parkir terdeteksi langsung -> pemberitahuan -> Laporan memuat lamanya;
+- kejadian lama tidak diumumkan ulang saat halaman dibuka, dan muat ulang melanjutkan tanpa belajar ulang;
+- izin kamera ditolak, konteks tidak aman, dan kamera yang dipakai tab lain dijelaskan, bukan diam;
+- nama perangkat tampil sebagai teks, bukan HTML;
+- jalur HTTPS dengan kunci, halaman Laporan (grafik, tooltip, tabel, cetak), dan tidak ada sisa fitur lama di UI.
 """
 from __future__ import annotations
 
-import json
-import shutil
 import ssl
+import sys
 import threading
 import time
-import urllib.error
-import urllib.request
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from sidewalk_sentinel.cameras import MAX_STREAMS  # noqa: E402
+from support import Client, Phone, new_key  # noqa: E402
 from sidewalk_sentinel.server import make_server  # noqa: E402
+from sidewalk_sentinel.store import now as store_now  # noqa: E402
 
 MOBILE = {"viewport": {"width": 390, "height": 844}, "is_mobile": True, "has_touch": True}
+ROOT = Path(__file__).resolve().parent.parent
 
-
-class Api:
-    def __init__(self, base: str, context=None):
-        self.base = base.rstrip("/")
-        self.context = context
-
-    def __call__(self, method: str, path: str, body=None):
-        data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=30, context=self.context) as r:
-                return r.status, json.loads(r.read() or b"null")
-        except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read() or b"null")
-
-    def wait(self, pred, timeout=60.0, msg="kondisi tidak tercapai"):
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            v = pred()
-            if v:
-                return v
-            time.sleep(0.2)
-        raise AssertionError(msg)
-
-    def cam(self, cid):
-        st, d = self("GET", f"/api/cams/{cid}")
-        return d if st == 200 else None
-
-
-@pytest.fixture(scope="module")
-def server(tmp_path_factory):
-    server, app = make_server("127.0.0.1", 0, tmp_path_factory.mktemp("data"))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield app, f"http://127.0.0.1:{app.port}/"
-    app.close()
-    server.shutdown()
-    server.server_close()
-
-
-@pytest.fixture()
-def api(server):
-    a = Api(server[1])
-    yield a
-    st, d = a("GET", "/api/cams")                      # bersihkan: tiap tes mulai dari keadaan kosong
-    for c in (d or {}).get("cams", []):
-        a("DELETE", f"/api/cams/{c['id']}")
-
-
-@pytest.fixture(scope="module")
-def browser():
-    with sync_api.sync_playwright() as p:
-        exe = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
-        try:
-            b = p.chromium.launch(executable_path=exe, args=["--no-sandbox"]) if exe else p.chromium.launch(args=["--no-sandbox"])
-        except Exception as e:                       # noqa: BLE001
-            pytest.skip(f"Chrome/Chromium tidak tersedia: {e}")
-        yield b
-        b.close()
-
-
-@pytest.fixture()
-def page(browser):
-    ctx = browser.new_context(**MOBILE)
-    pg = ctx.new_page()
-    pg.js_errors = []
-    pg.on("pageerror", lambda e: pg.js_errors.append(str(e)))
-    yield pg
-    ctx.close()
-    assert not pg.js_errors, pg.js_errors
-
-
-def stream_painted(page):
-    return page.wait_for_function(
-        "() => { const s = document.getElementById('stream'); return !!s && s.naturalWidth > 0; }", timeout=2000)
-
-
-def test_demo_dari_keadaan_kosong_sampai_kejadian(server, api, page):
-    page.goto(server[1])
-    page.click("#demoCam")                            # keadaan kosong: satu ketukan untuk mencoba
-    page.wait_for_selector("#stream")
-    cid = page.url.split("/pantau/")[1]
-    assert api("POST", f"/api/cams/{cid}", {"speed": 8})[0] == 200   # percepat demo agar tes singkat
-    page.wait_for_selector("#chip .chip[data-st='memantau']", timeout=30000)
-    page.wait_for_selector("#evs .event", timeout=60000)
-    page.wait_for_selector(".toast")                  # kejadian baru diumumkan
-    page.wait_for_selector(".nav-badge")              # dan ditandai di navigasi
-    page.click("a[href='#/kejadian']")
-    page.wait_for_selector("#feed .event")
-    assert page.locator(".nav-badge").count() == 0, "lencana harus hilang setelah kejadian dilihat"
-    page.click("[data-f='parkir']")
-    page.wait_for_function("() => document.querySelectorAll('#feed .event[data-k=\"parkir\"]').length > 0")
-    assert page.locator("#feed .event[data-k='naik_trotoar']").count() == 0, "filter harus menyaring"
-
-
-def test_kamera_selesai_langsung_tampil_dan_kejadian_lama_tidak_diumumkan(server, api, page):
-    st, d = api("POST", "/api/cams", {"source": "demo", "speed": 0, "max_loops": 1, "name": "Gerbang"})
-    cid = d["id"]
-    api.wait(lambda: api.cam(cid)["status"] == "selesai", 90, "demo tidak selesai")
-    page.goto(server[1] + f"#/pantau/{cid}")
-    stream_painted(page)                              # dulu baru tampil setelah ~3 dtk penanda hidup
-    page.wait_for_selector("#evs .event")
-    page.wait_for_timeout(2600)                       # lebih dari satu putaran polling
-    assert page.locator(".toast").count() == 0, "kejadian lama tidak boleh diumumkan lagi"
-    assert page.locator(".nav-badge").count() == 0
-    assert "Putar ulang" in page.inner_text("#recal")
-
-
-def test_siaran_dilepas_saat_pindah_halaman(server, api, page):
-    app, url = server
-    st, d = api("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None})
-    cid = d["id"]
-    api.wait(lambda: api.cam(cid)["status"] == "memantau", 30)
-    page.goto(url + f"#/pantau/{cid}")
-    stream_painted(page)
-    assert app.cams._streams._value == MAX_STREAMS - 1, "satu siaran seharusnya terbuka"
-    page.click(".back")
-    page.wait_for_selector(".cam-tile")
-    api.wait(lambda: app.cams._streams._value == MAX_STREAMS, 8, "siaran tidak dilepas setelah pindah halaman")
-
-
-def test_tandai_area_untuk_rekaman_lalu_memantau(server, api, page):
-    st, up = api("POST", "/api/demo")
-    st, d = api("POST", "/api/cams", {"name": "Rekaman uji", "source": f"upload:{up['upload_id']}", "speed": 8})
-    assert st == 201, d
-    cid = d["id"]
-    page.goto(server[1] + f"#/pantau/{cid}")
-    page.wait_for_selector("#state a[href$='/area']")  # belum ada area: ajakan menandai area
-    assert api.cam(cid)["status"] == "perlu_area"
-    page.click("#state a[href$='/area']")
-    page.wait_for_function("() => document.getElementById('aMsg').textContent.startsWith('Gambar')", timeout=20000)
-    assert page.is_disabled("#save"), "tanpa titik, tombol simpan harus nonaktif"
-    page.click("#preset")
-    page.click("#save")
-    page.wait_for_selector("#stream")                 # kembali ke halaman kamera
-    assert api.cam(cid)["roi"], "area harus tersimpan di server"
-    page.wait_for_selector("#evs .event", timeout=60000)
-    assert api.cam(cid)["seq"] >= 1
-
-
-def test_jeda_atur_dan_hapus_dua_ketukan(server, api, page):
-    st, d = api("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None, "name": "Uji kontrol"})
-    cid = d["id"]
-    page.goto(server[1] + f"#/pantau/{cid}")
-    page.wait_for_selector("#chip .chip[data-st='memantau']", timeout=30000)
-
-    page.click("#toggle")
-    api.wait(lambda: api.cam(cid)["enabled"] is False, 10)
-    page.wait_for_selector("#chip .chip[data-st='jeda']")
-    assert "Lanjutkan" in page.inner_text("#toggle")
-    page.click("#toggle")
-    api.wait(lambda: api.cam(cid)["enabled"] is True, 10)
-
-    page.click("#cfg")
-    page.wait_for_selector("#sSave")
-    page.eval_on_selector("#sPark", "e => { e.value = 20; e.dispatchEvent(new Event('input')); }")
-    page.click("[data-size='besar']")
-    page.fill("#sName", "Nama baru")
-    page.click("#sSave")
-    api.wait(lambda: api.cam(cid)["settings"].get("park_seconds") == 20, 10, "pengaturan tidak tersimpan")
-    c = api.cam(cid)
-    assert c["name"] == "Nama baru" and c["settings"]["min_area_frac"] == 0.004
-    page.wait_for_function("() => document.getElementById('cname').textContent === 'Nama baru'")
-
-    page.click("#cfg")
-    page.click("#sDel")                               # ketukan pertama hanya meminta konfirmasi
-    assert "Ketuk lagi" in page.inner_text("#sDel")
-    assert api.cam(cid) is not None, "ketukan pertama tidak boleh menghapus"
-    page.click("#sDel")
-    api.wait(lambda: api.cam(cid) is None, 10, "kamera tidak terhapus")
-    page.wait_for_selector("#demoCam")                # kembali ke keadaan kosong
-
-
-def test_formulir_tambah_kamera_menjelaskan_galat(server, api, page):
-    page.goto(server[1] + "#/tambah")
-    page.click("#add")                                # alamat kosong
-    assert "alamat kamera" in page.inner_text("#addMsg").lower()
-    page.fill("#url", "ftp://contoh.test/video")      # skema tidak diizinkan: pesan dari server
-    page.click("#add")
-    page.wait_for_selector("#addMsg .notice[role='alert']")
-    assert page.inner_text("#addMsg").strip() != "Gagal"
-    assert (api("GET", "/api/cams")[1]["cams"]) == []
-
-    page.fill("#url", "http://127.0.0.1:9/tidak-ada")   # sah tetapi tak terjangkau: kamera dibuat, lalu dijelaskan
-    page.click("#add")
-    page.wait_for_url("**/area")
-    cid = page.url.split("/pantau/")[1].split("/")[0]
-    api.wait(lambda: api.cam(cid)["status"] in ("terputus", "menghubungkan"), 10)
-    page.wait_for_function("() => /belum tersambung/i.test(document.getElementById('aMsg').textContent)", timeout=15000)
-
-
-# ====================================================================== perangkat ini jadi CCTV
 # Kamera tiruan: kanvas yang menggambar jalan, kerb, dan trotoar. `window.__vehicle = true` memunculkan kendaraan diam
 # di trotoar. Tidak butuh izin kamera sungguhan.
 SCENE = """
@@ -244,87 +51,234 @@ navigator.mediaDevices.getUserMedia = async () => {
 """
 
 
-def test_perangkat_jadi_cctv_dari_ketukan_sampai_parkir_live(server, api, page):
+@pytest.fixture(scope="module")
+def server(tmp_path_factory):
+    server, app = make_server("127.0.0.1", 0, tmp_path_factory.mktemp("data"))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield app, f"http://127.0.0.1:{app.port}/"
+    app.close()
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture()
+def api(server):
+    c = Client(server[0].port)
+    yield c
+    st, d = c.req("GET", "/api/cams")                      # bersihkan: tiap tes mulai dari keadaan kosong
+    for cam in (d or {}).get("cams", []):
+        c.req("DELETE", f"/api/cams/{cam['id']}")
+
+
+@pytest.fixture(scope="module")
+def browser():
+    import shutil
+    with sync_api.sync_playwright() as p:
+        exe = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+        try:
+            b = p.chromium.launch(executable_path=exe, args=["--no-sandbox"]) if exe else p.chromium.launch(args=["--no-sandbox"])
+        except Exception as e:                       # noqa: BLE001
+            pytest.skip(f"Chrome/Chromium tidak tersedia: {e}")
+        yield b
+        b.close()
+
+
+@pytest.fixture()
+def page(browser, server):
+    """Halaman baru. `api` dipasang lebih dulu oleh tes (urutan argumen), sehingga halaman ditutup sebelum `api`
+    membersihkan perangkat; bila terbalik, halaman yang masih hidup mendaftar ulang dan meninggalkan perangkat sisa."""
+    ctx = browser.new_context(**MOBILE)
+    pg = ctx.new_page()
+    pg.base = server[1]
+    pg.js_errors = []
+    pg.on("pageerror", lambda e: pg.js_errors.append(str(e)))
+    yield pg
+    ctx.close()
+    assert not pg.js_errors, pg.js_errors
+
+
+def cams(api):
+    return api.req("GET", "/api/cams")[1]["cams"]
+
+
+def only_cam(api, page, timeout=15):
+    """Perangkat milik halaman ini: pendaftaran bersifat idempoten menurut kunci di localStorage, jadi jawabannya
+    selalu perangkat yang sama dengan yang dipakai halaman (bukan sekadar yang pertama di daftar)."""
+    api.wait(lambda: cams(api), timeout, "perangkat belum terdaftar di server")
+    key = page.evaluate("localStorage.getItem('ss_device')")
+    st, cam = api.req("POST", "/api/device", {"key": key, "name": ""})
+    assert st == 200, (st, cam)                                       # 200 = sudah ada; 201 berarti baru dibuat
+    return cam
+
+
+def start_monitoring(page, api, park_seconds=2):
+    """Dari halaman baru sampai status memantau, tanpa menyentuh server selain lewat UI dan API publik."""
+    page.goto(page.base)
+    page.wait_for_selector("#vf video", timeout=15000)
+    page.wait_for_selector("#vf[data-st='edit']", timeout=15000)       # belum ada zona: langsung masuk mode tandai
+    cam = only_cam(api, page)
+    page.click("text=Mulai pantau")
+    assert api.req("POST", f"/api/cams/{cam['id']}", {"learn": "cepat", "settings": {"park_seconds": park_seconds}})[0] == 200
+    page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
+    return cam
+
+
+# ===================================================================== alur utama
+def test_dibuka_langsung_menyalakan_kamera_tanpa_pilihan_sumber(server, api, page):
     page.add_init_script(SCENE)
     page.goto(server[1])
-    page.click("#useDevice")                          # satu ketukan: kamera menyala dan kamera server dibuat
-    page.wait_for_function("() => document.getElementById('aMsg') && document.getElementById('aMsg').textContent.includes('perangkat ini')",
-                           timeout=15000)             # area ditandai dari frame lokal, tanpa lewat server
-    cid = page.url.split("/pantau/")[1].split("/")[0]
-    assert api.cam(cid)["kind"] == "browser"
-    assert page.is_visible("#camlive"), "penanda 'perangkat ini sedang jadi CCTV' harus tampil"
-    page.click("#preset")
-    page.click("#save")
-    page.wait_for_selector("#live video")             # halaman kamera memakai video lokal, bukan siaran server
-    assert page.locator("#live canvas.overlay").count() == 1 and page.locator("#stream").count() == 0
-    assert api("POST", f"/api/cams/{cid}", {"learn": "cepat", "settings": {"park_seconds": 2}})[0] == 200
-    page.wait_for_selector("#chip .chip[data-st='memantau']", timeout=30000)   # belajar latar sendiri, tanpa frame kosong pilihan
+    page.wait_for_selector("#vf video", timeout=15000)                # kamera menyala sendiri
+    cam = only_cam(api, page)
+    assert cam["name"] and api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["status"] in ("perlu_area", "menunggu"), 10)
+    text = page.inner_text("body").lower()
+    for bad in ("demo", "rtsp", "unggah", "upload", "url", "alamat kamera", "tambah kamera", "tahapan", "materi", "analisis"):
+        assert bad not in text, f"sisa fitur lama di layar: {bad}"
+    assert page.locator("input[type=file], input[type=url]").count() == 0
+    assert page.locator("a[href='#/analisis'], a[href^='#/pantau/']").count() == 0
+    assert page.locator("#nav a").count() == 4
 
-    page.evaluate("window.__vehicle = true")          # kendaraan datang dan diam di trotoar
-    page.wait_for_selector("#evs .event[data-k='parkir']", timeout=30000)
-    assert api.cam(cid)["counts_today"]["parkir"] == 1
 
-    page.click("a[href='#/kejadian']")                # pindah halaman: kamera tetap menyala dan terus mengirim
+def test_alur_penuh_dari_zona_sampai_parkir_dan_laporan(server, api, page):
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    cid = cam["id"]
+
+    page.evaluate("window.__vehicle = true")                          # kendaraan datang dan diam di trotoar
+    page.wait_for_selector("#recent .event[data-k='parkir']", timeout=30000)
+    page.wait_for_selector(".toast")                                  # diumumkan
+    page.wait_for_selector(".nav-badge")                              # dan ditandai di menu
+    assert api.req("GET", f"/api/cams/{cid}")[1]["counts_today"]["parkir"] == 1
+    assert page.inner_text("#cP") == "1"
+    assert page.locator("#vf .overlay").count() == 1
+
+    page.wait_for_timeout(1800)
+    page.evaluate("window.__vehicle = false")                         # kendaraan pergi
+
+    def lamanya():
+        ev = api.req("GET", f"/api/cams/{cid}/events?limit=5")[1]["events"][0]
+        return ev.get("durasi_s")
+
+    durasi = api.wait(lamanya, 30, "lama parkir harus tercatat setelah kendaraan pergi")
+    assert 2.0 <= durasi <= 25.0, durasi
+    assert api.req("GET", f"/api/cams/{cid}")[1]["counts_today"]["parkir"] == 1, "pergi tidak menambah kejadian baru"
+
+    page.click("#nav a[href='#/kejadian']")
     page.wait_for_selector("#feed .event")
-    assert page.is_visible("#camlive")
-    page.wait_for_timeout(1500)
-    info = api.cam(cid)
-    assert info["status"] == "memantau" and info["fps"] > 0
+    assert page.locator(".nav-badge").count() == 0, "lencana hilang setelah kejadian dilihat"
+    page.click("[data-f='naik_trotoar']")
+    page.wait_for_selector("#feedEmpty .empty")
+    page.click("[data-f='parkir']")
+    page.wait_for_selector("#feed .event[data-k='parkir']")
+    assert page.locator("#conn[data-st='memantau']").count() == 1, "kamera tetap menyala saat pindah halaman"
 
-    before = info["learn_progress"]
-    page.reload()                                     # muat ulang: perangkat yang sama melanjutkan sendiri
-    page.wait_for_selector("#camlive:not([hidden])", timeout=15000)
-    api.wait(lambda: api.cam(cid)["status"] == "memantau", 15)
-    after = api.cam(cid)
-    assert after["relearns"] == 0 and after["learn_progress"] == before, "latar tidak boleh dipelajari ulang"
+    page.click("#nav a[href='#/laporan']")
+    page.wait_for_selector(".rp-total")
+    assert page.inner_text(".rp-total") == "1" and page.inner_text(".rp-kinds [data-k='parkir'] b") == "1"
+    assert tile(page, "Terlama") != "—" and tile(page, "Rata-rata parkir") == tile(page, "Terlama")
+    assert "Berlangsung" in page.inner_text("#rpEv .event")
 
 
-def test_izin_kamera_ditolak_tidak_meninggalkan_kamera_kosong(server, api, page):
+def test_muat_ulang_melanjutkan_tanpa_belajar_ulang_dan_tanpa_pengumuman_lama(server, api, page):
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    cid = cam["id"]
+    page.evaluate("window.__vehicle = true")
+    page.wait_for_selector("#recent .event[data-k='parkir']", timeout=30000)
+    before = api.req("GET", f"/api/cams/{cid}")[1]
+
+    page.reload()                                                     # perangkat yang sama melanjutkan sendiri
+    page.wait_for_selector("#vf video", timeout=15000)
+    api.wait(lambda: api.req("GET", f"/api/cams/{cid}")[1]["status"] == "memantau", 15)
+    page.wait_for_timeout(2600)                                       # lebih dari satu putaran
+    after = api.req("GET", f"/api/cams/{cid}")[1]
+    assert len(cams(api)) == 1, "muat ulang tidak boleh membuat perangkat baru"
+    assert after["relearns"] == 0 and after["learn_progress"] == before["learn_progress"], "latar tidak boleh dipelajari ulang"
+    assert page.locator(".toast").count() == 0, "kejadian lama tidak boleh diumumkan lagi"
+    assert page.locator(".nav-badge").count() == 0
+
+
+def test_setelan_menyimpan_dan_menghapus_dengan_dua_ketukan(server, api, page):
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    page.click("#nav a[href='#/setelan']")
+    page.wait_for_selector("#sName")
+    page.fill("#sName", "Gerbang depan")
+    page.click("#sNameSave")
+    api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["name"] == "Gerbang depan", 10)
+    page.fill("#sName", "Gerbang depan")
+    page.evaluate("() => { const r = document.getElementById('sPark'); r.value = 30; r.dispatchEvent(new Event('input')); }")
+    page.click("#sSave")
+    api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["settings"]["park_seconds"] == 30, 10)
+
+    page.click("#sDel")                                               # ketukan pertama hanya meminta konfirmasi
+    assert "Ketuk lagi" in page.inner_text("#sDel")
+    assert api.req("GET", f"/api/cams/{cam['id']}")[0] == 200
+    page.click("#sDel")
+    api.wait(lambda: [c["id"] for c in cams(api)] not in ([cam["id"]], []), 15, "perangkat tidak mulai dari awal")   # data lama hilang, perangkat mendaftar ulang
+    page.wait_for_selector("#vf[data-st='edit']", timeout=20000)      # perangkat mendaftar ulang dan mulai dari awal
+
+
+# ===================================================================== kamera tidak tersedia
+def test_izin_kamera_ditolak_dijelaskan_dengan_tombol_coba_lagi(server, api, page):
     page.add_init_script("navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('ditolak', 'NotAllowedError'); };")
     page.goto(server[1])
-    page.click("#useDevice")
-    page.wait_for_selector("#pmsg .notice[role='alert']")
-    assert "Izin kamera ditolak" in page.inner_text("#pmsg")
-    assert api("GET", "/api/cams")[1]["cams"] == [], "izin ditolak tidak boleh meninggalkan kamera di server"
-    assert not page.is_disabled("#useDevice"), "tombol harus bisa dicoba lagi"
+    page.wait_for_selector(".vf-blocked:not([hidden]) .blocked-card")
+    card = page.inner_text(".blocked-card")
+    assert "Izin kamera ditolak" in card and page.locator("#bAct").inner_text() == "Coba lagi"
+    assert page.locator("#conn[data-st='off']").count() == 1
+    assert cams(api) == [] or all(c["status"] in ("menunggu", "perlu_area") for c in cams(api))
 
 
 def test_tanpa_koneksi_aman_menjelaskan_cara_memperbaiki(server, api, page):
     page.add_init_script("Object.defineProperty(window, 'isSecureContext', { value: false });")
     page.goto(server[1])
-    page.click("#useDevice")
-    page.wait_for_selector("#pmsg .notice")
-    text = page.inner_text("#pmsg")
-    assert "--https" in text and "localhost" in text
-    assert api("GET", "/api/cams")[1]["cams"] == []
+    page.wait_for_selector(".vf-blocked:not([hidden]) .blocked-card")
+    card = page.inner_text(".blocked-card")
+    assert "python main.py --https" in card and "localhost" in card
+    assert cams(api) == [], "tanpa kamera tidak ada yang perlu didaftarkan"
 
 
-def test_pindah_antara_penonton_dan_kamera_perangkat(server, api, page):
-    app, url = server
+def test_kamera_yang_dipakai_tab_lain_dijelaskan_dan_bisa_diambil_alih(browser, server, api):
+    ctx = browser.new_context(**MOBILE)
+    ctx.add_init_script(SCENE)
+    a, b = ctx.new_page(), ctx.new_page()
+    errors = []
+    for p in (a, b):
+        p.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        a.goto(server[1])
+        a.wait_for_selector("#vf video", timeout=15000)
+        b.goto(server[1])                                             # perangkat yang sama, tab kedua
+        b.wait_for_selector(".vf-blocked:not([hidden]) .blocked-card", timeout=15000)
+        assert "tab" in b.inner_text(".blocked-card").lower()
+        assert len(cams(api)) == 1, "tab kedua tidak boleh membuat perangkat lain"
+        b.click("#bAct")                                              # ambil alih
+        b.wait_for_selector("#vf video", timeout=15000)
+    finally:
+        ctx.close()
+    assert not errors, errors
+
+
+def test_nama_perangkat_tampil_sebagai_teks_bukan_html(server, api, page):
+    jahat = '<img src=x onerror="window.__xss=1">'
     page.add_init_script(SCENE)
-    st, d = api("POST", "/api/cams", {"source": "browser", "name": "Kamera lain"})
-    cid = d["id"]
-    page.goto(url + f"#/pantau/{cid}")
-    page.wait_for_selector("#devctl [data-a='here']")  # belum ada perangkat yang mengirim: tawarkan memakai perangkat ini
-    page.wait_for_selector("#stream")
-    assert api.cam(cid)["status"] == "menunggu"
-
-    page.click("[data-a='here']")
-    page.wait_for_selector("#live video")
-    page.wait_for_selector("#devctl [data-a='stop']")
-    assert page.evaluate("localStorage.getItem('ss_push')") == cid
-    api.wait(lambda: api.cam(cid)["status"] == "perlu_area", 10, "frame dari perangkat harus tiba di server")
-    api.wait(lambda: app.cams._streams._value == MAX_STREAMS, 8, "siaran server harus dilepas saat memakai video lokal")
-
-    page.click("[data-a='stop']")
-    page.wait_for_selector("#stream")
-    assert page.evaluate("localStorage.getItem('ss_push')") is None
-    assert not page.is_visible("#camlive")
-    api.wait(lambda: api.cam(cid)["status"] == "menunggu", 10, "tanpa frame, kamera menunggu perangkat")
+    cam = start_monitoring(page, api)
+    api.req("POST", f"/api/cams/{cam['id']}", {"name": jahat})
+    other = Phone(api, name="Normal")
+    other.register()
+    page.click("#nav a[href='#/setelan']")
+    page.wait_for_selector("#sName")
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.__xss") is None, "nama dijalankan sebagai HTML"
+    assert page.locator("img[src='x']").count() == 0
+    page.click("#nav a[href='#/laporan']")
+    page.wait_for_selector(".rp-total, .empty")
+    assert [o.text_content() for o in page.locator("#rpDev option").all()][:1] == ["Semua perangkat"]
+    page.wait_for_timeout(300)
+    assert page.evaluate("window.__xss") is None and page.locator("img[src='x']").count() == 0
 
 
-# ====================================================================== lewat HTTPS (kamera HP butuh konteks aman)
-def test_perangkat_jadi_cctv_lewat_https_dengan_kunci(tmp_path, browser):
+def test_https_dengan_kunci_kamera_perangkat_mengirim_lewat_tls(tmp_path, browser):
     pytest.importorskip("cryptography")
     token = "kunci-uji-https"
     srv, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token=token, https=True, hosts=["127.0.0.1"])
@@ -337,26 +291,22 @@ def test_perangkat_jadi_cctv_lewat_https_dengan_kunci(tmp_path, browser):
     page.add_init_script(SCENE)
     try:
         page.goto(base + f"?k={token}")                               # tautan berkunci: cookie dipasang lewat HTTPS
-        page.wait_for_selector("#useDevice")
+        page.wait_for_selector("#vf video", timeout=20000)
         assert page.evaluate("window.isSecureContext") is True
-        page.click("#useDevice")
-        page.wait_for_selector("#live video, canvas.editor", timeout=15000)
-        cid = page.url.split("/pantau/")[1].split("/")[0]
-
         cookies = {c["name"]: c for c in ctx.cookies()}
         assert cookies["ss_key"]["secure"] is True and cookies["ss_key"]["httpOnly"] is True
 
-        def status():                                                 # permintaan memakai cookie kunci milik browser
-            return ctx.request.get(base + f"api/cams/{cid}").json()["status"]
+        def lst():
+            return ctx.request.get(base + "api/cams").json()["cams"]
 
         deadline = time.time() + 15
-        while status() == "menunggu" and time.time() < deadline:      # frame dari HP tiba lewat TLS dan keep-alive
+        while (not lst() or lst()[0]["status"] == "menunggu") and time.time() < deadline:
             time.sleep(0.3)
-        assert status() == "perlu_area", "frame dari perangkat tidak sampai ke server lewat HTTPS"
+        assert lst() and lst()[0]["status"] == "perlu_area", "frame dari perangkat tidak sampai ke server lewat HTTPS"
 
         anon = ssl.create_default_context()                           # klien tanpa cookie; sertifikat uji tidak dipercaya
         anon.check_hostname, anon.verify_mode = False, ssl.CERT_NONE
-        assert Api(base, anon)("GET", f"/api/cams/{cid}")[0] == 403, "tanpa cookie kunci, API tetap tertutup"
+        assert Client(app.port, https=True).req("GET", "/api/cams")[0] == 403, "tanpa cookie kunci, API tetap tertutup"
     finally:
         ctx.close()
         app.close()
@@ -365,8 +315,26 @@ def test_perangkat_jadi_cctv_lewat_https_dengan_kunci(tmp_path, browser):
     assert not errors, errors
 
 
-# ====================================================================== laporan
-def jpeg() -> bytes:
+# ===================================================================== bersih dari fitur lama
+def test_tidak_ada_penyebutan_materi_kuliah_atau_sumber_lain():
+    """Teknik pengolahan citra hanyalah alat; aplikasi tidak memetakan dirinya ke materi kuliah dan tidak punya sumber
+    lain selain kamera perangkat."""
+    everywhere = ("materi", "tahapan", "citra komputer")
+    surface = ("rtsp", "demo", "unggah", "upload", "analisis")                    # antarmuka, README, dan pintu masuk
+    ui = [*(ROOT / "web").glob("*.js"), *(ROOT / "web").glob("*.html"), *(ROOT / "web").glob("*.css"),
+          ROOT / "web" / "manifest.webmanifest", ROOT / "README.md", ROOT / "main.py"]
+    code = [*(ROOT / "sidewalk_sentinel").glob("*.py"), *(ROOT / "tests").glob("*.py"), ROOT / "tools" / "make_icons.py"]
+    for f in ui + code:
+        text = f.read_text(encoding="utf-8").lower()
+        banned = everywhere + (surface if f in ui else ())
+        for word in banned:
+            if f.name == "test_ui_pantau.py":                                     # file ini menyebut kata-kata itu sebagai daftar larangan
+                continue
+            assert word not in text, f"{f.name} masih memuat '{word}'"
+
+
+# ===================================================================== laporan
+def jpeg_bytes() -> bytes:
     import cv2
     import numpy as np
     img = np.full((360, 640, 3), (90, 90, 96), np.uint8)
@@ -377,15 +345,14 @@ def jpeg() -> bytes:
 def seed(app, cid, kind, when, durasi=None):
     """Kejadian dengan waktu tertentu lewat API publik EventStore (tanpa menunggu kamera mendeteksi apa pun)."""
     store = app.cams.get(cid).events
-    rec = store.append({"kind": kind, "label": kind, "reason": "uji laporan", "track_id": 1}, jpeg(), when=when)
+    rec = store.append({"kind": kind, "label": kind, "reason": "uji laporan", "track_id": 1}, jpeg_bytes(), when=when)
     if durasi is not None:
         store.patch(rec["no"], durasi_s=durasi)
     return rec
 
 
 def midnight():
-    from sidewalk_sentinel import cameras as cm
-    return cm._now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return store_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def tile(page, label):
@@ -393,68 +360,38 @@ def tile(page, label):
     return page.locator(f".rp-tile:has(span:text-is('{label}')) b").inner_text().replace(" ", " ")
 
 
-def add_cam(api, name):
-    st, d = api("POST", "/api/cams", {"source": "browser", "name": name})
-    assert st == 201, d
-    return d["id"]
+def add_device(api, name):
+    ph = Phone(api, name=name)
+    ph.register()
+    return ph.id
 
 
-def test_laporan_ringkasan_periode_dan_filter_kamera(server, api, page):
-    from datetime import timedelta
+def test_laporan_ringkasan_periode_dan_filter_perangkat(server, api, page):
     app, url = server
-    a, b = add_cam(api, "Depan toko"), add_cam(api, "Pojok jalan")
+    a, b = add_device(api, "Depan toko"), add_device(api, "Gerbang")
     m = midnight()
-    seed(app, a, "parkir", m + timedelta(seconds=5), 10)
-    seed(app, a, "parkir", m + timedelta(seconds=6), 20)
-    seed(app, a, "naik_trotoar", m + timedelta(seconds=7), 6)
-    seed(app, b, "parkir", m + timedelta(seconds=8), 60)
-    seed(app, b, "naik_trotoar", m + timedelta(seconds=9))                       # belum terukur
-    seed(app, a, "parkir", (m - timedelta(days=3)).replace(hour=7, minute=30), 120)
-    seed(app, b, "naik_trotoar", (m - timedelta(days=20)).replace(hour=9))
-
+    seed(app, a, "parkir", m + timedelta(seconds=5), 60)
+    seed(app, a, "naik_trotoar", m + timedelta(seconds=6), 20)
+    seed(app, b, "parkir", m + timedelta(seconds=7), 10)
+    seed(app, a, "parkir", m - timedelta(days=3), 30)                  # di luar 'hari ini'
     page.goto(url + "#/laporan")
     page.wait_for_selector(".rp-total")
-    assert page.inner_text(".rp-total") == "5"
-    judul, tanggal = page.locator(".rp-total-l").bounding_box(), page.locator(".rp-hero .dim").bounding_box()
-    assert tanggal["y"] >= judul["y"] + judul["height"] - 1, "teks hero tidak boleh bertumpuk"
-    assert [page.inner_text(f".rp-kinds [data-k='{k}'] b") for k in ("parkir", "naik_trotoar")] == ["3", "2"]
-    assert tile(page, "Rata-rata") == "24 dtk" and tile(page, "Terlama") == "1 mnt"
-    assert tile(page, "Tersingkat") == "6 dtk" and tile(page, "Total waktu") == "1 mnt 36 dtk"
-    assert tile(page, "Rata-rata parkir") == "30 dtk" and tile(page, "Rata-rata naik trotoar") == "6 dtk"
-    assert "Lama diukur dari 4 dari 5 kejadian" in page.inner_text(".rp")
-    rows = {r.locator("th").inner_text(): [c.inner_text() for c in r.locator("td").all()] for r in page.locator(".rp-cams tbody tr").all()}
-    assert rows == {"Depan toko": ["2", "1", "3"], "Pojok jalan": ["1", "1", "2"]}
-    assert page.locator("#rpEv .event").count() == 5 and page.locator("#rpEv .event img").first.get_attribute("src")
-    assert page.locator("#rpHari").count() == 0, "satu hari saja: tidak perlu grafik per hari"
-
-    page.click("[data-p='7_hari']")
-    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '6'")
-    assert page.locator("#rpHari .rc-hit").count() == 7
-
-    page.click("[data-p='30_hari']")
-    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '7'")
-    assert page.locator("#rpHari .rc-hit").count() == 30
-
-    page.select_option("#rpCam", b)                                              # hanya kamera kedua: 2 hari ini + 1 dua puluh hari lalu
-    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '3'")
-    assert page.locator(".rp-cams").count() == 0, "satu kamera: tabel per kamera tidak perlu"
-
-    page.reload()                                                                # pilihan periode dan kamera diingat
-    page.wait_for_selector(".rp-total")
-    assert page.get_attribute("[data-p='30_hari']", "aria-pressed") == "true" and page.input_value("#rpCam") == b
     assert page.inner_text(".rp-total") == "3"
-
-    api("DELETE", f"/api/cams/{b}")                                              # kamera yang diingat sudah dihapus
-    page.reload()
-    page.wait_for_selector(".rp-total")
-    assert page.input_value("#rpCam") == "" and page.locator(".notice").count() == 0
-    assert page.inner_text(".rp-total") == "4", "30 hari tanpa kamera yang dihapus: 3 hari ini + 1 tiga hari lalu"
+    assert page.inner_text(".rp-kinds [data-k='parkir'] b") == "2" and page.inner_text(".rp-kinds [data-k='naik_trotoar'] b") == "1"
+    assert page.locator(".rp-cams tbody tr").count() == 2
+    page.click("[data-p='7_hari']")
+    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '4'")
+    page.select_option("#rpDev", b)
+    page.wait_for_function("() => document.querySelector('.rp-total').textContent === '1'")
+    assert page.locator(".rp-cams").count() == 0, "satu perangkat: tidak ada rincian per perangkat"
+    page.reload()                                                      # pilihan periode dan perangkat diingat
+    page.wait_for_function("() => document.querySelector('.rp-total') && document.querySelector('.rp-total').textContent === '1'")
+    assert page.locator("[data-p='7_hari'][aria-pressed='true']").count() == 1
 
 
 def test_laporan_grafik_per_jam_tooltip_papan_ketik_dan_tabel(server, api, page):
-    from datetime import timedelta
     app, url = server
-    cid = add_cam(api, "Depan toko")
+    cid = add_device(api, "Depan toko")
     day = midnight() - timedelta(days=3)
     seed(app, cid, "parkir", day.replace(hour=7, minute=10))
     seed(app, cid, "naik_trotoar", day.replace(hour=7, minute=40))
@@ -472,7 +409,7 @@ def test_laporan_grafik_per_jam_tooltip_papan_ketik_dan_tabel(server, api, page)
     hit.nth(7).focus()                                                           # papan ketik: sama seperti hover
     tip = page.locator("#rpJam .rc-tip")
     tip.wait_for(state="visible")
-    flat = lambda: " ".join(tip.inner_text().split())                            # noqa: E731 - nilai dan nama jenis adalah item flex terpisah
+    flat = lambda: " ".join(tip.inner_text().split())                            # noqa: E731
     assert flat() == "Pukul 07.00 1 parkir 1 naik trotoar"
     page.keyboard.press("Tab")
     assert flat() == "Pukul 08.00 1 parkir 0 naik trotoar"
@@ -486,42 +423,47 @@ def test_laporan_grafik_per_jam_tooltip_papan_ketik_dan_tabel(server, api, page)
     rows = [[c.inner_text() for c in r.locator("td").all()] for r in page.locator("#rpJam .rc-table tbody tr").all()]
     assert rows == [["Pukul 07.00", "1", "1", "2"], ["Pukul 08.00", "1", "0", "1"]], "hanya jam yang ada kejadiannya"
 
-    box = hit.nth(7).bounding_box()                                              # sentuhan di luar grafik menutup tooltip
-    page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + 20)
-    tip.wait_for(state="visible")
-    page.touchscreen.tap(10, 10)
-    tip.wait_for(state="hidden")
-
 
 def test_laporan_keadaan_kosong_memberi_arah(server, api, page):
     app, url = server
     page.goto(url + "#/laporan")
-    page.wait_for_selector(".dropzone")
-    assert "Belum ada kamera" in page.inner_text(".dropzone") and page.locator(".dropzone a[href='#/']").count() == 1
-    add_cam(api, "Sepi")
-    page.reload()
-    page.wait_for_selector(".dropzone")
-    assert "Belum ada kejadian pada periode ini" in page.inner_text(".dropzone")
+    page.wait_for_selector(".empty")
+    assert "Belum ada kejadian pada periode ini" in page.inner_text(".empty") and page.locator(".empty a[href='#/']").count() == 1
     assert page.locator("#rpJam").count() == 0 and page.locator(".notice").count() == 0
 
 
-@pytest.mark.parametrize("width", [360, 390])
-def test_menu_bawah_lima_tab_tetap_satu_baris(server, page, width):
+@pytest.mark.parametrize("width", [320, 360, 390])
+def test_menu_bawah_empat_tab_tetap_satu_baris_di_bawah(server, page, width):
     app, url = server
     page.set_viewport_size({"width": width, "height": 800})
     page.goto(url + "#/laporan")
     page.wait_for_selector("#nav a")
     boxes = [a.bounding_box() for a in page.locator("#nav a").all()]
-    assert len(boxes) == 5
+    assert len(boxes) == 4
     assert len({round(b["y"]) for b in boxes}) == 1, f"tab menu jatuh ke baris lain: {[round(b['y']) for b in boxes]}"
     assert all(b["x"] >= 0 and b["x"] + b["width"] <= width + 1 for b in boxes)
+    assert boxes[0]["y"] > 800 - 100, "menu harus menempel di bawah layar HP"
     assert page.locator("#nav a[aria-current='page']").inner_text().strip().startswith("Laporan")
+    chip = page.locator("#conn").bounding_box()
+    assert chip["x"] >= 0 and chip["x"] + chip["width"] <= width + 1, "penanda status terpotong di tepi layar"
+
+
+def test_desktop_menu_di_sisi_kiri(server, browser):
+    ctx = browser.new_context(viewport={"width": 1366, "height": 800})
+    pg = ctx.new_page()
+    try:
+        pg.goto(server[1] + "#/laporan")
+        pg.wait_for_selector("#nav a")
+        boxes = [a.bounding_box() for a in pg.locator("#nav a").all()]
+        assert len({round(b["x"]) for b in boxes}) == 1 and boxes[0]["x"] < 20
+        assert [round(b["y"]) for b in boxes] == sorted(round(b["y"]) for b in boxes)
+    finally:
+        ctx.close()
 
 
 def test_laporan_dicetak_putih_dengan_tabel_dan_tanpa_menu(server, api, page, tmp_path):
-    from datetime import timedelta
     app, url = server
-    cid = add_cam(api, "Depan toko")
+    cid = add_device(api, "Depan toko")
     day = midnight() - timedelta(days=2)
     seed(app, cid, "parkir", day.replace(hour=7, minute=10), 30)
     seed(app, cid, "naik_trotoar", day.replace(hour=17, minute=40), 5)
@@ -531,8 +473,7 @@ def test_laporan_dicetak_putih_dengan_tabel_dan_tanpa_menu(server, api, page, tm
     page.emulate_media(media="print")
     assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(255, 255, 255)"
     assert page.locator("#nav").is_hidden() and page.locator(".rc-table").first.is_visible(), "tabel angka ikut tercetak"
-    assert page.locator(".rp-print").is_visible() and "Kamera: semua kamera" in page.inner_text(".rp-print")
-    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--text').trim()") == "#111"
+    assert page.locator(".rp-print").is_visible() and "Perangkat: semua perangkat" in page.inner_text(".rp-print")
     out = tmp_path / "laporan.pdf"
     page.pdf(path=str(out), format="A4", print_background=True)
     assert out.read_bytes()[:5] == b"%PDF-"
@@ -540,64 +481,4 @@ def test_laporan_dicetak_putih_dengan_tabel_dan_tanpa_menu(server, api, page, tm
     text = "\n".join(p.extract_text() for p in pypdf.PdfReader(str(out)).pages)
     for needle in ("Laporan Sidewalk Sentinel", "Kejadian per jam", "Pukul 07.00", "Pukul 17.00", "Bukti terbaru"):
         assert needle in text, needle
-    assert "Tahapan" not in text, "menu navigasi tidak boleh ikut tercetak"
-
-
-def test_hp_jadi_cctv_kendaraan_parkir_lalu_pergi_dan_lamanya_masuk_laporan(server, api, page):
-    page.add_init_script(SCENE)
-    page.goto(server[1])
-    page.click("#useDevice")
-    page.wait_for_function("() => document.getElementById('aMsg') && document.getElementById('aMsg').textContent.includes('perangkat ini')",
-                           timeout=15000)
-    cid = page.url.split("/pantau/")[1].split("/")[0]
-    page.click("#preset")
-    page.click("#save")
-    page.wait_for_selector("#live video")
-    assert api("POST", f"/api/cams/{cid}", {"learn": "cepat", "settings": {"park_seconds": 2}})[0] == 200
-    page.wait_for_selector("#chip .chip[data-st='memantau']", timeout=30000)
-
-    hud = "() => { const c = document.querySelector('#live canvas.overlay'); " \
-          "return !!c && c.getContext('2d').getImageData(60, 24, 1, 1).data[3] > 0; }"
-    page.wait_for_function(hud, timeout=5000)                         # penghitung 'Hari ini' tergambar di kiri atas gambar
-
-    page.evaluate("window.__vehicle = true")                          # kendaraan datang, diam, terkonfirmasi parkir
-    page.wait_for_selector("#evs .event[data-k='parkir']", timeout=30000)
-    assert api.cam(cid)["counts_today"]["parkir"] == 1
-    assert "durasi_s" not in api("GET", f"/api/cams/{cid}/events?limit=5")[1]["events"][0], "masih parkir: lama belum diketahui"
-    page.wait_for_timeout(2000)
-    page.evaluate("window.__vehicle = false")                         # kendaraan pergi
-
-    def lamanya():
-        ev = api("GET", f"/api/cams/{cid}/events?limit=5")[1]["events"][0]
-        return ev.get("durasi_s")
-
-    durasi = api.wait(lamanya, 30, "lama parkir harus tercatat setelah kendaraan pergi")
-    assert 2.0 <= durasi <= 20.0, durasi
-    assert api.cam(cid)["counts_today"]["parkir"] == 1, "pergi tidak menambah kejadian baru"
-
-    page.click("#nav a[href='#/laporan']")                            # laporannya muncul dengan angka yang sama
-    page.wait_for_selector(".rp-total")
-    assert page.inner_text(".rp-total") == "1" and page.inner_text(".rp-kinds [data-k='parkir'] b") == "1"
-    assert tile(page, "Terlama") != "—" and tile(page, "Rata-rata parkir") == tile(page, "Terlama")
-    assert "Berlangsung" in page.inner_text("#rpEv .event") and "Kamera HP" in page.inner_text("#rpEv .event")
-    assert page.is_visible("#camlive"), "kamera tetap menyala saat membuka laporan"
-
-
-def test_laporan_menampilkan_nama_kamera_sebagai_teks_bukan_html(server, api, page):
-    from datetime import timedelta
-    app, url = server
-    jahat = '<img src=x onerror="window.__xss=1">'
-    a, b = add_cam(api, jahat), add_cam(api, "Normal")
-    m = midnight()
-    seed(app, a, "parkir", m + timedelta(seconds=5), 10)
-    seed(app, b, "parkir", m + timedelta(seconds=6), 10)
-    page.goto(url + "#/laporan")
-    page.wait_for_selector(".rp-cams")
-    page.wait_for_timeout(300)
-    assert page.evaluate("window.__xss") is None, "nama kamera dijalankan sebagai HTML"
-    assert page.locator(".rp img[src='x']").count() == 0 and page.locator("#rpCam img").count() == 0
-    assert jahat in page.inner_text(".rp-cams") and jahat in page.inner_text("#rpEv")
-    assert jahat in [o.text_content() for o in page.locator("#rpCam option").all()]
-    page.select_option("#rpCam", a)
-    page.wait_for_function("() => document.querySelector('#rpEv')")
-    assert page.evaluate("window.__xss") is None and page.locator("#rpEv img[src='x']").count() == 0
+    assert "Setelan" not in text, "menu navigasi tidak boleh ikut tercetak"

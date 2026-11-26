@@ -1,11 +1,11 @@
 """Engine: merangkai seluruh tahap menjadi satu objek yang diberi frame demi frame.
 
-Alur per frame (nomor materi dalam kurung):
+Alur per frame:
 
-    praproses (1,2,6) -> penyetaraan gain (1) -> selisih vs referensi + Otsu + buang bayangan (4,6)
-    -> morfologi (3) -> deskripsi blob (5) -> pelacakan -> keputusan (parkir / naik trotoar)
+    praproses -> penyetaraan gain -> selisih vs referensi + Otsu + buang bayangan
+    -> morfologi -> deskripsi blob -> pelacakan -> keputusan (parkir / naik trotoar)
 
-Engine yang sama dipakai oleh analisis video, kamera langsung, CLI, dan tes.
+Engine yang sama dipakai oleh kamera langsung dan tes.
 """
 from __future__ import annotations
 
@@ -86,13 +86,13 @@ class Engine:
             raise ValueError("ukuran frame berubah di tengah analisis")
 
         bg = (self.zone > 0) if self._prev_clean is None else ((self.zone > 0) & (self._prev_clean == 0))
-        gain = match_gain(cur.L, self.ref.L, bg)                                   # M1
+        gain = match_gain(cur.L, self.ref.L, bg)
         cur.L = np.clip(cur.L * gain, 0, 255)
         cur.V = np.clip(cur.V * gain, 0, 255)
 
-        seg = segment(self.ref, cur, self.zone, self.cfg)                          # M4 + M6
-        clean = clean_mask(seg.raw, self.cfg)                                      # M3
-        blobs = describe(clean, self.roi_mask, self.cfg)                           # M5
+        seg = segment(self.ref, cur, self.zone, self.cfg)
+        clean = clean_mask(seg.raw, self.cfg)
+        blobs = describe(clean, self.roi_mask, self.cfg)
         vehicles = [b for b in blobs if b.label == "kendaraan"]
         tracks = self.tracker.update(vehicles, t, float(w))
         events = self.decider.step(tracks, t, float(w))
@@ -125,27 +125,3 @@ class Engine:
                 self.last["bgr"], self.roi_px, self.last["tracks"], self.last["t"],
                 self.counts, self.cfg.park_seconds, header)
         return self.last["annotated"]
-
-    def stages(self) -> np.ndarray:
-        """Montase 6 panel: keluaran tiap materi pada frame terakhir (untuk laporan)."""
-        if not self.last:
-            raise RuntimeError("belum ada frame yang diproses")
-        L = self.last
-        desc = (L["bgr"] * 0.45).astype(np.uint8)
-        for b in L["blobs"]:
-            color = {"kendaraan": render.CYAN, "pejalan": render.AMBER}.get(b.label, render.DIM)
-            if b.contour is not None:
-                cv2.drawContours(desc, [b.contour], -1, color, 1, cv2.LINE_AA)
-            x, y, w, h = b.bbox
-            cv2.rectangle(desc, (x, y), (x + w, y + h), color, 1)
-            if b.label != "noise":
-                render.put_text(desc, f"A={b.area:.0f} r={b.aspect:.2f}", (x, y - 4), color, 0.36)
-        diff_vis = cv2.applyColorMap(cv2.convertScaleAbs(L["diff8"], alpha=255.0 / 90.0), cv2.COLORMAP_INFERNO)
-        return render.montage([
-            ("1 PRAPROSES  M1+M2+M6", np.clip(L["L"], 0, 255).astype(np.uint8)),
-            ("2 SELISIH VS REFERENSI", diff_vis),
-            (f"3 OTSU T={L['threshold']:.0f} + BAYANGAN  M4+M6", L["raw"]),
-            ("4 MORFOLOGI  M3", L["clean"]),
-            ("5 DESKRIPSI OBJEK  M5", desc),
-            ("6 KEPUTUSAN", self.annotated()),
-        ])
