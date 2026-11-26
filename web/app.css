@@ -270,12 +270,25 @@ input[type="range"]:focus-visible { outline-offset: 0; }
 
 /* ---------------------------------------------------------------------- kejadian */
 .events { display: grid; }
-.event {
-  display: grid; grid-template-columns: 112px 1fr; gap: 14px; align-items: start; padding: 12px 0; width: 100%; text-align: left; color: inherit;
-  background: none; border: 0; border-top: 1px solid var(--edge); cursor: pointer; border-radius: 0;
-}
+.event { position: relative; border-top: 1px solid var(--edge); }
 .event:first-child { border-top: 0; }
-.event:disabled { cursor: default; opacity: 1; }
+.ev-open {
+  display: grid; grid-template-columns: 112px 1fr; gap: 14px; align-items: start; padding: 12px 0; width: 100%; text-align: left; color: inherit;
+  background: none; border: 0; cursor: pointer; border-radius: 0;
+}
+.ev-open:disabled { cursor: default; opacity: 1; }
+.has-del .ev-body { padding-right: 40px; }          /* ruang untuk tombol hapus */
+.ev-del {
+  position: absolute; top: 6px; right: 0; width: 44px; height: 44px; display: grid; place-items: center; padding: 0;
+  background: none; border: 0; border-radius: 999px; color: var(--faint); cursor: pointer; transition: color .2s, background .2s;
+}
+.ev-del svg { width: 20px; height: 20px; }
+.ev-del:hover { color: #ffb9c0; background: rgba(240, 96, 111, .12); }
+.ev-del:disabled { opacity: .5; cursor: default; }
+.ev-del[data-armed="1"] {                              /* menunggu ketukan kedua: pil merah yang menutupi baris judul */
+  top: 8px; right: 0; width: auto; height: 32px; padding: 0 14px; font: 650 13.5px/1 var(--sans); white-space: nowrap;
+  background: rgba(240, 96, 111, .22); color: #ffd2d6; box-shadow: inset 0 0 0 1px rgba(240, 96, 111, .55);
+}
 .event img, .event .noimg { width: 112px; height: auto; aspect-ratio: 16 / 9; object-fit: cover; background: #03050f; border-radius: 14px; box-shadow: 0 0 0 1px var(--edge); }
 .ev-body { display: grid; gap: 2px; align-content: start; min-width: 0; }
 .event b { font: 650 17px/1.2 var(--sans); letter-spacing: -.01em; }
@@ -286,8 +299,8 @@ input[type="range"]:focus-visible { outline-offset: 0; }
 .ev-why { color: var(--faint); font-size: 13px; }
 .event.fresh { animation: fresh 1.6s ease-out 1; }
 @keyframes fresh { from { background: rgba(98, 214, 255, .16); } to { background: transparent; } }
-@media (min-width: 700px) { .event { grid-template-columns: 200px 1fr; } .event img, .event .noimg { width: 200px; } }
-.side .event { grid-template-columns: 96px 1fr; } .side .event img, .side .event .noimg { width: 96px; }
+@media (min-width: 700px) { .ev-open { grid-template-columns: 200px 1fr; } .event img, .event .noimg { width: 200px; } }
+.side .ev-open { grid-template-columns: 96px 1fr; } .side .event img, .side .event .noimg { width: 96px; }
 
 /* ------------------------------------------------------------------------ setelan */
 .devs { display: grid; }
@@ -382,7 +395,7 @@ input[type="range"]:focus-visible { outline-offset: 0; }
   :root { --bg: #fff; --glass: #fff; --glass-2: #f1f3f7; --edge: #c9cfdb; --edge-2: #c9cfdb; --text: #111; --dim: #444; --faint: #666; --cyan: #111; --lift: none; --blur: none; }
   html, body { background: #fff; color: #111; padding: 0; }
   body::before { display: none; }
-  .top, .nav, .live-chip, .toast-wrap, .rp-noprint, .rc-toggle, .lightbox { display: none !important; }
+  .top, .nav, .live-chip, .toast-wrap, .rp-noprint, .rc-toggle, .lightbox, .ev-del { display: none !important; }
   #view { padding: 0; max-width: none; margin: 0; }
   .panel, .rp-tile { -webkit-backdrop-filter: none; backdrop-filter: none; }
   .rp { --k-parkir: #c2362f; --k-naik: #7c3aed; --t-parkir: #c2362f; --t-naik: #7c3aed; --c-grid: #e7e7e7; --c-base: #c2c2c2; }

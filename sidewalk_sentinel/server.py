@@ -399,6 +399,11 @@ class Handler(BaseHTTPRequestHandler):
                    for r in rows]
             return self._json({"events": out, "seq": cam.events.seq})
 
+        if n == 5 and seg[3] == "events" and method == "DELETE":
+            if not re.fullmatch(r"\d{1,9}", seg[4]) or not cam.events.delete(int(seg[4])):
+                return self._error(404, "kejadian tidak ditemukan")
+            return self._json({"deleted": True, "no": int(seg[4])})
+
         if n == 5 and seg[3] == "events" and method in ("GET", "HEAD"):
             m = re.fullmatch(r"(\d{1,9})\.jpg", seg[4])
             f = cam.events.snapshot_path(int(m.group(1))) if m else None

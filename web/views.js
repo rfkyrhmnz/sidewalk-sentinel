@@ -5,6 +5,12 @@ import { HOUR_TICKS, dayTicks, daySlots, hourSlots, perCameraHTML, periodText, s
 
 const PERIODS = [['hari_ini', 'Hari ini'], ['7_hari', '7 hari'], ['30_hari', '30 hari']];
 
+/** Hapus satu kejadian di server. 404 berarti sudah tidak ada (mis. dihapus dari perangkat lain): tujuannya tercapai. */
+async function deleteEvent(e) {
+  try { await del(`/api/cams/${e.camera.id}/events/${e.no}`); }
+  catch (err) { if (!(err instanceof ApiError && err.status === 404)) throw err; }
+}
+
 // ======================================================================== laporan
 export function viewLaporan({ view }) {
   let periode = keep.get('ss_rp_periode');
@@ -44,6 +50,12 @@ export function viewLaporan({ view }) {
     <span>${esc(periodText(r))}. Kejadian muncul di sini begitu ada kendaraan yang parkir atau naik ke trotoar di depan kamera.</span>
     <a class="btn primary" href="#/">Buka layar pantau</a></div>`;
 
+  const remove = async (e) => {                        // laporan dihitung ulang dari server, bukan diakali di layar
+    await deleteEvent(e);
+    toast('Kejadian dihapus', 'Hitungan dan grafik sudah diperbarui.');
+    reload();
+  };
+
   const render = (r) => {
     const open = {};                                   // tabel yang sedang terbuka tetap terbuka setelah data diperbarui
     for (const k of Object.keys(charts)) open[k] = charts[k].isTableOpen();
@@ -71,7 +83,7 @@ export function viewLaporan({ view }) {
       charts.hari = stackedColumns($id('rpHari'), { slots, xTicks: dayTicks(slots), caption: `Kejadian per hari, ${periodText(r)}` });
       if (open.hari) charts.hari.setTableOpen(true);
     }
-    for (const e of r.terbaru) $id('rpEv').append(eventRow(e));
+    for (const e of r.terbaru) $id('rpEv').append(eventRow(e, { onDelete: remove }));
     $id('rpPrint').onclick = () => window.print();
   };
 
@@ -135,10 +147,21 @@ export function viewKejadian({ view, markSeen }) {
     <div id="feedErr"></div></div>`;
   const feed = $id('feed');
   const key = (e) => `${e.camera.id}:${e.no}`;
+  const gone = new Set();                              // yang baru dihapus: jawaban lama yang masih di jalan tidak boleh memunculkannya lagi
+
+  const live = (events) => events.filter((e) => !gone.has(key(e)));
+
+  const remove = async (e) => {
+    await deleteEvent(e);
+    gone.add(key(e));
+    rows = rows.filter((r) => key(r) !== key(e));
+    toast('Kejadian dihapus');
+    draw();
+  };
 
   const draw = (freshKeys = new Set()) => {
     feed.textContent = '';
-    for (const e of rows) feed.append(eventRow(e, { fresh: freshKeys.has(key(e)) }));
+    for (const e of rows) feed.append(eventRow(e, { fresh: freshKeys.has(key(e)), onDelete: remove }));
     $id('more').hidden = !more;
     $id('feedEmpty').innerHTML = rows.length ? '' : `<div class="empty"><b>Belum ada kejadian${kind ? ` ${KIND[kind].toLowerCase()}` : ''}</b>
       <span>Kejadian muncul di sini begitu kamera melihat kendaraan parkir atau naik ke trotoar.</span>
@@ -155,7 +178,7 @@ export function viewKejadian({ view, markSeen }) {
     try {
       const events = await fetchPage(0);
       if (dead || mine !== ticket) return;
-      rows = events;
+      rows = live(events);
       more = events.length === PAGE;
       $id('feedErr').textContent = '';
       draw();
@@ -168,7 +191,7 @@ export function viewKejadian({ view, markSeen }) {
       const events = await fetchPage(0);
       if (dead || mine !== ticket) return;
       const have = new Set(rows.map(key));
-      const fresh = events.filter((e) => !have.has(key(e)));
+      const fresh = live(events).filter((e) => !have.has(key(e)));
       const changed = events.some((e) => { const r = rows.find((x) => key(x) === key(e)); return r && r.durasi_s !== e.durasi_s; });
       if (!fresh.length && !changed) return;
       const byKey = new Map(events.map((e) => [key(e), e]));
@@ -183,7 +206,7 @@ export function viewKejadian({ view, markSeen }) {
     try {
       const events = await fetchPage(rows.length);
       const have = new Set(rows.map(key));
-      rows = [...rows, ...events.filter((e) => !have.has(key(e)))];
+      rows = [...rows, ...live(events).filter((e) => !have.has(key(e)))];
       more = events.length === PAGE;
       draw();
     } catch (e) { showError($id('feedErr'), e); }

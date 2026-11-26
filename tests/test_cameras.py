@@ -498,3 +498,46 @@ def test_semua_perangkat_dihentikan_bersih_saat_server_ditutup(tmp_path):
 def test_id_dan_kunci_tidak_menerima_baris_baru_di_ujung():
     from sidewalk_sentinel.util import valid_id
     assert valid_id("a" * 12) and not valid_id("a" * 12 + "\n") and not valid_id("")
+
+
+def test_api_hapus_kejadian_membuang_dari_laporan_umpan_csv_dan_foto(srv):
+    app, c = srv
+    ph, _ = _siapkan(c)
+    store = app.cams.get(ph.id).events
+    a = store.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, b"\xff\xd8a")
+    b = store.append({"kind": "naik_trotoar", "label": "N", "reason": "uji", "track_id": 2}, b"\xff\xd8b")
+    base = f"/api/cams/{ph.id}/events"
+    assert c.req("GET", f"{base}/{a['no']}.jpg", raw=True)[0].status == 200
+
+    st, body = c.req("DELETE", f"{base}/{a['no']}")
+    assert (st, body) == (200, {"deleted": True, "no": a["no"]})
+    assert c.req("GET", f"{base}/{a['no']}.jpg", raw=True)[0].status == 404, "foto buktinya ikut hilang"
+    assert c.req("GET", f"{base}/{b['no']}.jpg", raw=True)[0].status == 200, "kejadian lain tidak tersentuh"
+    r = c.req("GET", "/api/report?periode=hari_ini")[1]
+    assert (r["total"], r["parkir"], r["naik_trotoar"]) == (1, 0, 1) and [x["no"] for x in r["terbaru"]] == [b["no"]]
+    assert [e["no"] for e in c.req("GET", "/api/events?limit=10")[1]["events"]] == [b["no"]]
+    assert [e["no"] for e in c.req("GET", f"{base}?limit=10")[1]["events"]] == [b["no"]]
+    assert c.req("GET", f"/api/cams/{ph.id}")[1]["counts_today"] == {"parkir": 0, "naik_trotoar": 1}
+    csv_text = c.req("GET", "/api/events.csv")[1].decode("utf-8-sig")
+    assert f",{a['no']}," not in csv_text and f",{b['no']}," in csv_text
+
+
+@pytest.mark.parametrize("tail", ["999", "0", "abc", "-1", "1.jpg.x", "1234567890", "1/2"])
+def test_api_hapus_kejadian_yang_tidak_ada_atau_tidak_valid_dijawab_404(srv, tail):
+    app, c = srv
+    ph, _ = _siapkan(c)
+    app.cams.get(ph.id).events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, None)
+    assert c.req("DELETE", f"/api/cams/{ph.id}/events/{tail}")[0] == 404
+    assert c.req("GET", "/api/report?periode=hari_ini")[1]["total"] == 1, "tidak ada yang terhapus"
+
+
+def test_api_hapus_kejadian_perangkat_lain_atau_tak_dikenal_ditolak(srv):
+    app, c = srv
+    ph, _ = _siapkan(c)
+    other = Phone(c, name="Laptop uji")
+    other.register()
+    app.cams.get(ph.id).events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, None)
+    assert c.req("DELETE", f"/api/cams/{other.id}/events/1")[0] == 404, "nomor 1 milik perangkat lain"
+    assert c.req("DELETE", "/api/cams/tidakada/events/1")[0] == 404
+    assert c.req("GET", "/api/report?periode=hari_ini")[1]["total"] == 1
+    assert c.req("POST", f"/api/cams/{ph.id}/events/1")[0] == 404, "hanya DELETE dan GET yang dikenal"
