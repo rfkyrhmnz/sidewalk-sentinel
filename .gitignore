@@ -8,8 +8,10 @@ __pycache__/
 .venv/
 venv/
 
-# Bobot model dan keluaran training (proyek ini tidak memakainya)
+# Bobot model: hanya model trotoar milik proyek yang disimpan di repositori.
+# Bobot kendaraan (yolo11n.pt dan sejenisnya) diunduh ultralytics sendiri; jangan dikomit.
 *.pt
+!models/trotoar.pt
 runs/
 live_hasil/
 

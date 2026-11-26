@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
+import cv2
 import numpy as np
 import pytest
-from support import Client, Phone, Street, jpeg, new_key
+from support import ColorDetector, Client, FakeSegmenter, Phone, Street, jpeg, new_key
 
 from sidewalk_sentinel.cameras import (MAX_CAMERAS, CameraManager, CameraSpec, apply_changes, jpeg_size)
 from sidewalk_sentinel.server import make_server
@@ -21,9 +23,9 @@ def _spec(**kw):
 
 
 def test_perubahan_valid_diterapkan_dan_yang_tidak_disebut_tetap():
-    s = apply_changes(_spec(), {"name": "  Gerbang depan  ", "roi": ROI, "settings": {"park_seconds": 20},
-                                "learn": "cepat", "enabled": False})
-    assert (s.name, s.learn, s.enabled, s.settings) == ("Gerbang depan", "cepat", False, {"park_seconds": 20})
+    s = apply_changes(_spec(), {"name": "  Gerbang depan  ", "roi": ROI, "settings": {"park_seconds": 20, "conf": 0.4},
+                                "enabled": False})
+    assert (s.name, s.enabled, s.settings) == ("Gerbang depan", False, {"park_seconds": 20, "conf": 0.4})
     assert s.roi == [list(p) for p in ROI]
     assert apply_changes(s, {}).roi == s.roi and apply_changes(s, {"roi": None}).roi is None
 
@@ -32,7 +34,7 @@ def test_perubahan_valid_diterapkan_dan_yang_tidak_disebut_tetap():
     {"name": ""}, {"name": "x" * 41}, {"name": None},
     {"roi": [[0, 0], [1, 1]]}, {"roi": [[0, 0], [1, 0], [2, 1]]}, {"roi": "bukan daftar"}, {"roi": [[0, 0], [1, "a"], [1, 1]]},
     {"settings": {"tidak_ada": 1}}, {"settings": {"park_seconds": 0}}, {"settings": "bukan objek"},
-    {"learn": "kilat"},
+    {"settings": {"diff_floor": 20}}, {"settings": {"conf": 0.99}}, {"settings": {"conf": 0.01}},
 ])
 def test_perubahan_tidak_valid_ditolak(data):
     with pytest.raises(ValueError):
@@ -61,7 +63,7 @@ def test_spec_dimuat_dengan_mengabaikan_kolom_lama_dan_menolak_yang_rusak():
 # ============================================================================= manajer
 @pytest.fixture()
 def mgr(tmp_path):
-    m = CameraManager(tmp_path)
+    m = CameraManager(tmp_path, detector=ColorDetector())
     m.start()
     yield m
     m.shutdown()
@@ -100,7 +102,7 @@ def test_batas_jumlah_perangkat(mgr):
 
 
 def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
-    m1 = CameraManager(tmp_path)
+    m1 = CameraManager(tmp_path, detector=ColorDetector())
     m1.start()
     key = new_key()
     cam, _ = m1.register(key, "Gerbang")
@@ -108,7 +110,7 @@ def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
     cam.events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, b"\xff\xd8x")
     m1.shutdown()
 
-    m2 = CameraManager(tmp_path)
+    m2 = CameraManager(tmp_path, detector=ColorDetector())
     m2.start()
     try:
         back, created = m2.register(key, "")
@@ -121,7 +123,7 @@ def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
 
 def test_berkas_perangkat_rusak_atau_berisi_entri_lama_tidak_menjatuhkan_server(tmp_path):
     (tmp_path / "devices.json").write_text("{bukan json", encoding="utf-8")
-    m = CameraManager(tmp_path)
+    m = CameraManager(tmp_path, detector=ColorDetector())
     m.start()
     assert m.list() == []
     m.shutdown()
@@ -129,7 +131,7 @@ def test_berkas_perangkat_rusak_atau_berisi_entri_lama_tidak_menjatuhkan_server(
         {"id": "a" * 12, "source": "demo", "name": "lama"},                       # tanpa kunci perangkat: dibuang
         {"id": "c" * 12, "device": "d" * 24, "name": "sah", "source": "rtsp://x"},
         "bukan kamus", 42]), encoding="utf-8")
-    m = CameraManager(tmp_path)
+    m = CameraManager(tmp_path, detector=ColorDetector())
     m.start()
     try:
         assert [c.spec.name for c in m.list()] == ["sah"]
@@ -140,7 +142,7 @@ def test_berkas_perangkat_rusak_atau_berisi_entri_lama_tidak_menjatuhkan_server(
 # ================================================================================ API
 @pytest.fixture()
 def srv(tmp_path):
-    server, app = make_server("127.0.0.1", 0, tmp_path / "data")
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", detector=ColorDetector(), sidewalk=FakeSegmenter())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield app, Client(app.port)
     app.close()
@@ -168,7 +170,7 @@ def test_api_menolak_masukan_buruk(srv):
     assert c.req("POST", "/api/cams", {"source": "demo"})[0] == 405, "tidak ada lagi jalur membuat kamera dari sumber lain"
     ph = Phone(c)
     ph.register()
-    for body in ({"roi": [[0, 0], [1, 1]]}, {"name": ""}, {"settings": {"x": 1}}, {"learn": "kilat"}):
+    for body in ({"roi": [[0, 0], [1, 1]]}, {"name": ""}, {"settings": {"x": 1}}, {"settings": {"diff_floor": 20}}):
         assert c.req("POST", f"/api/cams/{ph.id}", body)[0] == 400, body
     assert c.req("POST", f"/api/cams/{ph.id}", b"{bukan json", {"Content-Type": "application/json"})[0] == 400
     assert c.req("GET", f"/api/cams/{'f' * 12}")[0] == 404
@@ -195,15 +197,14 @@ def test_frame_menolak_masukan_buruk(srv):
     assert c.req("POST", url, jpeg(np.zeros((90, 160, 3), np.uint8)), jpg_h)[0] == 200
 
 
-def test_perangkat_tanpa_area_meminta_area_lalu_mulai_belajar_setelah_area_diset(srv):
+def test_perangkat_tanpa_area_meminta_area_lalu_langsung_memantau_setelah_area_diset(srv):
     app, c = srv
     ph = Phone(c)
     ph.register()
     street = Street()
     ph.stream(street.frame, 5, until=lambda s: s["status"] == "perlu_area")
-    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI, "learn": "cepat"})[0] == 200
-    ph.stream(street.frame, 10, until=lambda s: s["status"] == "belajar" and s["learn_progress"]["have"] >= 1)
-    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI})[0] == 200
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "memantau")      # tanpa fase belajar latar
     assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
 
 
@@ -215,8 +216,7 @@ def _siapkan(c, park_seconds=2):
     ph = Phone(c)
     ph.register()
     street = Street()
-    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI, "learn": "cepat",
-                                                 "settings": {"park_seconds": park_seconds}})[0] == 200
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI, "settings": {"park_seconds": park_seconds}})[0] == 200
     ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau")
     return ph, street
 
@@ -259,7 +259,7 @@ def test_laporan_dan_csv_memuat_kejadian_dan_durasinya(srv):
     assert "Ponsel uji" in text and text.count("\n") == 2
 
 
-def test_jeda_menghentikan_pemantauan_dan_lanjut_belajar_ulang(srv):
+def test_jeda_menghentikan_pemantauan_dan_lanjut_setelah_dilanjutkan(srv):
     app, c = srv
     ph, street = _siapkan(c)
     assert c.req("POST", f"/api/cams/{ph.id}", {"enabled": False})[0] == 200
@@ -269,12 +269,82 @@ def test_jeda_menghentikan_pemantauan_dan_lanjut_belajar_ulang(srv):
     ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau" and s["enabled"])
 
 
-def test_kalibrasi_ulang_membuat_latar_dipelajari_lagi(srv):
+def test_tangan_dan_benda_bukan_kendaraan_tidak_pernah_dicatat(srv):
+    """Penyebab awal perubahan ke YOLO: pengurang latar menganggap tangan sebagai kendaraan. Di sini detektor hanya
+    melihat 'kendaraan' berwarna; benda abu-abu besar di trotoar (tangan, orang) tidak menghasilkan kotak."""
     app, c = srv
-    ph, street = _siapkan(c)
-    assert c.req("POST", f"/api/cams/{ph.id}/recalibrate")[0] == 200
-    ph.stream(street.frame, 10, until=lambda s: s["status"] == "belajar")
-    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+    ph, street = _siapkan(c, park_seconds=1)
+
+    def benda():
+        img = street.frame()
+        cv2.rectangle(img, (280, 250), (380, 340), (150, 160, 175), -1)      # 'tangan': besar, di trotoar, abu-abu
+        return img
+
+    ph.stream(benda, 8)
+    assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
+
+
+def test_usulan_zona_dari_model_trotoar_dan_semua_keadaan_gagalnya(srv):
+    app, c = srv
+    ph = Phone(c)
+    ph.register()
+    url = f"/api/cams/{ph.id}/propose-zone"
+    st, err = c.req("POST", url)
+    assert st == 409 and "gambar" in err["error"], "belum ada gambar dari perangkat"
+    ph.push(Street().frame())
+    st, out = c.req("POST", url)
+    assert st == 200 and out["roi"] == app.sidewalk.roi and 0 < out["coverage"] <= 1
+    app.sidewalk.roi = None                                                   # trotoar tidak terlihat
+    st, out = c.req("POST", url)
+    assert st == 200 and out["roi"] is None and "manual" in out["message"]
+    assert c.req("GET", url)[0] == 404, "hanya POST yang dikenal"
+    assert c.req("POST", f"/api/cams/{'f' * 12}/propose-zone")[0] == 404
+    app.sidewalk = app.cams.sidewalk = None
+    app.cams.get(ph.id).sidewalk = None
+    st, err = c.req("POST", url)
+    assert st == 503 and "manual" in err["error"], "model trotoar tidak ada"
+
+
+def test_status_model_memuat_galat_lalu_siap_tampil_di_kamera_dan_info(srv):
+    app, c = srv
+    det = app.detector
+    det.state, det.message = "memuat", "Memuat model YOLO"
+    ph = Phone(c)
+    ph.register()
+    street = Street()
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI})[0] == 200
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "memuat")
+    assert ph.state["detector"]["state"] == "memuat"
+    assert c.req("GET", "/api/info")[1]["detector"] == {"state": "memuat", "message": "Memuat model YOLO",
+                                                         "weights": "tiruan.pt", "sidewalk_model": True}
+
+    det.state, det.message = "galat", "Paket ultralytics belum terpasang. Jalankan: pip install ultralytics"
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "model_galat")
+    assert "pip install ultralytics" in ph.state["message"], "alasan galat sampai ke pengguna"
+    assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
+
+    assert c.req("POST", "/api/detector/retry")[0] == 200 and det.retried == 1
+    assert c.req("GET", "/api/detector/retry")[0] == 405
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "memantau")
+
+
+def test_pengaturan_tersimpan_dari_versi_lama_tidak_menjatuhkan_pemantauan(tmp_path):
+    key = new_key()
+    (tmp_path / "devices.json").write_text(json.dumps([{
+        "id": "a" * 12, "device": key, "name": "Lama", "roi": ROI, "learn": "normal",
+        "settings": {"diff_floor": 20, "min_area_frac": 0.002, "filter_pedestrians": True, "park_seconds": 7}}]),
+        encoding="utf-8")
+    m = CameraManager(tmp_path, detector=ColorDetector())
+    m.start()
+    try:
+        cam = m.list()[0]
+        t0 = time.time()
+        while cam.status != "memantau" and time.time() < t0 + 10:
+            cam.push(jpeg(Street().frame()))
+            time.sleep(0.15)
+        assert cam.status == "memantau", cam.message                       # kembali ke pengaturan bawaan
+    finally:
+        m.shutdown()
 
 
 def test_menghapus_perangkat_membersihkan_data_dan_frame_berikutnya_404(srv):
@@ -289,14 +359,11 @@ def test_menghapus_perangkat_membersihkan_data_dan_frame_berikutnya_404(srv):
     assert Phone(c, key=ph.key).register()["id"] != ph.id
 
 
-def test_berhenti_mengirim_tidak_membuang_latar_yang_sudah_dipelajari(srv):
+def test_berhenti_mengirim_lalu_kembali_melanjutkan_pemantauan(srv):
     app, c = srv
     ph, street = _siapkan(c)
-    before = c.req("GET", f"/api/cams/{ph.id}")[1]
     c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "menunggu", 8, "tanpa frame, kamera menunggu perangkat")
     ph.stream(street.frame, 6, until=lambda s: s["status"] == "memantau")
-    after = c.req("GET", f"/api/cams/{ph.id}")[1]
-    assert after["relearns"] == before["relearns"] == 0 and after["learn_progress"]["have"] == before["learn_progress"]["have"]
 
 
 def test_dua_perangkat_dipantau_terpisah_dan_laporan_menggabungkannya(srv):
@@ -327,7 +394,7 @@ def test_nama_perangkat_berawalan_rumus_dinetralkan_di_csv(srv):
 
 
 def test_api_tertutup_tanpa_kunci_pada_mode_lan(tmp_path):
-    server, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token="kunci-uji")
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token="kunci-uji", detector=ColorDetector())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         anon = Client(app.port)
@@ -343,7 +410,7 @@ def test_api_tertutup_tanpa_kunci_pada_mode_lan(tmp_path):
 
 
 def test_semua_perangkat_dihentikan_bersih_saat_server_ditutup(tmp_path):
-    server, app = make_server("127.0.0.1", 0, tmp_path / "data")
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", detector=ColorDetector())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     c = Client(app.port)
     phones = [Phone(c, name=f"HP{i}") for i in range(3)]

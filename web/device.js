@@ -192,7 +192,6 @@ export class Device {
       this.stream = stream;
       this.facing = next;
       keep.set('ss_facing', next);
-      await this.recalibrate();                            // sudut pandang baru: latar harus dipelajari ulang
     } catch (e) {
       this.error = cameraMessage(e);
       this._emit();
@@ -207,7 +206,13 @@ export class Device {
     return this.cam;
   }
 
-  async recalibrate() { if (this.cam) await postJSON(`/api/cams/${this.cam.id}/recalibrate`); }
+  // Usulan zona trotoar dari model segmentasi. Mengembalikan {roi, coverage} atau {roi: null, message}.
+  async proposeZone() {
+    if (!this.cam) throw new ApiError('Perangkat belum tersambung ke server.', 0);
+    return postJSON(`/api/cams/${this.cam.id}/propose-zone`);
+  }
+
+  async retryModel() { await postJSON('/api/detector/retry'); }
 
   async refresh() {
     if (!this.cam) return null;

@@ -3,6 +3,9 @@
 
     python main.py             # buka http://localhost:8000 di laptop; kamera laptop memantau
     python main.py --https     # sama, dan bisa dibuka dari HP di Wi-Fi yang sama; kamera HP memantau
+
+Kendaraan dikenali model YOLO (paket ultralytics). Zona trotoar bisa diusulkan otomatis oleh model segmentasi
+trotoar (models/trotoar.pt) dan tetap bisa digambar atau diperbaiki sendiri.
 """
 from __future__ import annotations
 
@@ -22,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lan", action="store_true", help="dengarkan di semua antarmuka, tautan berkunci untuk HP")
     p.add_argument("--data", default="data", help="folder kejadian dan foto bukti (aman dihapus)")
     p.add_argument("--no-open", action="store_true", help="jangan buka browser otomatis")
+    p.add_argument("--weights", default="yolo11n.pt",
+                   help="bobot YOLO untuk kendaraan (bawaan yolo11n.pt, diunduh sekali; boleh jalur ke berkas .pt sendiri)")
+    p.add_argument("--sidewalk-weights", default=None,
+                   help="bobot YOLO segmentasi trotoar untuk usulan zona (bawaan models/trotoar.pt bila ada)")
+    p.add_argument("--device", default=None, help="perangkat inferensi, mis. cpu, 0 (GPU pertama), mps")
     p.add_argument("--retention-days", type=int, default=30, help="simpan kejadian dan foto bukti selama ini (hari)")
     return p
 
@@ -34,7 +42,10 @@ def main(argv=None) -> int:
     from sidewalk_sentinel.server import serve
     if not a.no_open and not (a.lan or a.https):
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{a.port}/")).start()
-    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan, retention_days=a.retention_days, https=a.https)
+    kw = {"weights": a.weights, "device": a.device}
+    if a.sidewalk_weights:
+        kw["sidewalk_weights"] = a.sidewalk_weights
+    serve(host=a.host, port=a.port, data_dir=a.data, lan=a.lan, retention_days=a.retention_days, https=a.https, **kw)
     return 0
 
 

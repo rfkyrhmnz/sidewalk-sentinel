@@ -1,152 +1,141 @@
-"""Uji mesin pada adegan sintetis. Kebenaran: 1 parkir + 2 naik trotoar (lihat scenes.py)."""
+"""Uji mesin: kotak kendaraan -> pelacak -> keputusan (parkir / naik trotoar), tanpa model sungguhan.
+
+Detektor diganti pembangkit kotak berskrip, sehingga aturan zona, waktu, getar kotak, dan deteksi yang terlewat bisa
+diuji tepat dan tanpa menunggu waktu nyata (waktu dikirim sebagai argumen)."""
 from __future__ import annotations
 
-from collections import Counter
-
+import numpy as np
 import pytest
 
-from sidewalk_sentinel import Config, Engine
-from sidewalk_sentinel.config import Config as Cfg
-from scenes import ROI, Renderer, default_scene
+from sidewalk_sentinel.config import Config
+from sidewalk_sentinel.detector import Detection
+from sidewalk_sentinel.engine import Engine
 
-TRUTH = {"parkir": 1, "naik_trotoar": 2}
-
-
-def run_scene(cfg_over=None, **scene_kw):
-    sc = default_scene(**scene_kw)
-    r = Renderer(sc)
-    cfg = Config.from_overrides({"park_seconds": 5, **(cfg_over or {})})
-    eng = Engine(ROI, cfg)
-    eng.set_reference(r.empty_frames(cfg.ref_frames))
-    for t, frame in r.frames():
-        eng.process(frame, t, snapshots=False)
-    return eng
+W, H = 640, 360
+ZONE = [[0.0, 0.6], [1.0, 0.6], [1.0, 1.0], [0.0, 1.0]]       # sepertiga bawah gambar = trotoar (y >= 216)
+FRAME = np.full((H, W, 3), 120, np.uint8)
 
 
-# ---------------------------------------------------------------- perilaku inti
-@pytest.mark.parametrize("scene", [
-    {},
-    {"shadow": True},
-    {"gradient": 0.35},
-    {"gradient": 0.5},
-    {"shadow": True, "gradient": 0.35},
-], ids=["dasar", "bayangan", "gradien-0.35", "gradien-0.5", "bayangan+gradien"])
-def test_pipeline_default_menemukan_tepat_satu_parkir_dan_dua_naik(scene):
-    eng = run_scene(**scene)
-    assert eng.counts == TRUTH, [(e.kind, e.track_id, round(e.t, 1)) for e in eng.events]
+class Script:
+    """Detektor berskrip: `fn(t)` mengembalikan daftar kotak (x1, y1, x2, y2) pada waktu t."""
+
+    def __init__(self, fn, name="car", label="mobil"):
+        self.fn, self.name, self.label, self.t = fn, name, label, 0.0
+
+    def detect(self, frame, conf=0.3, imgsz=640):
+        return [Detection(b, 0.9, self.name, self.label) for b in self.fn(self.t)]
 
 
-def test_waktu_kejadian_masuk_akal():
-    eng = run_scene()
-    parkir = next(e for e in eng.events if e.kind == "parkir")
-    # motor P berhenti di t=7.0 s; konfirmasi = berhenti + jendela kecepatan + T(5 s)
-    assert 12.0 <= parkir.t <= 14.0
-    assert parkir.t - parkir.t_start == pytest.approx(5.0, abs=0.3)
-    naik = [e for e in eng.events if e.kind == "naik_trotoar"]
-    assert any(4.0 <= e.t <= 6.5 for e in naik)      # P naik
-    assert any(10.5 <= e.t <= 13.5 for e in naik)    # R naik
-    assert all("jalan" in e.reason for e in naik)
-
-
-def test_mobil_di_jalan_dan_pejalan_kaki_tidak_memicu():
-    sc = default_scene()
-    r = Renderer(sc)
-    eng = Engine(ROI, Config.from_overrides({"park_seconds": 5}))
-    eng.set_reference(r.empty_frames(8))
-    ped_seen = False
-    for t, f in r.frames():
-        eng.process(f, t, snapshots=False)
-        if 22.0 <= t <= 27.0 and any(b.label == "pejalan" for b in eng.last["blobs"]):
-            ped_seen = True
-    assert ped_seen, "pejalan kaki seharusnya terdeteksi sebagai blob berlabel 'pejalan'"
-    assert len({e.track_id for e in eng.events}) == 2        # hanya P dan R yang memicu
-    assert eng.counts == TRUTH
-
-
-def test_pejalan_kaki_disaring_hanya_bila_filter_aktif():
-    on = run_scene()
-    off = run_scene({"filter_pedestrians": False, "ride_standalone_seconds": 1.5})
-    assert on.counts["naik_trotoar"] == 2
-    # tanpa saringan, pejalan kaki (bergerak di trotoar) terhitung sebagai pengendara
-    assert off.counts["naik_trotoar"] >= 3
-
-
-def test_kendaraan_sudah_parkir_sejak_awal_dengan_referensi_kosong():
-    """Referensi dari frame kosong terpisah; motor sudah ada sejak t=0 dan tidak pernah bergerak."""
-    sc = default_scene()
-    sc.actors = [a for a in sc.actors if a.name == "P"]
-    sc.actors[0].keys = [(0.0, 300, 317), (1.0, 300, 317)]
-    r = Renderer(sc)
-    eng = Engine(ROI, Config.from_overrides({"park_seconds": 5}))
-    eng.set_reference(r.empty_frames(8))
-    for t, f in r.frames():
-        eng.process(f, t, snapshots=False)
-    assert eng.counts == {"parkir": 1, "naik_trotoar": 0}
-    ev = eng.events[0]
-    assert ev.kind == "parkir" and 5.0 <= ev.t <= 8.0
-
-
-def test_trotoar_kosong_tidak_menghasilkan_apa_apa():
-    sc = default_scene()
-    sc.actors = []
-    r = Renderer(sc)
-    eng = Engine(ROI, Config.from_overrides({"park_seconds": 5}))
-    eng.set_reference(r.empty_frames(8))
-    for t, f in r.frames():
-        eng.process(f, t, snapshots=False)
-    assert eng.counts == {"parkir": 0, "naik_trotoar": 0}
-
-
-# --------------------------------------- ablation: tiap tahap pengolahan terbukti berguna
-def test_ablation_morfologi_mencegah_objek_terpecah():
-    """Tanpa opening/closing, pita warna-paving memecah mask satu pengendara jadi dua blob."""
-    assert run_scene().counts == TRUTH
-    assert run_scene({"use_morphology": False}).counts["naik_trotoar"] > 2
-
-
-def test_ablation_buang_bayangan_mencegah_parkir_palsu():
-    assert run_scene(shadow=True).counts == TRUTH
-    assert run_scene({"use_shadow_removal": False}, shadow=True).counts["parkir"] > 1
-
-
-def test_ablation_homomorfik_menahan_gradien_cahaya():
-    assert run_scene(gradient=0.35).counts == TRUTH
-    assert run_scene({"use_homomorphic": False}, gradient=0.35).counts != TRUTH
-
-
-def test_ablation_bukti_citra_asli_mencegah_halo_filter_homomorfik():
-    """Halo di tepi bayangan tajam menempel ke pejalan kaki; bukti di citra asli memutus itu."""
-    assert run_scene(shadow=True).counts == TRUTH
-    assert run_scene({"use_raw_evidence": False}, shadow=True).counts != TRUTH
-
-
-# --------------------------------------------------------------------- foto bukti
-def test_tiap_kejadian_membawa_foto_bukti_jpeg_beranotasi():
-    r = Renderer(default_scene())
-    eng = Engine(ROI, Config(park_seconds=5))
-    eng.set_reference(r.empty_frames(8))
+def run(engine, script, seconds, fps=8.0, start=0.0, frame=FRAME):
     events = []
-    for t, f in r.frames():
-        events += eng.process(f, t).events
-    assert Counter(e.kind for e in events) == Counter(parkir=1, naik_trotoar=2)
-    for e in events:
-        assert e.snapshot and e.snapshot[:2] == b"\xff\xd8" and len(e.snapshot) > 1000
+    n = int(seconds * fps)
+    for i in range(n + 1):
+        t = start + i / fps
+        script.t = t
+        events += engine.process(frame, t, snapshots=False).events
+    return events
 
 
-# --------------------------------------------------------------- validasi masukan
-def test_config_menolak_parameter_tak_dikenal_dan_tak_valid():
-    with pytest.raises(ValueError):
-        Cfg.from_overrides({"tidak_ada": 1})
-    with pytest.raises(ValueError):
-        Cfg.from_overrides({"park_seconds": 0})
-    with pytest.raises(ValueError):
-        Cfg.from_overrides({"still_speed": 0.2, "move_speed": 0.1})
-    assert Cfg.from_overrides({"use_clahe": "ya", "park_seconds": "12"}).park_seconds == 12
+def car_at(x, y, w=100, h=50):
+    return (x, y, x + w, y + h)
 
 
-def test_roi_minimal_tiga_titik_dan_engine_butuh_referensi():
+def eng(script, **cfg):
+    return Engine(ZONE, script, Config.from_overrides({"park_seconds": 5, **cfg}))
+
+
+def test_kendaraan_diam_di_zona_dicatat_parkir_sekali_setelah_batas_waktu():
+    e = eng(Script(lambda t: [car_at(300, 250)]))
+    ev = run(e, e.detector, 12)
+    assert [x.kind for x in ev] == ["parkir"]
+    assert 5.0 <= ev[0].t <= 7.5, "dicatat sesudah diam selama park_seconds, bukan lebih awal"
+    assert e.counts == {"parkir": 1, "naik_trotoar": 0}
+
+
+def test_kendaraan_di_jalan_di_luar_zona_tidak_pernah_dicatat():
+    e = eng(Script(lambda t: [car_at(300, 100)]))
+    assert run(e, e.detector, 15) == []
+    assert all(v["state"] == "luar" and not v["in_roi"] for v in e.last["tracks"])
+
+
+def test_kendaraan_naik_dari_jalan_ke_trotoar_sambil_bergerak_dicatat_naik_trotoar():
+    def fn(t):
+        y = 150 + 120 * min(t, 1.0)                    # dari jalan (y=150) menyeberang kerb ke trotoar (y=270)
+        x = 100 + 90 * t
+        return [car_at(x, y)]
+    e = eng(Script(fn))
+    ev = run(e, e.detector, 4)
+    assert "naik_trotoar" in [x.kind for x in ev]
+    assert next(x for x in ev if x.kind == "naik_trotoar").reason.startswith("melintas dari jalan")
+
+
+def test_getar_kotak_beberapa_piksel_tidak_dibaca_sebagai_gerak():
+    rng = np.random.default_rng(1)
+    jitter = {}
+
+    def fn(t):
+        k = round(t * 8)
+        j = jitter.setdefault(k, rng.integers(-4, 5, size=2))
+        return [car_at(300 + int(j[0]), 250 + int(j[1]), 100 + int(j[0]) // 2, 50)]
+    e = eng(Script(fn))
+    ev = run(e, e.detector, 12)
+    assert [x.kind for x in ev] == ["parkir"], "kendaraan parkir yang kotaknya bergetar tetap parkir, bukan naik trotoar"
+
+
+def test_deteksi_yang_terlewat_sebentar_tidak_mengulang_hitungan_diam():
+    def fn(t):
+        return [] if 3.0 <= t < 4.0 else [car_at(300, 250)]       # YOLO melewatkan 1 detik di tengah
+    e = eng(Script(fn))
+    ev = run(e, e.detector, 12)
+    assert [x.kind for x in ev] == ["parkir"] and ev[0].track_id == 1, "jejak yang sama bertahan melewati celah"
+
+
+def test_kendaraan_pergi_lebih_lama_dari_batas_hilang_dihitung_sebagai_baru():
+    def fn(t):
+        return [] if 4.0 <= t < 9.0 else [car_at(300, 250)]       # pergi 5 dtk, jauh melewati track_max_missed_s
+    e = eng(Script(fn), park_seconds=2)
+    ev = run(e, e.detector, 16)
+    assert [x.kind for x in ev] == ["parkir", "parkir"] and ev[0].track_id != ev[1].track_id
+
+
+def test_kotak_terlalu_kecil_diabaikan_dan_kotak_dipotong_ke_dalam_frame():
+    e = eng(Script(lambda t: [(300, 250, 304, 254)]), min_box_frac=0.0015)
+    assert run(e, e.detector, 8) == [] and e.last["tracks"] == [], "kotak 4x4 px di bawah ukuran minimum"
+    e2 = eng(Script(lambda t: [(-50, 200, 700, 400)]))
+    e2.process(FRAME, 0.0, snapshots=False)
+    x, y, w, h = e2.last["tracks"][0]["bbox"]
+    assert x >= 0 and y >= 0 and x + w <= W and y + h <= H
+
+
+def test_frame_lebar_diperkecil_ke_lebar_kerja_dan_kotak_memakai_ukuran_kerja():
+    seen = {}
+
+    class Spy(Script):
+        def detect(self, frame, conf=0.3, imgsz=640):
+            seen["shape"], seen["conf"], seen["imgsz"] = frame.shape, conf, imgsz
+            return super().detect(frame, conf, imgsz)
+
+    e = Engine(ZONE, Spy(lambda t: [car_at(300, 250)]), Config.from_overrides({"conf": 0.42, "imgsz": 512}))
+    e.process(np.zeros((720, 1280, 3), np.uint8), 0.0, snapshots=False)
+    assert seen["shape"][:2] == (360, 640) and e.size == (640, 360), "frame 1280x720 diperkecil ke lebar kerja 640"
+    assert seen["conf"] == 0.42 and seen["imgsz"] == 512, "pengaturan kepekaan sampai ke detektor"
+
+
+def test_kejadian_menyertakan_foto_bukti_beranotasi_dan_label_kelas():
+    e = eng(Script(lambda t: [car_at(300, 250)], name="motorcycle", label="motor"), park_seconds=2)
+    ev = []
+    for i in range(40):
+        e.detector.t = i / 8
+        ev += e.process(FRAME, i / 8).events
+    assert ev and ev[0].snapshot[:2] == b"\xff\xd8"
+    assert e.last["tracks"][0]["label"] == "motor"
+    assert e.annotated().shape == (H, W, 3)
+
+
+def test_roi_kurang_dari_tiga_titik_ditolak_dan_pengaturan_tak_dikenal_ditolak():
     with pytest.raises(ValueError):
-        Engine([(0, 0), (1, 1)])
-    eng = Engine(ROI)
-    with pytest.raises(RuntimeError):
-        eng.process(Renderer(default_scene()).frame(0.0), 0.0)
+        Engine([[0, 0], [1, 1]], Script(lambda t: []))
+    with pytest.raises(ValueError, match="tidak dikenal"):
+        Config.from_overrides({"diff_floor": 20})                  # parameter metode lama sudah tidak ada
+    with pytest.raises(ValueError):
+        Config.from_overrides({"conf": 0.99})

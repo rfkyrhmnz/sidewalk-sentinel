@@ -8,7 +8,7 @@ import { viewKejadian, viewLaporan, viewSetelan } from './views.js';
 
 const view = $id('view');
 const D = new Device();                                 // kamera perangkat ini; hidup selama aplikasi terbuka
-let info = { version: '', defaults: { park_seconds: 10, min_area_frac: 0.0015 } };
+let info = { version: '', defaults: { park_seconds: 10, conf: 0.3, min_box_frac: 0.0015 }, detector: {} };
 let current = { dispose() {} };
 const P = { unseen: 0, lastSeq: null, camId: null };    // kejadian yang belum dilihat dan batas yang sudah diumumkan
 const listeners = new Set();
@@ -55,7 +55,7 @@ window.addEventListener('hashchange', route);
 
 // ------------------------------------------------------------------ penanda status
 const CHIP = {
-  memantau: 'Memantau', belajar: 'Belajar', perlu_area: 'Tandai zona', jeda: 'Dijeda', menunggu: 'Menunggu',
+  memantau: 'Memantau', memuat: 'Memuat model', model_galat: 'Model galat', perlu_area: 'Tandai zona', jeda: 'Dijeda', menunggu: 'Menunggu',
 };
 
 function renderChip() {

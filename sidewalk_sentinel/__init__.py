@@ -1,4 +1,4 @@
-"""Sidewalk Sentinel: deteksi kendaraan di trotoar dengan pengolahan citra digital klasik."""
+"""Sidewalk Sentinel: pemantau trotoar waktu nyata. YOLO mengenali kendaraan, aturan zona menentukan parkir atau naik trotoar."""
 import os as _os
 
 # Harus disetel sebelum modul mana pun mengimpor cv2: buang peringatan OpenCV yang berisik.

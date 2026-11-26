@@ -1,3 +1,4 @@
 numpy>=1.26
 opencv-python-headless>=4.8
 cryptography>=42      # sertifikat HTTPS untuk `serve --https` (kamera HP)
+ultralytics>=8.3        # YOLO: kendaraan dan segmentasi trotoar (lisensi AGPL-3.0, lihat README)

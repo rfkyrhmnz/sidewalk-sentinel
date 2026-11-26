@@ -22,6 +22,8 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from . import tls
 from .cameras import MAX_CAMERAS, CameraManager
+from .detector import (DEFAULT_SIDEWALK, DEFAULT_WEIGHTS, DetectorUnavailable, SidewalkSegmenter,
+                       VehicleDetector)
 from .config import Config
 from .util import valid_id
 
@@ -42,7 +44,8 @@ def lan_ip() -> str:
 
 
 class App:
-    def __init__(self, data_dir: str | Path, token: str | None = None, retention_days: int = 30):
+    def __init__(self, data_dir: str | Path, token: str | None = None, retention_days: int = 30,
+                 detector=None, sidewalk: SidewalkSegmenter | None = None):
         self.root = Path(data_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.token = token
@@ -50,7 +53,8 @@ class App:
         self.host = "127.0.0.1"
         self.lan = False
         self.https = False
-        self.cams = CameraManager(self.root, retention_days)
+        self.detector, self.sidewalk = detector, sidewalk
+        self.cams = CameraManager(self.root, retention_days, detector=detector, sidewalk=sidewalk)
         self.cams.start()
 
     def close(self) -> None:
@@ -258,8 +262,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({
                 "name": "Sidewalk Sentinel", "version": __version__, "auth": app.token is not None,
                 "lan_url": f"http://{lan_ip()}:{app.port}/" if app.lan else None,
-                "defaults": {"park_seconds": d.park_seconds, "min_area_frac": d.min_area_frac},
+                "defaults": {"park_seconds": d.park_seconds, "conf": d.conf, "min_box_frac": d.min_box_frac},
+                "detector": {**app.detector.status(), "sidewalk_model": bool(app.sidewalk and app.sidewalk.available)},
             })
+
+        if path == "/api/detector/retry":
+            if method != "POST":
+                return self._error(405, "metode tidak diizinkan")
+            app.detector.retry()
+            return self._json(app.detector.status())
 
         if path == "/api/device":
             if method != "POST":
@@ -330,9 +341,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"deleted": mgr.delete(cam.spec.id)})
             return self._error(405, "metode tidak diizinkan")
 
-        if n == 4 and seg[3] == "recalibrate" and method == "POST":
-            cam.recalibrate()
-            return self._json({"ok": True})
+        if n == 4 and seg[3] == "propose-zone" and method == "POST":
+            try:
+                return self._json(cam.propose_zone())
+            except ValueError as e:
+                return self._error(409, str(e))
+            except DetectorUnavailable as e:
+                return self._error(503, str(e))
+            except Exception:                              # noqa: BLE001 - model gagal menjalankan inferensi
+                log.exception("usulan zona gagal")
+                return self._error(500, "Usulan zona gagal dibuat. Tandai zona secara manual.")
 
         if n == 4 and seg[3] == "frame" and method == "POST":
             body = self._read_body(3 * 1024 * 1024)
@@ -385,8 +403,14 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
                 token: str | None = None, retention_days: int = 30, https: bool = False,
-                hosts: list[str] | None = None) -> tuple[_Server, App]:
-    app = App(data_dir, token=token, retention_days=retention_days)
+                hosts: list[str] | None = None, detector=None, sidewalk: SidewalkSegmenter | None = None,
+                weights: str = DEFAULT_WEIGHTS, sidewalk_weights: str | Path | None = DEFAULT_SIDEWALK,
+                device: str | None = None) -> tuple[_Server, App]:
+    if detector is None:                              # tes menyuntikkan detektor sendiri; pemakaian nyata memuat YOLO
+        detector = VehicleDetector(weights, device)
+        if sidewalk is None:
+            sidewalk = SidewalkSegmenter(sidewalk_weights, device)
+    app = App(data_dir, token=token, retention_days=retention_days, detector=detector, sidewalk=sidewalk)
     app.lan = lan
     try:
         ctx = None
@@ -407,7 +431,8 @@ def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "data", lan: bool = False,
-          retention_days: int = 30, https: bool = False) -> None:
+          retention_days: int = 30, https: bool = False, weights: str = DEFAULT_WEIGHTS,
+          sidewalk_weights: str | Path | None = DEFAULT_SIDEWALK, device: str | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     lan = lan or https                                # HTTPS dipakai agar HP bisa membuka kamera, jadi harus terjangkau dari LAN
     token = secrets.token_urlsafe(12) if lan else None
@@ -416,7 +441,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
     ip = lan_ip()
     try:
         server, app = make_server(host, port, data_dir, lan=lan, token=token, retention_days=retention_days,
-                                  https=https, hosts=[ip, "localhost"])
+                                  https=https, hosts=[ip, "localhost"], weights=weights,
+                                  sidewalk_weights=sidewalk_weights, device=device)
     except tls.TlsUnavailable as e:
         raise SystemExit(str(e))
     scheme = "https" if https else "http"
@@ -432,6 +458,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
             print("           Sesudah itu izinkan kamera; pemantauan mulai sendiri.")
         else:
             print("  Catatan: kamera HP butuh HTTPS. Jalankan ulang dengan --https untuk memakainya.")
+    side = "siap" if app.sidewalk and app.sidewalk.available else "tidak ditemukan (zona ditandai manual)"
+    print(f"  Model  : kendaraan = {app.detector.weights}  |  trotoar = {side}")
     print(f"  Data   : {app.root}  (kejadian disimpan {retention_days} hari)")
     print(f"{bar}\n  Tekan Ctrl+C untuk berhenti.\n")
     try:

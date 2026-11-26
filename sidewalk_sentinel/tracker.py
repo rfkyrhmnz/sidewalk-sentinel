@@ -1,4 +1,4 @@
-"""Pelacak centroid sederhana: mencocokkan blob antar-frame dengan jarak terdekat (greedy).
+"""Pelacak centroid sederhana: mencocokkan kotak kendaraan antar-frame dengan jarak terdekat (greedy).
 
 Dari lintasan centroid dihitung kecepatan ternormalisasi (lebar frame per detik) pada jendela
 waktu tertentu; kecepatan inilah yang membedakan kendaraan *diam* (parkir) dari *bergerak*.
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import replace
 
 from .config import Config
 from .features import Blob
@@ -30,7 +31,12 @@ class Track:
         self.speed: float | None = None
         self.alerted: set[str] = set()
 
-    def update(self, blob: Blob, t: float, window: float) -> None:
+    def update(self, blob: Blob, t: float, window: float, smooth: float = 1.0) -> None:
+        if smooth < 1.0:                    # redam getar kotak: kendaraan parkir tidak boleh tampak bergerak
+            old = self.blob.bbox
+            x, y, w, h = (smooth * n + (1.0 - smooth) * o for n, o in zip(blob.bbox, old))
+            blob = replace(blob, bbox=(int(round(x)), int(round(y)), max(1, int(round(w))), max(1, int(round(h)))),
+                           centroid=(x + w / 2.0, y + h / 2.0))
         self.blob = blob
         self.t_last = t
         self.matched = True
@@ -88,7 +94,7 @@ class CentroidTracker:
                 continue
             used_t.add(tid)
             used_b.add(bi)
-            self.tracks[tid].update(blobs[bi], t, cfg.speed_window_s)
+            self.tracks[tid].update(blobs[bi], t, cfg.speed_window_s, cfg.smooth)
 
         for bi, blob in enumerate(blobs):
             if bi not in used_b:

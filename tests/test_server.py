@@ -5,14 +5,14 @@ import http.client
 import threading
 
 import pytest
-from support import Client, new_key
+from support import Client, ColorDetector, FakeSegmenter, new_key
 
 from sidewalk_sentinel.server import make_server
 
 
 @pytest.fixture()
 def srv(tmp_path):
-    server, app = make_server("127.0.0.1", 0, tmp_path / "data")
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", detector=ColorDetector(), sidewalk=FakeSegmenter())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield app, Client(app.port)
     app.close()
@@ -97,7 +97,7 @@ def test_koneksi_keepalive_tidak_kacau_bila_body_tak_dibaca(srv, tmp_path):
         resp = conn.getresponse()
         return resp.status, resp.read()
 
-    for method, path in [("POST", "/api/endpoint-asing"), ("POST", f"/api/cams/{'a' * 12}/recalibrate"),
+    for method, path in [("POST", "/api/endpoint-asing"), ("POST", f"/api/cams/{'a' * 12}/propose-zone"),
                          ("DELETE", f"/api/cams/{'b' * 12}"), ("GET", "/api/device")]:
         call(method, path, b"{}")
         st, data = call("GET", "/api/info")                 # harus tetap terbaca di koneksi yang sama

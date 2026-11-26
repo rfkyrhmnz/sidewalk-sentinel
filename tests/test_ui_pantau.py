@@ -2,8 +2,10 @@
 
 Yang dijaga:
 - aplikasi dibuka -> kamera perangkat ini menyala dan terhubung tanpa tombol mulai, tanpa demo, tanpa pilihan sumber;
-- alur utama: tandai zona -> belajar latar -> kendaraan parkir terdeteksi langsung -> pemberitahuan -> Laporan memuat lamanya;
-- kejadian lama tidak diumumkan ulang saat halaman dibuka, dan muat ulang melanjutkan tanpa belajar ulang;
+- alur utama: tandai zona (diusulkan otomatis dari model trotoar, bisa diperbaiki) -> kendaraan parkir terdeteksi langsung ->
+  pemberitahuan -> Laporan memuat lamanya;
+- kejadian lama tidak diumumkan ulang saat halaman dibuka, dan muat ulang melanjutkan pemantauan;
+- model kendaraan yang sedang dimuat atau gagal dimuat dijelaskan dengan tombol muat ulang;
 - izin kamera ditolak, konteks tidak aman, dan kamera yang dipakai tab lain dijelaskan, bukan diam;
 - nama perangkat tampil sebagai teks, bukan HTML;
 - jalur HTTPS dengan kunci, halaman Laporan (grafik, tooltip, tabel, cetak), dan tidak ada sisa fitur lama di UI.
@@ -22,7 +24,7 @@ import pytest
 sync_api = pytest.importorskip("playwright.sync_api")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import Client, Phone, new_key  # noqa: E402
+from support import Client, ColorDetector, FakeSegmenter, Phone, new_key  # noqa: E402
 from sidewalk_sentinel.server import make_server  # noqa: E402
 from sidewalk_sentinel.store import now as store_now  # noqa: E402
 
@@ -53,7 +55,7 @@ navigator.mediaDevices.getUserMedia = async () => {
 
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
-    server, app = make_server("127.0.0.1", 0, tmp_path_factory.mktemp("data"))
+    server, app = make_server("127.0.0.1", 0, tmp_path_factory.mktemp("data"), detector=ColorDetector(), sidewalk=FakeSegmenter())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield app, f"http://127.0.0.1:{app.port}/"
     app.close()
@@ -118,7 +120,7 @@ def start_monitoring(page, api, park_seconds=2):
     page.wait_for_selector("#vf[data-st='edit']", timeout=15000)       # belum ada zona: langsung masuk mode tandai
     cam = only_cam(api, page)
     page.click("text=Mulai pantau")
-    assert api.req("POST", f"/api/cams/{cam['id']}", {"learn": "cepat", "settings": {"park_seconds": park_seconds}})[0] == 200
+    assert api.req("POST", f"/api/cams/{cam['id']}", {"settings": {"park_seconds": park_seconds}})[0] == 200
     page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
     return cam
 
@@ -178,21 +180,19 @@ def test_alur_penuh_dari_zona_sampai_parkir_dan_laporan(server, api, page):
     assert "Berlangsung" in page.inner_text("#rpEv .event")
 
 
-def test_muat_ulang_melanjutkan_tanpa_belajar_ulang_dan_tanpa_pengumuman_lama(server, api, page):
+def test_muat_ulang_melanjutkan_pemantauan_dan_tanpa_pengumuman_lama(server, api, page):
     page.add_init_script(SCENE)
     cam = start_monitoring(page, api)
     cid = cam["id"]
     page.evaluate("window.__vehicle = true")
     page.wait_for_selector("#recent .event[data-k='parkir']", timeout=30000)
-    before = api.req("GET", f"/api/cams/{cid}")[1]
-
     page.reload()                                                     # perangkat yang sama melanjutkan sendiri
     page.wait_for_selector("#vf video", timeout=15000)
     api.wait(lambda: api.req("GET", f"/api/cams/{cid}")[1]["status"] == "memantau", 15)
     page.wait_for_timeout(2600)                                       # lebih dari satu putaran
     after = api.req("GET", f"/api/cams/{cid}")[1]
     assert len(cams(api)) == 1, "muat ulang tidak boleh membuat perangkat baru"
-    assert after["relearns"] == 0 and after["learn_progress"] == before["learn_progress"], "latar tidak boleh dipelajari ulang"
+    assert after["status"] == "memantau" and after["counts_today"]["parkir"] == 1, "hitungan tidak berubah oleh muat ulang"
     assert page.locator(".toast").count() == 0, "kejadian lama tidak boleh diumumkan lagi"
     assert page.locator(".nav-badge").count() == 0
 
@@ -209,6 +209,9 @@ def test_setelan_menyimpan_dan_menghapus_dengan_dua_ketukan(server, api, page):
     page.evaluate("() => { const r = document.getElementById('sPark'); r.value = 30; r.dispatchEvent(new Event('input')); }")
     page.click("#sSave")
     api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["settings"]["park_seconds"] == 30, 10)
+    saved = api.req("GET", f"/api/cams/{cam['id']}")[1]["settings"]
+    assert set(saved) == {"park_seconds", "conf", "min_box_frac"} and saved["conf"] == 0.30, saved
+    assert page.locator("#sPed").count() == 0, "pengaturan pejalan kaki dari metode lama sudah dihapus"
 
     page.click("#sDel")                                               # ketukan pertama hanya meminta konfirmasi
     assert "Ketuk lagi" in page.inner_text("#sDel")
@@ -216,6 +219,88 @@ def test_setelan_menyimpan_dan_menghapus_dengan_dua_ketukan(server, api, page):
     page.click("#sDel")
     api.wait(lambda: [c["id"] for c in cams(api)] not in ([cam["id"]], []), 15, "perangkat tidak mulai dari awal")   # data lama hilang, perangkat mendaftar ulang
     page.wait_for_selector("#vf[data-st='edit']", timeout=20000)      # perangkat mendaftar ulang dan mulai dari awal
+
+
+# ===================================================================== zona dan model
+def test_zona_diusulkan_otomatis_dari_model_trotoar_lalu_bisa_diminta_ulang_dan_disimpan(server, api, page):
+    app = server[0]
+    usulan = [[0.1, 0.7], [0.9, 0.7], [0.9, 0.97], [0.1, 0.97]]
+    app.sidewalk.roi = usulan
+    page.add_init_script(SCENE)
+    try:
+        page.goto(page.base)
+        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
+        page.wait_for_selector("#hint:has-text('Zona diusulkan')", timeout=20000)    # otomatis, tanpa menyentuh apa pun
+        assert page.locator("#zAuto").count() == 1
+
+        lain = [[0.2, 0.75], [0.8, 0.75], [0.8, 0.98], [0.2, 0.98]]
+        app.sidewalk.roi = lain
+        page.click("#zAuto")                                                         # minta ulang secara manual
+        page.wait_for_function("document.querySelector('#zAuto') && !document.querySelector('#zAuto').disabled")
+        page.click("text=Mulai pantau")
+        cam = only_cam(api, page)
+        api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["roi"] == lain, 10, "zona usulan harus tersimpan")
+        page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
+    finally:
+        app.sidewalk.roi = FakeSegmenter().roi
+
+
+def test_trotoar_tak_terlihat_dijelaskan_dan_zona_tetap_bisa_digambar_sendiri(server, api, page):
+    app = server[0]
+    app.sidewalk.roi = None
+    page.add_init_script(SCENE)
+    try:
+        page.goto(page.base)
+        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
+        page.wait_for_selector("#zAuto")
+        page.wait_for_timeout(1500)
+        page.click("#zAuto")
+        page.wait_for_selector("#hint:has-text('Trotoar tidak terlihat')", timeout=15000)
+        page.click("text=Mulai pantau")                                              # zona bawaan penyunting masih bisa disimpan
+        page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
+    finally:
+        app.sidewalk.roi = FakeSegmenter().roi
+
+
+def test_tanpa_model_trotoar_tombol_usulan_tidak_ditampilkan(server, api, page):
+    app = server[0]
+    seg, app.sidewalk, app.cams.sidewalk = app.sidewalk, None, None
+    page.add_init_script(SCENE)
+    try:
+        page.goto(page.base)
+        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
+        assert page.locator("#zAuto").count() == 0
+        page.click("#nav a[href='#/setelan']")
+        page.wait_for_selector("#sModel")
+        assert "models/trotoar.pt" in page.inner_text("main, #view, body")
+    finally:
+        app.sidewalk = app.cams.sidewalk = seg
+
+
+def test_model_yang_gagal_dimuat_dijelaskan_dan_tombol_muat_ulang_memulihkannya(server, api, page):
+    det = server[0].detector
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    det.state, det.message = "galat", "Paket ultralytics belum terpasang. Jalankan: pip install ultralytics"
+    page.wait_for_selector("#vf[data-st='model_galat']", timeout=15000)
+    assert "pip install ultralytics" in page.inner_text("#banner")
+    assert page.locator("#conn[data-st='model_galat']").count() == 1
+    page.click("#retryModel")                                                         # server mencoba memuat lagi
+    page.wait_for_selector("#vf[data-st='memantau']", timeout=20000)
+    assert det.retried >= 1 and page.locator("#retryModel").count() == 0
+
+
+def test_model_yang_sedang_dimuat_ditampilkan_sebagai_status_bukan_galat(server, api, page):
+    det = server[0].detector
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    det.state, det.message = "memuat", "Memuat model YOLO"
+    try:
+        page.wait_for_selector("#vf[data-st='memuat']", timeout=15000)
+        assert "diunduh sekali" in page.inner_text("#banner")
+    finally:
+        det.state, det.message = "siap", ""
+    page.wait_for_selector("#vf[data-st='memantau']", timeout=20000)
 
 
 # ===================================================================== kamera tidak tersedia
@@ -281,7 +366,8 @@ def test_nama_perangkat_tampil_sebagai_teks_bukan_html(server, api, page):
 def test_https_dengan_kunci_kamera_perangkat_mengirim_lewat_tls(tmp_path, browser):
     pytest.importorskip("cryptography")
     token = "kunci-uji-https"
-    srv, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token=token, https=True, hosts=["127.0.0.1"])
+    srv, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token=token, https=True, hosts=["127.0.0.1"],
+                           detector=ColorDetector())
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"https://127.0.0.1:{app.port}/"
     ctx = browser.new_context(**MOBILE, ignore_https_errors=True)     # setara menekan Lanjutkan pada peringatan sertifikat

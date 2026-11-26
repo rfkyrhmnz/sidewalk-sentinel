@@ -2,8 +2,8 @@
 
 Laptop memakai kamera laptop, HP memakai kamera HP. Tidak ada sumber lain: tidak ada alamat IP, RTSP, berkas video,
 atau adegan contoh. Halaman web mengambil gambar dari kamera perangkatnya sendiri, mengirimnya ke server sekitar lima kali
-per detik, dan server memantaunya secara langsung: belajar latar otomatis (lihat monitor.py), mendeteksi, lalu mencatat
-kejadian ke disk. Satu perangkat punya satu "kamera" di server; perangkat dikenali dari kunci acak yang disimpan di
+per detik, dan server memantaunya secara langsung: YOLO mengenali kendaraan, aturan zona memutuskan parkir atau naik
+trotoar, lalu kejadian dicatat ke disk. Satu perangkat punya satu "kamera" di server; perangkat dikenali dari kunci acak yang disimpan di
 peramban, sehingga membuka aplikasi lagi melanjutkan kamera yang sama beserta area trotoar dan riwayatnya.
 """
 from __future__ import annotations
@@ -25,7 +25,8 @@ import cv2
 import numpy as np
 
 from .config import Config
-from .monitor import LEARN, Monitor
+from .detector import DetectorUnavailable, SidewalkSegmenter, VehicleDetector
+from .engine import Engine
 from .report import compute_report
 from .store import DurationTracker, EventStore, now
 from .util import check_roi, new_id, valid_id
@@ -33,7 +34,7 @@ from .util import check_roi, new_id, valid_id
 log = logging.getLogger("sidewalk")
 
 MAX_CAMERAS = 8
-STATUS = ("perlu_area", "menunggu", "belajar", "memantau", "jeda")
+STATUS = ("perlu_area", "menunggu", "memuat", "model_galat", "memantau", "jeda")
 DEVICE_KEY = re.compile(r"[0-9a-f]{16,64}")
 MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
 _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
@@ -103,6 +104,11 @@ class PushCapture:
     def retrieve(self) -> np.ndarray | None:
         return self._cur
 
+    def latest(self) -> np.ndarray | None:
+        """Salinan frame terbaru yang diterima (untuk usulan zona), atau None bila belum ada."""
+        with self._cond:
+            return None if self._frame is None else self._frame.copy()
+
 
 # ===================================================================== spesifikasi
 @dataclass
@@ -112,7 +118,6 @@ class CameraSpec:
     name: str
     roi: list | None = None
     settings: dict = field(default_factory=dict)
-    learn: str = "normal"
     enabled: bool = True
     created: str = ""
 
@@ -146,10 +151,6 @@ def apply_changes(spec: CameraSpec, data: dict) -> CameraSpec:
             raise ValueError("settings harus berupa objek")
         Config.from_overrides(overrides)            # menolak kunci tak dikenal / nilai di luar batas
         new.settings = dict(overrides)
-    if "learn" in data:
-        if data["learn"] not in LEARN:
-            raise ValueError(f"learn harus salah satu dari {sorted(LEARN)}")
-        new.learn = data["learn"]
     if "enabled" in data:
         new.enabled = bool(data["enabled"])
     return new
@@ -171,22 +172,21 @@ def _ascii(text: str, limit: int = 24) -> str:
 class Camera:
     """Satu kamera perangkat: utas yang menerima frame, memantau, dan mencatat kejadian."""
 
-    def __init__(self, spec: CameraSpec, root: Path):
+    def __init__(self, spec: CameraSpec, root: Path, detector, sidewalk: SidewalkSegmenter | None = None):
         self.spec = spec
+        self.detector, self.sidewalk = detector, sidewalk
         self.dir = root / spec.id
         self.events = EventStore(self.dir)
         self._durations = DurationTracker(self.events)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._flags = {"reconf": False, "recal": False}
+        self._flags = {"reconf": False}
         self._thread: threading.Thread | None = None
         self.channel = PushCapture()
         self.removed = False
         # status publik
         self.status, self.message = "menunggu", "Menunggu gambar dari perangkat"
-        self.learn = (0, 0)
-        self.relearns = 0
         self.fps = 0.0
         self.size: tuple[int, int] | None = None
         self.connected_since: float | None = None
@@ -207,16 +207,11 @@ class Camera:
             self._thread.join(timeout=2)
 
     def reconfigure(self, spec: CameraSpec, restart: bool = True) -> None:
-        """Terapkan spesifikasi baru. `restart` = bangun ulang pemantau (belajar latar dari awal)."""
+        """Terapkan spesifikasi baru. `restart` = bangun ulang mesin (jejak kendaraan dimulai dari awal)."""
         with self._lock:
             self.spec = spec
             if restart:
                 self._flags["reconf"] = True
-        self._wake.set()
-
-    def recalibrate(self) -> None:
-        with self._lock:
-            self._flags["recal"] = True
         self._wake.set()
 
     def _take(self, name: str) -> bool:
@@ -247,9 +242,25 @@ class Camera:
     def live_state(self) -> dict:
         with self._lock:
             return {"status": self.status, "message": self.message, "enabled": self.spec.enabled,
-                    "learn_progress": {"have": self.learn[0], "need": self.learn[1]},
+                    "detector": self._detector_status(),
                     "tracks": list(self._tracks), "seq": self.events.seq,
                     "counts_today": self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))}
+
+    def _detector_status(self) -> dict:
+        st = self.detector.status()
+        return {"state": st["state"], "message": st["message"]}
+
+    def propose_zone(self) -> dict:
+        """Usulan poligon trotoar dari gambar terbaru perangkat. ValueError bila belum ada gambar,
+        DetectorUnavailable bila model trotoar tidak ada. `roi` None bila trotoar tidak terlihat."""
+        frame = self.channel.latest()
+        if frame is None:
+            raise ValueError("Belum ada gambar dari perangkat ini")
+        if self.sidewalk is None or not self.sidewalk.available:
+            raise DetectorUnavailable("Model trotoar tidak ditemukan. Tandai zona secara manual.")
+        out = self.sidewalk.propose(frame)
+        return out or {"roi": None, "coverage": 0.0,
+                       "message": "Trotoar tidak terlihat jelas di gambar ini. Tandai zona secara manual."}
 
     def info(self) -> dict:
         counts = self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))
@@ -257,11 +268,10 @@ class Camera:
             spec = self.spec
             last = self.events.records[-1] if self.events.records else None
             return {
-                "id": spec.id, "name": spec.name, "roi": spec.roi, "settings": spec.settings, "learn": spec.learn,
+                "id": spec.id, "name": spec.name, "roi": spec.roi, "settings": spec.settings,
                 "enabled": spec.enabled, "created": spec.created,
-                "status": self.status, "message": self.message,
-                "learn_progress": {"have": self.learn[0], "need": self.learn[1]},
-                "relearns": self.relearns, "fps": round(self.fps, 1), "size": list(self.size) if self.size else None,
+                "status": self.status, "message": self.message, "detector": self._detector_status(),
+                "fps": round(self.fps, 1), "size": list(self.size) if self.size else None,
                 "uptime_s": round(time.time() - self.connected_since) if self.connected_since else None,
                 "counts_today": counts, "seq": self.events.seq,
                 "last_event": ({"no": last["no"], "kind": last["kind"], "ts": last["ts"]} if last else None),
@@ -281,17 +291,16 @@ class Camera:
             self._wake.clear()
 
     def _session(self) -> str:
-        """Satu rangkaian pemantauan dengan satu Monitor. Berakhir saat konfigurasi berubah atau dijeda."""
+        """Satu rangkaian pemantauan dengan satu Engine. Berakhir saat konfigurasi berubah atau dijeda."""
         spec = self.spec
-        self._take("reconf")                              # pemantau baru ini sudah memakai spesifikasi terbaru
-        self._take("recal")
+        self._take("reconf")                              # mesin baru ini sudah memakai spesifikasi terbaru
         try:
             cfg = Config.from_overrides(spec.settings)
         except ValueError:
             log.warning("perangkat %s: pengaturan tersimpan tidak valid; memakai bawaan", spec.name)
             cfg = Config()
         try:
-            return self._loop(self._build_monitor(spec, cfg), cfg)
+            return self._loop(self._build_engine(spec, cfg), cfg)
         except Exception:               # noqa: BLE001
             log.exception("perangkat %s: pemantauan berhenti karena galat", spec.name)
             self._set("menunggu", "Galat internal; memulai ulang")
@@ -300,35 +309,32 @@ class Camera:
         finally:
             self._durations.finish_all()                 # sesi berakhir (jeda, ubah area, hapus): tutup yang masih terbuka
 
-    def _build_monitor(self, spec: CameraSpec, cfg: Config) -> Monitor | None:
+    def _build_engine(self, spec: CameraSpec, cfg: Config) -> Engine | None:
         if not spec.roi:
             return None
-        mon = Monitor(spec.roi, cfg, spec.learn)
-        mon.engine.header_fn = lambda t: (f"{_ascii(self.spec.name)}  {datetime.now():%Y-%m-%d %H:%M:%S}  "
-                                          f"P:{mon.counts['parkir']} N:{mon.counts['naik_trotoar']}")
-        return mon
+        eng = Engine(spec.roi, self.detector, cfg)
+        eng.header_fn = lambda t: (f"{_ascii(self.spec.name)}  {datetime.now():%Y-%m-%d %H:%M:%S}  "
+                                   f"P:{eng.counts['parkir']} N:{eng.counts['naik_trotoar']}")
+        return eng
 
-    def _loop(self, monitor: Monitor | None, cfg: Config) -> str:
+    def _loop(self, engine: Engine | None, cfg: Config) -> str:
         cap = self.channel
         wall0 = time.monotonic()
         last_proc = -1e9
         got = False
         errors = 0
-        self.learn, self.relearns = (0, 0), 0
         self._tracks = []
-        self._set("perlu_area" if monitor is None else "menunggu",
-                  "Tandai area trotoar untuk mulai memantau" if monitor is None else "Menunggu gambar dari perangkat")
+        self._set("perlu_area" if engine is None else "menunggu",
+                  "Tandai area trotoar untuk mulai memantau" if engine is None else "Menunggu gambar dari perangkat")
 
         while True:
             if self._stop.is_set():
                 return "stop"
             if not self.spec.enabled or self._take("reconf"):
                 return "ulang"
-            if self._take("recal") and monitor is not None:
-                monitor.recalibrate("diminta pengguna")
             if not cap.grab():
-                # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu, JANGAN buang latar yang sudah
-                # dipelajari. Bila perangkat kembali, pemantauan lanjut dari sana.
+                # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu. Bila perangkat kembali,
+                # pemantauan lanjut dari sana.
                 if got and time.monotonic() - cap.last_push > 3.0:
                     got = False
                     self.connected_since = None
@@ -345,15 +351,21 @@ class Camera:
             if not got:
                 got = True
                 self.connected_since = time.time()
-                if monitor is not None and monitor.state == "memantau":
-                    monitor.engine.tracker.reset()        # setelah jeda panjang, jejak lama tidak berlaku
+                if engine is not None:
+                    engine.reset()                        # setelah jeda panjang, jejak lama tidak berlaku
             self._note_frame(frame)
 
-            if monitor is None:
+            if engine is None:
                 self._set("perlu_area", "Tandai area trotoar untuk mulai memantau")
                 continue
+            st = self.detector.status()
+            if st["state"] != "siap":                     # model belum dimuat, atau gagal dimuat
+                with self._lock:
+                    self._tracks = []
+                self._set("model_galat" if st["state"] == "galat" else "memuat", st["message"] or "Memuat model YOLO")
+                continue
             try:
-                report = monitor.feed(frame, now_m - wall0)
+                result = engine.process(frame, now_m - wall0)
                 errors = 0
             except Exception:           # noqa: BLE001 - satu frame buruk tidak boleh mematikan pemantauan
                 errors += 1
@@ -362,7 +374,7 @@ class Camera:
                     self._set("menunggu", "Terlalu banyak galat saat memproses frame; memulai ulang")
                     return "ulang"
                 continue
-            self._apply(report, monitor)
+            self._apply(result, engine)
 
     def _note_frame(self, frame: np.ndarray) -> None:
         t = time.monotonic()
@@ -373,32 +385,25 @@ class Camera:
                 self.fps = inst if self.fps == 0 else 0.9 * self.fps + 0.1 * inst
             self._last_proc = t
 
-    def _apply(self, rep, monitor: Monitor) -> None:
-        with self._lock:
-            self.learn, self.relearns = rep.learn, monitor.relearns
-        if rep.state == "belajar":
-            self._durations.finish_all()                 # pelacak direset saat belajar ulang
-            have, need = rep.learn
-            with self._lock:
-                self._tracks = []
-            self._set("belajar", f"Mempelajari latar {have} dari {need}" + (f" ({rep.note})" if rep.note else ""))
-            return
+    def _apply(self, res, engine: Engine) -> None:
         self._set("memantau", "")
-        W, H = monitor.engine.size if rep.processed else (1, 1)
+        W, H = engine.size
         with self._lock:
             self._tracks = [{"id": v["id"], "box": [v["bbox"][0] / W, v["bbox"][1] / H, v["bbox"][2] / W, v["bbox"][3] / H],
-                             "state": v["state"], "dwell": round(v["dwell"], 1)} for v in rep.tracks] if rep.processed else []
-        for ev in rep.events:
+                             "state": v["state"], "dwell": round(v["dwell"], 1), "label": v["label"]} for v in res.tracks]
+        for ev in res.events:
             rec = self.events.append(ev.as_dict(), ev.snapshot)
             self._durations.begin(ev.track_id, ev.kind, rec["no"], ev.t_start, ev.t)
             log.info("perangkat %s: %s (kejadian #%d)", self.spec.name, ev.kind, rec["no"])
-        if rep.processed:
-            self._durations.update({v["id"] for v in rep.tracks if v["in_roi"]}, monitor.engine.last["t"])
+        self._durations.update({v["id"] for v in res.tracks if v["in_roi"]}, res.t)
 
 
 # ====================================================================== manajer
 class CameraManager:
-    def __init__(self, data_root: str | Path, retention_days: int = 30, max_events: int = 5000):
+    def __init__(self, data_root: str | Path, retention_days: int = 30, max_events: int = 5000,
+                 detector=None, sidewalk: SidewalkSegmenter | None = None):
+        self.detector = detector if detector is not None else VehicleDetector()
+        self.sidewalk = sidewalk
         self.root = Path(data_root) / "devices"
         self.root.mkdir(parents=True, exist_ok=True)
         self.file = Path(data_root) / "devices.json"
@@ -409,6 +414,9 @@ class CameraManager:
 
     # ------------------------------------------------------------------- mulai
     def start(self) -> None:
+        loader = getattr(self.detector, "start_loading", None)
+        if loader is not None:
+            loader()                                      # model dimuat di latar; kamera menampilkan "memuat" sampai siap
         if self.file.exists():
             try:
                 items = json.loads(self.file.read_text(encoding="utf-8"))
@@ -420,7 +428,7 @@ class CameraManager:
                     spec = CameraSpec.from_dict(item)
                 except (TypeError, ValueError, AttributeError):
                     continue
-                cam = Camera(spec, self.root)
+                cam = Camera(spec, self.root, self.detector, self.sidewalk)
                 self._cams[spec.id] = cam
                 cam.start()
         threading.Thread(target=self._janitor, name="cam-janitor", daemon=True).start()
@@ -487,7 +495,7 @@ class CameraManager:
                 n += 1
                 final = f"{base[:36]} {n}"
             spec = CameraSpec(id=new_id(), device=key, name=final, created=now().isoformat(timespec="seconds"))
-            cam = Camera(spec, self.root)
+            cam = Camera(spec, self.root, self.detector, self.sidewalk)
             self._cams[spec.id] = cam
             self._save()
         cam.start()
@@ -503,7 +511,7 @@ class CameraManager:
                 raise ValueError("sudah ada perangkat dengan nama itu")
             old, new = asdict(cam.spec), asdict(spec)
             if new != old:
-                light = {"name", "enabled"}               # tidak perlu belajar latar ulang
+                light = {"name", "enabled"}               # tidak perlu membangun ulang mesin
                 cam.reconfigure(spec, restart=any(new[k] != old[k] for k in new if k not in light))
                 self._save()
             return cam
