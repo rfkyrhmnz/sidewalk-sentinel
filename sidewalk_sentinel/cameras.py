@@ -27,6 +27,7 @@ import numpy as np
 from .config import Config
 from .detector import DetectorUnavailable, SidewalkSegmenter, VehicleDetector
 from .engine import Engine
+from .zone import AutoZone
 from .report import compute_report
 from .store import DurationTracker, EventStore, now
 from .util import check_roi, new_id, valid_id
@@ -34,7 +35,7 @@ from .util import check_roi, new_id, valid_id
 log = logging.getLogger("sidewalk")
 
 MAX_CAMERAS = 8
-STATUS = ("perlu_area", "menunggu", "memuat", "model_galat", "memantau", "jeda")
+STATUS = ("perlu_area", "mencari_trotoar", "menunggu", "memuat", "model_galat", "memantau", "jeda")
 DEVICE_KEY = re.compile(r"[0-9a-f]{16,64}")
 MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
 _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
@@ -188,6 +189,7 @@ class Camera:
         # status publik
         self.status, self.message = "menunggu", "Menunggu gambar dari perangkat"
         self.fps = 0.0
+        self._auto_roi: list | None = None          # zona otomatis terkini (hanya di memori; dihitung ulang tiap sesi)
         self.size: tuple[int, int] | None = None
         self.connected_since: float | None = None
         self._last_proc: float | None = None
@@ -242,9 +244,20 @@ class Camera:
     def live_state(self) -> dict:
         with self._lock:
             return {"status": self.status, "message": self.message, "enabled": self.spec.enabled,
+                    "roi": self._effective_roi(), "zone": self._zone_mode(),
                     "detector": self._detector_status(),
                     "tracks": list(self._tracks), "seq": self.events.seq,
                     "counts_today": self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))}
+
+    def _auto_available(self) -> bool:
+        return self.sidewalk is not None and self.sidewalk.available
+
+    def _zone_mode(self) -> str:
+        """'manual' bila pengguna menggambar zona, selain itu 'auto' (zona dicari model trotoar)."""
+        return "manual" if self.spec.roi else "auto"
+
+    def _effective_roi(self):
+        return self.spec.roi if self.spec.roi else self._auto_roi
 
     def _detector_status(self) -> dict:
         st = self.detector.status()
@@ -268,7 +281,8 @@ class Camera:
             spec = self.spec
             last = self.events.records[-1] if self.events.records else None
             return {
-                "id": spec.id, "name": spec.name, "roi": spec.roi, "settings": spec.settings,
+                "id": spec.id, "name": spec.name, "roi": self._effective_roi(), "zone": self._zone_mode(),
+                "auto_available": self._auto_available(), "settings": spec.settings,
                 "enabled": spec.enabled, "created": spec.created,
                 "status": self.status, "message": self.message, "detector": self._detector_status(),
                 "fps": round(self.fps, 1), "size": list(self.size) if self.size else None,
@@ -300,7 +314,7 @@ class Camera:
             log.warning("perangkat %s: pengaturan tersimpan tidak valid; memakai bawaan", spec.name)
             cfg = Config()
         try:
-            return self._loop(self._build_engine(spec, cfg), cfg)
+            return self._loop(spec, cfg)
         except Exception:               # noqa: BLE001
             log.exception("perangkat %s: pemantauan berhenti karena galat", spec.name)
             self._set("menunggu", "Galat internal; memulai ulang")
@@ -309,23 +323,23 @@ class Camera:
         finally:
             self._durations.finish_all()                 # sesi berakhir (jeda, ubah area, hapus): tutup yang masih terbuka
 
-    def _build_engine(self, spec: CameraSpec, cfg: Config) -> Engine | None:
-        if not spec.roi:
-            return None
-        eng = Engine(spec.roi, self.detector, cfg)
+    def _make_engine(self, roi, cfg: Config) -> Engine:
+        eng = Engine(roi, self.detector, cfg)
         eng.header_fn = lambda t: (f"{_ascii(self.spec.name)}  {datetime.now():%Y-%m-%d %H:%M:%S}  "
                                    f"P:{eng.counts['parkir']} N:{eng.counts['naik_trotoar']}")
         return eng
 
-    def _loop(self, engine: Engine | None, cfg: Config) -> str:
+    def _loop(self, spec: CameraSpec, cfg: Config) -> str:
         cap = self.channel
         wall0 = time.monotonic()
         last_proc = -1e9
         got = False
         errors = 0
         self._tracks = []
-        self._set("perlu_area" if engine is None else "menunggu",
-                  "Tandai area trotoar untuk mulai memantau" if engine is None else "Menunggu gambar dari perangkat")
+        self._auto_roi = None
+        engine = self._make_engine(spec.roi, cfg) if spec.roi else None          # zona manual
+        auto = AutoZone(self.sidewalk) if engine is None and self._auto_available() else None
+        self._set("menunggu", "Menunggu gambar dari perangkat")
 
         while True:
             if self._stop.is_set():
@@ -355,14 +369,40 @@ class Camera:
                     engine.reset()                        # setelah jeda panjang, jejak lama tidak berlaku
             self._note_frame(frame)
 
-            if engine is None:
-                self._set("perlu_area", "Tandai area trotoar untuk mulai memantau")
-                continue
             st = self.detector.status()
             if st["state"] != "siap":                     # model belum dimuat, atau gagal dimuat
                 with self._lock:
                     self._tracks = []
                 self._set("model_galat" if st["state"] == "galat" else "memuat", st["message"] or "Memuat model YOLO")
+                continue
+
+            if auto is not None:                          # zona otomatis: dicari dan diperbarui sendiri
+                busy = engine is not None and any(v["in_roi"] for v in engine.last.get("tracks", ()))
+                if not busy and auto.due(now_m):          # kendaraan di zona menutupi trotoar: jangan ubah zona saat itu
+                    try:
+                        changed, roi = auto.update(frame, now_m)
+                    except Exception as e:                # noqa: BLE001 - model trotoar rusak: berhenti mencoba di sesi ini
+                        log.warning("perangkat %s: zona otomatis dimatikan: %s", self.spec.name, e)
+                        auto = None
+                        self._set("perlu_area", "Model trotoar tidak bisa dipakai. Tandai zona secara manual.")
+                        continue
+                    if changed:
+                        with self._lock:
+                            self._auto_roi = roi
+                        if roi is None:                   # trotoar hilang dari gambar (kamera berpaling)
+                            self._durations.finish_all()
+                            engine = None
+                        elif engine is None:
+                            engine = self._make_engine(roi, cfg)
+                        else:
+                            engine.set_roi(roi)
+            if engine is None:
+                with self._lock:
+                    self._tracks = []
+                if auto is None:
+                    self._set("perlu_area", "Tandai area trotoar untuk mulai memantau")
+                else:
+                    self._set("mencari_trotoar", "Arahkan kamera ke trotoar. Zona dibuat otomatis.")
                 continue
             try:
                 result = engine.process(frame, now_m - wall0)

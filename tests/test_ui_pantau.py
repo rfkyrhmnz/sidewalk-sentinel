@@ -2,8 +2,8 @@
 
 Yang dijaga:
 - aplikasi dibuka -> kamera perangkat ini menyala dan terhubung tanpa tombol mulai, tanpa demo, tanpa pilihan sumber;
-- alur utama: tandai zona (diusulkan otomatis dari model trotoar, bisa diperbaiki) -> kendaraan parkir terdeteksi langsung ->
-  pemberitahuan -> Laporan memuat lamanya;
+- alur utama: zona trotoar ditemukan sendiri oleh model (tanpa menandai apa pun) -> kendaraan parkir terdeteksi langsung ->
+  pemberitahuan -> Laporan memuat lamanya; zona manual hanya pilihan tambahan dan bisa kembali ke otomatis;
 - kejadian lama tidak diumumkan ulang saat halaman dibuka, dan muat ulang melanjutkan pemantauan;
 - model kendaraan yang sedang dimuat atau gagal dimuat dijelaskan dengan tombol muat ulang;
 - izin kamera ditolak, konteks tidak aman, dan kamera yang dipakai tab lain dijelaskan, bukan diam;
@@ -117,9 +117,7 @@ def start_monitoring(page, api, park_seconds=2):
     """Dari halaman baru sampai status memantau, tanpa menyentuh server selain lewat UI dan API publik."""
     page.goto(page.base)
     page.wait_for_selector("#vf video", timeout=15000)
-    page.wait_for_selector("#vf[data-st='edit']", timeout=15000)       # belum ada zona: langsung masuk mode tandai
-    cam = only_cam(api, page)
-    page.click("text=Mulai pantau")
+    cam = only_cam(api, page)                                          # zona dicari model sendiri: tidak ada langkah menandai
     assert api.req("POST", f"/api/cams/{cam['id']}", {"settings": {"park_seconds": park_seconds}})[0] == 200
     page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
     return cam
@@ -131,7 +129,7 @@ def test_dibuka_langsung_menyalakan_kamera_tanpa_pilihan_sumber(server, api, pag
     page.goto(server[1])
     page.wait_for_selector("#vf video", timeout=15000)                # kamera menyala sendiri
     cam = only_cam(api, page)
-    assert cam["name"] and api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["status"] in ("perlu_area", "menunggu"), 10)
+    assert cam["name"] and api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["status"] in ("menunggu", "mencari_trotoar", "memantau"), 10)
     text = page.inner_text("body").lower()
     for bad in ("demo", "rtsp", "unggah", "upload", "url", "alamat kamera", "tambah kamera", "tahapan", "materi", "analisis"):
         assert bad not in text, f"sisa fitur lama di layar: {bad}"
@@ -212,63 +210,87 @@ def test_setelan_menyimpan_dan_menghapus_dengan_dua_ketukan(server, api, page):
     saved = api.req("GET", f"/api/cams/{cam['id']}")[1]["settings"]
     assert set(saved) == {"park_seconds", "conf", "min_box_frac"} and saved["conf"] == 0.30, saved
     assert page.locator("#sPed").count() == 0, "pengaturan pejalan kaki dari metode lama sudah dihapus"
+    assert "dicari otomatis" in page.inner_text("#sZoneText"), "Setelan menjelaskan zona otomatis"
 
     page.click("#sDel")                                               # ketukan pertama hanya meminta konfirmasi
     assert "Ketuk lagi" in page.inner_text("#sDel")
     assert api.req("GET", f"/api/cams/{cam['id']}")[0] == 200
     page.click("#sDel")
     api.wait(lambda: [c["id"] for c in cams(api)] not in ([cam["id"]], []), 15, "perangkat tidak mulai dari awal")   # data lama hilang, perangkat mendaftar ulang
-    page.wait_for_selector("#vf[data-st='edit']", timeout=20000)      # perangkat mendaftar ulang dan mulai dari awal
+    page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)   # perangkat mendaftar ulang dan menemukan zona lagi
 
 
 # ===================================================================== zona dan model
-def test_zona_diusulkan_otomatis_dari_model_trotoar_lalu_bisa_diminta_ulang_dan_disimpan(server, api, page):
+def test_zona_ditemukan_sendiri_tanpa_menandai_apa_pun(server, api, page):
     app = server[0]
-    usulan = [[0.1, 0.7], [0.9, 0.7], [0.9, 0.97], [0.1, 0.97]]
-    app.sidewalk.roi = usulan
+    page.add_init_script(SCENE)
+    page.goto(page.base)
+    page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)                # langsung memantau, tanpa tombol mulai
+    assert page.locator("#vf[data-st='edit']").count() == 0 and page.locator("text=Mulai pantau").count() == 0
+    assert page.locator("#zSave, #zAuto").count() == 0, "penyunting zona tidak muncul dengan sendirinya"
+    chip = page.locator("#zoneChip")
+    chip.wait_for(state="visible")
+    assert chip.inner_text() == "Zona otomatis" and chip.get_attribute("data-zone") == "auto"
+    cam = only_cam(api, page)
+    info = api.req("GET", f"/api/cams/{cam['id']}")[1]
+    assert info["zone"] == "auto" and info["auto_available"] is True and len(info["roi"]) >= 3
+    assert page.locator("#zoneBtn").inner_text().strip() == "Zona manual"
+
+
+def test_zona_manual_menggantikan_otomatis_lalu_kembali_ke_otomatis(server, api, page):
+    app = server[0]
+    lain = [[0.2, 0.75], [0.8, 0.75], [0.8, 0.98], [0.2, 0.98]]
+    page.add_init_script(SCENE)
+    cam = start_monitoring(page, api)
+    cid = cam["id"]
+    app.sidewalk.roi, awal = lain, app.sidewalk.roi
+    try:
+        page.click("#zoneBtn")                                                        # pilihan tambahan: gambar zona sendiri
+        page.wait_for_selector("#vf[data-st='edit']")
+        assert page.locator("#zAuto").count() == 1 and page.locator("#zBack").count() == 0, "belum manual: belum ada jalan kembali"
+        page.click("#zAuto")                                                          # usulan model sebagai titik awal
+        page.wait_for_selector("#hint:has-text('Usulan dari model')", timeout=20000)
+        page.click("#zSave")
+        api.wait(lambda: api.req("GET", f"/api/cams/{cid}")[1]["zone"] == "manual", 10, "zona manual harus tersimpan")
+        assert api.req("GET", f"/api/cams/{cid}")[1]["roi"] == lain
+        page.wait_for_selector("#zoneChip:has-text('Zona manual')")
+        page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
+
+        page.click("#zoneBtn")
+        page.click("#zBack")                                                          # kembali ke zona otomatis
+        api.wait(lambda: api.req("GET", f"/api/cams/{cid}")[1]["zone"] == "auto", 10, "harus kembali ke otomatis")
+        page.wait_for_selector("#zoneChip:has-text('Zona otomatis')", timeout=20000)
+        assert page.locator("#vf[data-st='edit']").count() == 0
+    finally:
+        app.sidewalk.roi = awal
+
+
+def test_trotoar_tak_terlihat_berstatus_mencari_dan_zona_manual_tetap_bisa(server, api, page):
+    app = server[0]
+    app.sidewalk.roi, awal = None, app.sidewalk.roi
     page.add_init_script(SCENE)
     try:
         page.goto(page.base)
-        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
-        page.wait_for_selector("#hint:has-text('Zona diusulkan')", timeout=20000)    # otomatis, tanpa menyentuh apa pun
-        assert page.locator("#zAuto").count() == 1
-
-        lain = [[0.2, 0.75], [0.8, 0.75], [0.8, 0.98], [0.2, 0.98]]
-        app.sidewalk.roi = lain
-        page.click("#zAuto")                                                         # minta ulang secara manual
-        page.wait_for_function("document.querySelector('#zAuto') && !document.querySelector('#zAuto').disabled")
-        page.click("text=Mulai pantau")
-        cam = only_cam(api, page)
-        api.wait(lambda: api.req("GET", f"/api/cams/{cam['id']}")[1]["roi"] == lain, 10, "zona usulan harus tersimpan")
+        page.wait_for_selector("#vf[data-st='mencari_trotoar']", timeout=20000)
+        assert page.locator("#conn[data-st='mencari_trotoar']").count() == 1
+        assert "Arahkan kamera ke trotoar" in page.inner_text("#banner") and page.locator("#vf[data-st='edit']").count() == 0
+        assert page.evaluate("document.documentElement.dataset.state") == "mencari_trotoar", "cahaya latar mengikuti status"
+        page.click("#zoneBtn")                                                        # zona bawaan penyunting bisa disimpan
+        page.wait_for_selector("#vf[data-st='edit']")
+        page.click("#zSave")
         page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
+        assert api.req("GET", f"/api/cams/{only_cam(api, page)['id']}")[1]["zone"] == "manual"
     finally:
-        app.sidewalk.roi = FakeSegmenter().roi
+        app.sidewalk.roi = awal
 
 
-def test_trotoar_tak_terlihat_dijelaskan_dan_zona_tetap_bisa_digambar_sendiri(server, api, page):
-    app = server[0]
-    app.sidewalk.roi = None
-    page.add_init_script(SCENE)
-    try:
-        page.goto(page.base)
-        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
-        page.wait_for_selector("#zAuto")
-        page.wait_for_timeout(1500)
-        page.click("#zAuto")
-        page.wait_for_selector("#hint:has-text('Trotoar tidak terlihat')", timeout=15000)
-        page.click("text=Mulai pantau")                                              # zona bawaan penyunting masih bisa disimpan
-        page.wait_for_selector("#conn[data-st='memantau']", timeout=30000)
-    finally:
-        app.sidewalk.roi = FakeSegmenter().roi
-
-
-def test_tanpa_model_trotoar_tombol_usulan_tidak_ditampilkan(server, api, page):
+def test_tanpa_model_trotoar_meminta_zona_manual_dan_tombol_usulan_tidak_ditampilkan(server, api, page):
     app = server[0]
     seg, app.sidewalk, app.cams.sidewalk = app.sidewalk, None, None
     page.add_init_script(SCENE)
     try:
         page.goto(page.base)
-        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)
+        page.wait_for_selector("#vf[data-st='edit']", timeout=15000)                  # tanpa model, satu-satunya jalan adalah menandai
         assert page.locator("#zAuto").count() == 0
         page.click("#nav a[href='#/setelan']")
         page.wait_for_selector("#sModel")
@@ -541,7 +563,7 @@ def test_desktop_menu_di_sisi_kiri(server, browser):
         pg.goto(server[1] + "#/laporan")
         pg.wait_for_selector("#nav a")
         boxes = [a.bounding_box() for a in pg.locator("#nav a").all()]
-        assert len({round(b["x"]) for b in boxes}) == 1 and boxes[0]["x"] < 20
+        assert len({round(b["x"]) for b in boxes}) == 1 and boxes[0]["x"] < 60
         assert [round(b["y"]) for b in boxes] == sorted(round(b["y"]) for b in boxes)
     finally:
         ctx.close()
