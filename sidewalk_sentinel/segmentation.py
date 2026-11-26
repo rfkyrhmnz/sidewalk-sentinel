@@ -1,4 +1,4 @@
-"""Segmentasi objek terhadap citra referensi (Materi 4) dengan penyaring bayangan (Materi 6).
+"""Segmentasi objek terhadap citra referensi dengan penyaring bayangan.
 
 Dasar teori: pengurangan citra referensi (reference image subtraction) + ambang global Otsu.
 Dua mekanisme yang sengaja dipisah:

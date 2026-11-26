@@ -1,4 +1,4 @@
-"""Representasi dan deskripsi objek (Materi 5).
+"""Representasi dan deskripsi objek.
 
 Tiap komponen terhubung pada mask diwakili oleh kontur (batas), lalu dideskripsikan dengan
 deskriptor bentuk: luas, keliling, centroid, bounding box, rasio aspek, extent, solidity,

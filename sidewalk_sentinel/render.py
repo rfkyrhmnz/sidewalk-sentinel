@@ -1,4 +1,4 @@
-"""Penggambaran anotasi bergaya HUD dan montase tahapan pipeline (hanya ASCII: font Hershey)."""
+"""Penggambaran anotasi bergaya HUD untuk foto bukti (hanya ASCII: font Hershey)."""
 from __future__ import annotations
 
 import cv2
@@ -78,22 +78,3 @@ def annotate(frame, roi_px, tracks, t, counts, park_seconds, header=None):
     put_text(out, header or f"SIDEWALK SENTINEL  T+{t:06.1f}s  PARKIR:{counts['parkir']}  NAIK:{counts['naik_trotoar']}",
              (8, 18), CYAN, 0.45)
     return out
-
-
-def _tile(img, label, size):
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    tile = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
-    put_text(tile, label, (6, size[1] - 8), CYAN, 0.42)
-    cv2.rectangle(tile, (0, 0), (size[0] - 1, size[1] - 1), (70, 60, 40), 1)
-    return tile
-
-
-def montage(panels: list[tuple[str, np.ndarray]], cols: int = 3, tile_w: int = 320) -> np.ndarray:
-    h, w = panels[0][1].shape[:2]
-    size = (tile_w, max(1, round(tile_w * h / w)))
-    tiles = [_tile(img, label, size) for label, img in panels]
-    while len(tiles) % cols:
-        tiles.append(np.zeros_like(tiles[0]))
-    rows = [np.hstack(tiles[i:i + cols]) for i in range(0, len(tiles), cols)]
-    return np.vstack(rows)

@@ -1,15 +1,14 @@
-"""Pemantauan terus-menerus untuk mode CCTV, tanpa thread: belajar latar sendiri, lalu memantau.
+"""Pemantauan terus-menerus tanpa thread: belajar latar sendiri, lalu memantau.
 
-Analisis video meminta orang memilih satu frame "trotoar kosong". Kamera yang menyala sepanjang hari
-tidak punya orang itu, jadi Monitor belajar latar sendiri: ia mengambil beberapa frame yang tersebar
-dalam jendela waktu, lalu median per piksel membuang apa pun yang hanya lewat sebentar (kendaraan di
-jalan, pejalan kaki). Kendaraan yang DIAM sepanjang jendela belajar tetap ikut masuk ke latar; itu
-batasan yang sama dengan analisis video, dan tombol "Kalibrasi ulang" menjadi jalan keluarnya.
+Kamera yang menyala sepanjang hari tidak punya orang yang memilihkan satu frame "trotoar kosong", jadi Monitor
+belajar latar sendiri: ia mengambil beberapa frame yang tersebar dalam jendela waktu, lalu median per piksel
+membuang apa pun yang hanya lewat sebentar (kendaraan di jalan, pejalan kaki). Kendaraan yang DIAM sepanjang
+jendela belajar tetap ikut masuk ke latar; "Kalibrasi ulang" menjadi jalan keluarnya.
 
-Pengaman perubahan adegan: bila sebagian besar FRAME mendadak berbeda dari latar (kamera beralih ke
-mode malam inframerah, kamera tersenggol, eksposur melonjak), semua itu bukan kendaraan. Kejadian
-ditahan, dan bila perubahan bertahan beberapa detik latar dipelajari ulang. Tanpa ini, satu kali
-perubahan cahaya membuat deteksi buta selamanya, karena latar hanya diperbarui pada piksel non-objek.
+Pengaman perubahan adegan: bila sebagian besar FRAME mendadak berbeda dari latar (kamera tersenggol, eksposur
+melonjak, perangkat dipindah), semua itu bukan kendaraan. Kejadian ditahan, dan bila perubahan bertahan beberapa
+detik latar dipelajari ulang. Tanpa ini, satu kali perubahan cahaya membuat deteksi buta selamanya, karena latar
+hanya diperbarui pada piksel non-objek.
 """
 from __future__ import annotations
 
@@ -22,9 +21,9 @@ from .config import Config
 from .decision import Event
 from .engine import Engine
 
-# (jumlah sampel, jarak antar-sampel dalam detik). "normal" = jendela sekitar 24 detik, untuk kamera
-# sungguhan; "cepat" = sekitar 3 detik, untuk rekaman uji yang dimulai dari trotoar kosong.
-LEARN = {"cepat": (8, 0.4), "normal": (12, 2.0)}
+# (jumlah sampel, jarak antar-sampel dalam detik). "normal" = jendela sekitar 12 detik, untuk pemakaian
+# sungguhan; "cepat" = sekitar 3 detik, untuk pengujian otomatis yang dimulai dari trotoar kosong.
+LEARN = {"cepat": (8, 0.4), "normal": (10, 1.2)}
 
 
 @dataclass

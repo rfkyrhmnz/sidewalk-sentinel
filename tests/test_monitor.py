@@ -10,7 +10,7 @@ import pytest
 
 from sidewalk_sentinel.config import Config
 from sidewalk_sentinel.monitor import Monitor
-from sidewalk_sentinel.synthetic import ROI, Renderer, default_scene
+from scenes import ROI, Renderer, default_scene
 
 STOP_AT = 14.0          # semua kejadian adegan baku sudah terjadi sebelum detik ini
 

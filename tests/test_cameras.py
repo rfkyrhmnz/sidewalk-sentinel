@@ -1,179 +1,146 @@
-"""Uji kamera server (mode CCTV): sumber, penyimpanan kejadian, pekerja, dan API."""
+"""Uji kamera perangkat: pendaftaran, validasi, frame masuk, deteksi langsung, lama kejadian, laporan."""
 from __future__ import annotations
 
-import http.client
 import json
-import logging
 import threading
-import time
-from datetime import timedelta
 
+import numpy as np
 import pytest
+from support import Client, Phone, Street, jpeg, new_key
 
-from sidewalk_sentinel import cameras as cam_mod
-from sidewalk_sentinel.cameras import (EventStore, SourceError, build_spec, mask_source, parse_source,
-                                       source_kind)
-from sidewalk_sentinel.server import App, make_server
-from sidewalk_sentinel.synthetic import ROI
+from sidewalk_sentinel.cameras import (MAX_CAMERAS, CameraManager, CameraSpec, apply_changes, jpeg_size)
+from sidewalk_sentinel.server import make_server
+
+ROI = [[0.0, 0.64], [1.0, 0.64], [1.0, 0.99], [0.0, 0.99]]
 
 
 # =========================================================================== murni
-@pytest.mark.parametrize("text,kind", [
-    ("demo", "demo"), ("device:0", "device"), ("device:9", "device"),
-    ("upload:" + "a" * 12, "upload"),
-    ("rtsp://admin:sandi@192.168.1.5:554/stream1", "url"), ("RTSP://10.0.0.2/x", "url"),
-    ("http://cam.local/mjpeg", "url"), ("https://cam.example/live.m3u8", "url"),
-])
-def test_sumber_yang_sah_diterima(text, kind):
-    assert parse_source(text).kind == kind == source_kind(text)
+def _spec(**kw):
+    base = dict(id="a" * 12, device="b" * 24, name="Ponsel")
+    return CameraSpec(**{**base, **kw})
 
 
-@pytest.mark.parametrize("text", [
-    "", "   ", "file:///etc/passwd", "file:C:\\video.mp4", "/etc/passwd", "C:\\Users\\x\\v.mp4", "../../x.mp4",
-    "ftp://host/x", "javascript:alert(1)", "rtsp://", "http://", "device:10", "device:-1", "device:",
-    "upload:abc", "upload:../../etc/passwd", "rtsp://h/x\nGET /", "http://h/" + "a" * 600,
+def test_perubahan_valid_diterapkan_dan_yang_tidak_disebut_tetap():
+    s = apply_changes(_spec(), {"name": "  Gerbang depan  ", "roi": ROI, "settings": {"park_seconds": 20},
+                                "learn": "cepat", "enabled": False})
+    assert (s.name, s.learn, s.enabled, s.settings) == ("Gerbang depan", "cepat", False, {"park_seconds": 20})
+    assert s.roi == [list(p) for p in ROI]
+    assert apply_changes(s, {}).roi == s.roi and apply_changes(s, {"roi": None}).roi is None
+
+
+@pytest.mark.parametrize("data", [
+    {"name": ""}, {"name": "x" * 41}, {"name": None},
+    {"roi": [[0, 0], [1, 1]]}, {"roi": [[0, 0], [1, 0], [2, 1]]}, {"roi": "bukan daftar"}, {"roi": [[0, 0], [1, "a"], [1, 1]]},
+    {"settings": {"tidak_ada": 1}}, {"settings": {"park_seconds": 0}}, {"settings": "bukan objek"},
+    {"learn": "kilat"},
 ])
-def test_sumber_berbahaya_atau_rusak_ditolak(text):
+def test_perubahan_tidak_valid_ditolak(data):
     with pytest.raises(ValueError):
-        parse_source(text)
+        apply_changes(_spec(), data)
 
 
-def test_sumber_berkas_hanya_untuk_operator(tmp_path):
-    f = tmp_path / "rekaman.mp4"
-    f.write_bytes(b"x")
-    with pytest.raises(ValueError, match="baris perintah"):
-        parse_source(f"file:{f}")
-    assert parse_source(f"file:{f}", trusted=True).kind == "file"
-    with pytest.raises(ValueError, match="tidak ada"):
-        parse_source(f"file:{tmp_path / 'hilang.mp4'}", trusted=True)
+def test_nama_dibersihkan_dari_karakter_kendali():
+    assert apply_changes(_spec(), {"name": "A\x00B\nC"}).name == "ABC"
 
 
-def test_kredensial_disamarkan():
-    m = mask_source("rtsp://admin:s3cr3t@10.0.0.2:554/live?token=abc123&x=1&password=hunter2")
-    assert "s3cr3t" not in m and "abc123" not in m and "hunter2" not in m and "admin" not in m
-    assert "10.0.0.2:554/live" in m and "x=1" in m
-    assert mask_source("http://cam.local/mjpeg") == "http://cam.local/mjpeg"
+def test_ukuran_jpeg_dibaca_dari_header_tanpa_mendekode():
+    img = np.zeros((90, 160, 3), np.uint8)
+    assert jpeg_size(jpeg(img)) == (160, 90)
+    assert jpeg_size(b"bukan jpeg") is None and jpeg_size(b"\xff\xd8\xff\xd9") is None
 
 
-def test_build_spec_validasi():
-    spec = build_spec({"name": "  Depan  ", "source": "device:0"})
-    assert spec.name == "Depan" and spec.roi is None and spec.learn == "normal" and spec.enabled
-    for bad in ({"name": "", "source": "device:0"}, {"name": "x" * 41, "source": "device:0"},
-                {"name": "ok", "source": "device:0", "roi": [[0, 0], [1, 1]]},
-                {"name": "ok", "source": "device:0", "roi": [[0, 0], [2, 0], [1, 1]]},
-                {"name": "ok", "source": "device:0", "settings": {"tidak_ada": 1}},
-                {"name": "ok", "source": "device:0", "settings": {"park_seconds": 0}},
-                {"name": "ok", "source": "device:0", "learn": "sembarang"}):
-        with pytest.raises(ValueError):
-            build_spec(bad)
-    # nama dibersihkan dari karakter kontrol
-    assert build_spec({"name": "Dep\x00an\n", "source": "device:0"}).name == "Depan"
+def test_spec_dimuat_dengan_mengabaikan_kolom_lama_dan_menolak_yang_rusak():
+    lama = {"id": "a" * 12, "device": "b" * 24, "name": "X", "source": "rtsp://x", "max_loops": 3, "speed": 2.0}
+    assert CameraSpec.from_dict(lama).name == "X"
+    for bad in ({"id": "zzz", "device": "b" * 24, "name": "X"}, {"id": "a" * 12, "name": "X"},
+                {"id": "a" * 12, "device": "pendek", "name": "X"}):
+        with pytest.raises((ValueError, TypeError)):
+            CameraSpec.from_dict(bad)
 
 
-def test_build_spec_demo_dan_pembaruan():
-    demo = build_spec({"source": "demo"})
-    assert demo.name == "Kamera demo" and demo.roi and demo.learn == "cepat" and demo.max_loops == 2
-    assert demo.settings == {"park_seconds": 5}
-    upd = build_spec({"name": "Baru", "roi": None}, existing=demo)
-    assert upd.id == demo.id and upd.name == "Baru" and upd.roi is None
-    with pytest.raises(ValueError, match="tidak bisa diubah"):
-        build_spec({"source": "device:1"}, existing=demo)
-    assert build_spec({"source": "demo", "name": "X"}, existing=demo).name == "X"      # sama = boleh
-    # kamera jaringan tidak punya max_loops/speed
-    assert build_spec({"name": "J", "source": "http://h/x", "max_loops": 5}).max_loops is None
+# ============================================================================= manajer
+@pytest.fixture()
+def mgr(tmp_path):
+    m = CameraManager(tmp_path)
+    m.start()
+    yield m
+    m.shutdown()
 
 
-# ================================================================== penyimpanan kejadian
-EV = {"kind": "parkir", "label": "PARKIR DI TROTOAR", "reason": "diam 5 detik", "track_id": 1}
+def test_perangkat_yang_sama_mendapat_kamera_yang_sama(mgr):
+    key = new_key()
+    cam, created = mgr.register(key, "Laptop Windows")
+    again, created2 = mgr.register(key, "nama lain tidak dipakai")
+    assert created and not created2 and again is cam and cam.spec.name == "Laptop Windows"
+    assert len(mgr.list()) == 1
 
 
-def test_event_store_menyimpan_dan_dipulihkan(tmp_path):
-    s = EventStore(tmp_path / "c1")
-    r1 = s.append(EV, b"\xff\xd8jpg1")
-    r2 = s.append({**EV, "kind": "naik_trotoar", "label": "NAIK TROTOAR"}, None)
-    assert (r1["no"], r2["no"]) == (1, 2) and r2["snapshot"] is None
-    assert s.snapshot_path(1).read_bytes() == b"\xff\xd8jpg1" and s.snapshot_path(2) is None
-    s2 = EventStore(tmp_path / "c1")                       # restart
-    assert [r["no"] for r in s2.records] == [1, 2] and s2.seq == 2
-    assert s2.append(EV, None)["no"] == 3                  # penomoran lanjut
-    today = s2.counts_since(s2._dts[0].replace(hour=0, minute=0, second=0))
-    assert today == {"parkir": 2, "naik_trotoar": 1}
+@pytest.mark.parametrize("key", ["", None, "pendek", "G" * 24, "a" * 65, "a" * 24 + "\n", "../" + "a" * 24])
+def test_kunci_perangkat_tak_valid_ditolak(mgr, key):
+    with pytest.raises(ValueError):
+        mgr.register(key, "X")
 
 
-def test_event_store_toleran_baris_rusak(tmp_path):
-    s = EventStore(tmp_path / "c")
-    s.append(EV, None)
-    with open(s._file, "a", encoding="utf-8") as fh:
-        fh.write('{"no": 2, "ts": "bukan-waktu"}\n{terpotong karena mati lis')
-    again = EventStore(tmp_path / "c")
-    assert [r["no"] for r in again.records] == [1]
-    assert again.append(EV, None)["no"] == 2
+def test_nama_kembar_diberi_nomor_dan_nama_kosong_diganti_bawaan(mgr):
+    a, _ = mgr.register(new_key(), "Ponsel")
+    b, _ = mgr.register(new_key(), "Ponsel")
+    c, _ = mgr.register(new_key(), "")
+    assert (a.spec.name, b.spec.name, c.spec.name) == ("Ponsel", "Ponsel 2", "Perangkat")
+    with pytest.raises(ValueError, match="sudah ada"):
+        mgr.update(b.spec.id, {"name": "Ponsel"})
 
 
-def test_event_store_retensi_dan_nomor_tidak_dipakai_ulang(tmp_path):
-    s = EventStore(tmp_path / "c")
-    for _ in range(5):
-        s.append(EV, b"jpg")
-    assert s.prune(s._dts[0] - timedelta(days=1), max_events=3) == 2          # batas jumlah
-    assert [r["no"] for r in s.records] == [3, 4, 5]
-    assert s.snapshot_path(1) is None and s.snapshot_path(5) is not None
-    assert s.prune(s._dts[-1] + timedelta(days=1), max_events=100) == 3        # lewat batas umur
-    assert s.records == [] and list(s.events_dir.iterdir()) == []
-    # setelah semuanya dipangkas dan server restart, nomor TIDAK mundur ke 1 (cache foto browser)
-    assert EventStore(tmp_path / "c").append(EV, None)["no"] == 6
+def test_batas_jumlah_perangkat(mgr):
+    for i in range(MAX_CAMERAS):
+        mgr.register(new_key(), f"P{i}")
+    with pytest.raises(ValueError, match="batas"):
+        mgr.register(new_key(), "kelebihan")
+    existing = mgr.list()[0].spec.device
+    assert mgr.register(existing, "")[1] is False, "perangkat yang sudah terdaftar tidak terhitung kelebihan"
 
 
-def test_event_store_halaman_dan_after(tmp_path):
-    s = EventStore(tmp_path / "c")
-    for i in range(6):
-        s.append({**EV, "kind": "parkir" if i % 2 == 0 else "naik_trotoar"}, None)
-    assert [r["no"] for r in s.latest(3)] == [6, 5, 4]
-    assert [r["no"] for r in s.latest(3, before_no=4)] == [3, 2, 1]
-    assert [r["no"] for r in s.latest(10, kind="parkir")] == [5, 3, 1]
-    assert [r["no"] for r in s.after(4)] == [5, 6]
+def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
+    m1 = CameraManager(tmp_path)
+    m1.start()
+    key = new_key()
+    cam, _ = m1.register(key, "Gerbang")
+    m1.update(cam.spec.id, {"roi": ROI, "settings": {"park_seconds": 7}})
+    cam.events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, b"\xff\xd8x")
+    m1.shutdown()
+
+    m2 = CameraManager(tmp_path)
+    m2.start()
+    try:
+        back, created = m2.register(key, "")
+        assert not created and back.spec.id == cam.spec.id
+        assert back.spec.roi == [list(p) for p in ROI] and back.spec.settings == {"park_seconds": 7}
+        assert back.events.seq == 1
+    finally:
+        m2.shutdown()
 
 
-# ============================================================================== server
-class Client:
-    def __init__(self, port, cookie=None):
-        self.port, self.cookie = port, cookie
-
-    def req(self, method, path, body=None, raw=False):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
-        h = {"Cookie": self.cookie} if self.cookie else {}
-        if isinstance(body, (dict, list)):
-            body, h["Content-Type"] = json.dumps(body).encode(), "application/json"
-        conn.request(method, path, body=body, headers=h)
-        resp = conn.getresponse()
-        data = resp.read()
-        conn.close()
-        if raw:
-            return resp, data
-        try:
-            return resp.status, json.loads(data) if data else None
-        except ValueError:
-            return resp.status, data
+def test_berkas_perangkat_rusak_atau_berisi_entri_lama_tidak_menjatuhkan_server(tmp_path):
+    (tmp_path / "devices.json").write_text("{bukan json", encoding="utf-8")
+    m = CameraManager(tmp_path)
+    m.start()
+    assert m.list() == []
+    m.shutdown()
+    (tmp_path / "devices.json").write_text(json.dumps([
+        {"id": "a" * 12, "source": "demo", "name": "lama"},                       # tanpa kunci perangkat: dibuang
+        {"id": "c" * 12, "device": "d" * 24, "name": "sah", "source": "rtsp://x"},
+        "bukan kamus", 42]), encoding="utf-8")
+    m = CameraManager(tmp_path)
+    m.start()
+    try:
+        assert [c.spec.name for c in m.list()] == ["sah"]
+    finally:
+        m.shutdown()
 
 
-def wait_for(pred, timeout=60.0, every=0.2, msg="kondisi tidak tercapai"):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        v = pred()
-        if v:
-            return v
-        time.sleep(every)
-    raise AssertionError(msg)
-
-
-def cam_info(c, cid):
-    st, d = c.req("GET", f"/api/cams/{cid}")
-    assert st == 200, d
-    return d
-
-
-@pytest.fixture(scope="module")
-def srv(tmp_path_factory):
-    server, app = make_server("127.0.0.1", 0, tmp_path_factory.mktemp("data"))
+# ================================================================================ API
+@pytest.fixture()
+def srv(tmp_path):
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield app, Client(app.port)
     app.close()
@@ -181,690 +148,214 @@ def srv(tmp_path_factory):
     server.server_close()
 
 
-@pytest.fixture(scope="module")
-def demo_selesai(srv):
-    """Kamera demo yang diputar sekali secepat mungkin: dipakai bersama oleh beberapa tes."""
+def test_daftar_perangkat_membuat_lalu_melanjutkan(srv):
     app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "demo", "speed": 0, "max_loops": 1})
-    assert st == 201, d
-    wait_for(lambda: cam_info(c, d["id"])["status"] == "selesai", 90, msg="demo tidak selesai")
-    return cam_info(c, d["id"])
+    key = new_key()
+    st, a = c.req("POST", "/api/device", {"key": key, "name": "Laptop"})
+    st2, b = c.req("POST", "/api/device", {"key": key, "name": "Laptop"})
+    assert (st, st2) == (201, 200) and a["id"] == b["id"]
+    assert a["status"] in ("perlu_area", "menunggu") and a["roi"] is None and a["enabled"] is True
+    assert "device" not in a and "key" not in a, "kunci perangkat tidak dibocorkan lewat API"
+    st, lst = c.req("GET", "/api/cams")
+    assert [x["id"] for x in lst["cams"]] == [a["id"]]
 
 
-def test_kamera_demo_belajar_sendiri_dan_mencatat_kejadian(srv, demo_selesai):
-    app, c = srv
-    d = demo_selesai
-    assert d["counts_today"] == {"parkir": 1, "naik_trotoar": 2} and d["seq"] == 3
-    assert d["relearns"] == 0 and d["learn_progress"] == {"have": 8, "need": 8}
-    st, ev = c.req("GET", f"/api/cams/{d['id']}/events?limit=10")
-    assert st == 200 and ev["seq"] == 3
-    assert sorted(e["kind"] for e in ev["events"]) == ["naik_trotoar", "naik_trotoar", "parkir"]
-    assert all(e["snapshot_url"].startswith(f"/api/cams/{d['id']}/events/") for e in ev["events"])
-    resp, jpg = c.req("GET", ev["events"][0]["snapshot_url"], raw=True)
-    assert resp.status == 200 and jpg[:2] == b"\xff\xd8" and "max-age" in resp.getheader("Cache-Control")
-    # polling berbasis nomor: hanya yang lebih baru dari 'after'
-    st, newer = c.req("GET", f"/api/cams/{d['id']}/events?after=2")
-    assert [e["no"] for e in newer["events"]] == [3]
-
-
-def test_umpan_kejadian_lintas_kamera_dan_csv(srv, demo_selesai):
-    app, c = srv
-    st, feed = c.req("GET", "/api/events?limit=50")
-    assert st == 200 and len(feed["events"]) >= 3
-    assert feed["events"][0]["camera"]["id"] and feed["events"][0]["ts"] >= feed["events"][-1]["ts"]
-    st, p1 = c.req("GET", "/api/events?limit=2&offset=0")
-    st, p2 = c.req("GET", "/api/events?limit=2&offset=2")
-    keys = [(e["camera"]["id"], e["no"]) for e in p1["events"] + p2["events"]]
-    assert len(keys) == len(set(keys)), "halaman tidak boleh tumpang tindih"
-    assert c.req("GET", "/api/events?offset=abc")[0] == 400
-    st, only = c.req("GET", "/api/events?kind=parkir")
-    assert st == 200 and all(e["kind"] == "parkir" for e in only["events"])
-    assert c.req("GET", "/api/events?kind=sembarang")[0] == 400
-    resp, body = c.req("GET", "/api/events.csv", raw=True)
-    text = body.decode("utf-8-sig")
-    assert resp.status == 200 and text.splitlines()[0] == "waktu,kamera,jenis,alasan,nomor,durasi_detik"
-    assert "PARKIR DI TROTOAR" in text and "Kamera demo" in text
-    assert "attachment" in resp.getheader("Content-Disposition")
-
-
-def test_foto_bukti_berisi_nama_kamera_dan_jam(srv, demo_selesai):
-    import cv2
-    import numpy as np
-    app, c = srv
-    f = app.cams.get(demo_selesai["id"]).events.snapshot_path(1)
-    img = cv2.imdecode(np.frombuffer(f.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
-    assert img is not None and img.shape[1] == 640          # frame beranotasi pada lebar kerja
-
-
-def test_snapshot_dan_siaran_mjpeg(srv):
-    app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None})
-    cid = d["id"]
-    try:
-        wait_for(lambda: cam_info(c, cid)["status"] == "memantau", 30)
-        resp, jpg = c.req("GET", f"/api/cams/{cid}/snapshot.jpg", raw=True)
-        assert resp.status == 200 and jpg[:2] == b"\xff\xd8" and resp.getheader("Content-Type") == "image/jpeg"
-        resp, raw = c.req("GET", f"/api/cams/{cid}/snapshot.jpg?raw=1", raw=True)
-        assert resp.status == 200 and raw[:2] == b"\xff\xd8" and raw != jpg
-
-        conn = http.client.HTTPConnection("127.0.0.1", c.port, timeout=20)
-        conn.request("GET", f"/api/cams/{cid}/stream.mjpg")
-        r = conn.getresponse()
-        assert r.status == 200 and "multipart/x-mixed-replace" in r.getheader("Content-Type")
-        frames = []
-        while len(frames) < 3:
-            if r.fp.readline().strip() != b"--ssframe":
-                continue
-            hdr = {}
-            while (line := r.fp.readline().strip()):
-                k, _, v = line.partition(b":")
-                hdr[k.lower()] = v.strip()
-            frames.append(r.fp.read(int(hdr[b"content-length"])))
-        conn.close()
-        assert all(f[:2] == b"\xff\xd8" for f in frames) and len(set(frames)) >= 2, "siaran harus berganti gambar"
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-
-
-def test_penonton_sejak_awal_tidak_menjatuhkan_sesi_saat_belajar_selesai(srv):
-    """Regresi: frame yang menuntaskan belajar latar belum diproses engine. Dengan penonton terpasang, _apply
-    meminta gambar beranotasi saat engine.last masih kosong; sesi crash lalu belajar ulang tanpa akhir."""
-    app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None})
-    cid = d["id"]
-    try:
-        seen = set()
-        t0 = time.time()
-        while time.time() - t0 < 30:
-            c.req("GET", f"/api/cams/{cid}/snapshot.jpg", raw=True)       # penonton aktif sepanjang belajar
-            info = cam_info(c, cid)
-            seen.add(info["status"])
-            if info["status"] == "memantau":
-                break
-            time.sleep(0.1)
-        assert "memantau" in seen, f"tidak pernah memantau: {seen}"
-        assert "terputus" not in seen, f"sesi jatuh saat belajar selesai: {seen}"
-        time.sleep(1.0)
-        assert cam_info(c, cid)["status"] == "memantau"
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-
-
-def test_siaran_kamera_statis_mengirim_dua_bagian_dengan_cepat(srv, demo_selesai):
-    """Regresi: Chrome baru menggambar satu bagian multipart ketika bagian berikutnya mulai datang. Kamera statis
-    (selesai/jeda) tak punya frame baru, jadi dulu gambarnya baru tampil setelah ~3 dtk penanda hidup."""
-    app, c = srv
-    conn = http.client.HTTPConnection("127.0.0.1", c.port, timeout=10)
-    conn.request("GET", f"/api/cams/{demo_selesai['id']}/stream.mjpg")
-    r = conn.getresponse()
-    assert r.status == 200
-    t0 = time.time()
-    parts = []
-    while len(parts) < 2:
-        line = r.fp.readline().strip().lower()
-        if line.startswith(b"content-length:"):
-            n = int(line.split(b":")[1])
-            r.fp.readline()                                  # baris kosong pemisah header
-            parts.append(r.fp.read(n))
-    elapsed = time.time() - t0
-    conn.close()
-    assert elapsed < 1.5, f"bagian kedua baru tiba setelah {elapsed:.1f} dtk"
-    assert all(p[:2] == b"\xff\xd8" for p in parts)
-
-
-def test_rekaman_selesai_dan_jeda_menerbitkan_frame_terakhir(srv, monkeypatch):
-    """Regresi: tanpa penonton gambar jarang diperbarui, jadi rekaman cepat selesai dengan gambar masa belajar
-    ("BELAJAR LATAR 1/8") yang basi. Penonton ditiru: hanya gambar pertama yang terbit dengan sendirinya."""
-    from sidewalk_sentinel import cameras
-    monkeypatch.setattr(cameras.Camera, "_want_image", lambda self: self._jpg is None)
-    app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "demo", "speed": 0, "max_loops": 1})
-    cid = d["id"]
-    try:
-        cam = app.cams.get(cid)
-        wait_for(lambda: cam._jpg is not None, 20)
-        first = cam._jpg
-        wait_for(lambda: cam_info(c, cid)["status"] == "selesai", 90, msg="demo tidak selesai")
-        assert cam._jpg != first, "gambar saat selesai masih gambar masa belajar"
-        final = cam._jpg
-        assert c.req("GET", f"/api/cams/{cid}/snapshot.jpg", raw=True)[1] == final
-
-        # jeda memotret keadaan terakhir juga
-        st, d2 = c.req("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None})
-        cid2 = d2["id"]
-        try:
-            cam2 = app.cams.get(cid2)
-            wait_for(lambda: cam_info(c, cid2)["status"] == "memantau", 30)
-            before = cam2._jpg
-            c.req("POST", f"/api/cams/{cid2}", {"enabled": False})
-            wait_for(lambda: cam_info(c, cid2)["status"] == "jeda", 10)
-            assert cam2._jpg != before, "jeda tidak menerbitkan frame terakhir"
-        finally:
-            c.req("DELETE", f"/api/cams/{cid2}")
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-
-
-def test_jeda_lanjut_dan_kalibrasi_ulang(srv):
-    app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "demo", "speed": 1, "max_loops": None})
-    cid = d["id"]
-    try:
-        wait_for(lambda: cam_info(c, cid)["status"] == "memantau", 30)
-        assert c.req("POST", f"/api/cams/{cid}/recalibrate")[0] == 200
-        wait_for(lambda: cam_info(c, cid)["status"] == "belajar", 10, msg="harus belajar ulang")
-        wait_for(lambda: cam_info(c, cid)["status"] == "memantau", 30, msg="harus kembali memantau")
-        assert c.req("POST", f"/api/cams/{cid}", {"enabled": False})[0] == 200
-        wait_for(lambda: cam_info(c, cid)["status"] == "jeda", 10, msg="harus dijeda")
-        assert c.req("POST", f"/api/cams/{cid}", {"name": "Ganti nama saat jeda"})[1]["status"] in ("jeda",)
-        c.req("POST", f"/api/cams/{cid}", {"enabled": True})
-        wait_for(lambda: cam_info(c, cid)["status"] in ("belajar", "memantau"), 15, msg="harus lanjut")
-        assert cam_info(c, cid)["name"] == "Ganti nama saat jeda"
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-
-
-def test_pembaruan_roi_membuat_kamera_mulai_memantau(srv):
-    """Alur tambah kamera: tanpa area -> 'perlu_area' dengan frame mentah; setelah area diberikan -> belajar."""
-    app, c = srv
-    st, d = c.req("POST", "/api/cams", {"name": "Tanpa area", "source": "demo", "roi": None, "speed": 1,
-                                        "max_loops": None, "learn": "cepat"})
-    assert st == 201, d
-    cid = d["id"]
-    try:
-        wait_for(lambda: cam_info(c, cid)["status"] == "perlu_area", 20)
-        resp, raw = c.req("GET", f"/api/cams/{cid}/snapshot.jpg?raw=1", raw=True)
-        assert resp.status == 200 and raw[:2] == b"\xff\xd8"
-        st, upd = c.req("POST", f"/api/cams/{cid}", {"roi": [list(p) for p in ROI]})
-        assert st == 200 and upd["roi"]
-        wait_for(lambda: cam_info(c, cid)["status"] in ("belajar", "memantau"), 15)
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-
-
-def test_sumber_unggahan_diputar_dan_menghasilkan_kejadian(srv, tmp_path):
-    app, c = srv
-    video = app.ensure_demo()["path"]
-    resp, body = c.req("POST", "/api/upload?name=rekaman.mp4", body=video.read_bytes(), raw=True)
-    assert resp.status == 201, body
-    uid = json.loads(body)["upload_id"]
-    st, d = c.req("POST", "/api/cams", {"name": "Dari unggahan", "source": f"upload:{uid}", "roi": [list(p) for p in ROI],
-                                        "speed": 0, "settings": {"park_seconds": 5}})
-    assert st == 201, d
-    try:
-        wait_for(lambda: cam_info(c, d["id"])["status"] == "selesai", 90)
-        assert cam_info(c, d["id"])["counts_today"] == {"parkir": 1, "naik_trotoar": 2}
-    finally:
-        c.req("DELETE", f"/api/cams/{d['id']}")
-    # unggahan yang tidak ada: kamera terputus dengan alasan jelas, bukan crash
-    st, d = c.req("POST", "/api/cams", {"name": "Hilang", "source": "upload:" + "0" * 12})
-    try:
-        info = wait_for(lambda: (i := cam_info(c, d["id"]))["status"] == "terputus" and i, 15)
-        assert "unggahan" in info["message"]
-    finally:
-        c.req("DELETE", f"/api/cams/{d['id']}")
-
-
-# ==================================================================== validasi dan keamanan
 def test_api_menolak_masukan_buruk(srv):
     app, c = srv
-    bad = [
-        {"source": "file:///etc/passwd", "name": "x"}, {"source": "/etc/passwd", "name": "x"},
-        {"source": "ftp://h/x", "name": "x"}, {"name": "x"}, {"source": "device:0"},
-        {"source": "device:0", "name": "x", "roi": [[0, 0], [1, 0]]},
-        {"source": "device:0", "name": "x", "settings": {"nama_ngawur": 1}},
-    ]
-    for body in bad:
-        st, d = c.req("POST", "/api/cams", body)
-        assert st == 400 and "error" in d, (body, st, d)
-    assert c.req("POST", "/api/cams", body=b"bukan json", raw=True)[0].status == 400
+    assert c.req("POST", "/api/device", {"key": "pendek"})[0] == 400
+    assert c.req("POST", "/api/device", {})[0] == 400
+    assert c.req("GET", "/api/device")[0] == 405
+    assert c.req("POST", "/api/cams", {"source": "demo"})[0] == 405, "tidak ada lagi jalur membuat kamera dari sumber lain"
+    ph = Phone(c)
+    ph.register()
+    for body in ({"roi": [[0, 0], [1, 1]]}, {"name": ""}, {"settings": {"x": 1}}, {"learn": "kilat"}):
+        assert c.req("POST", f"/api/cams/{ph.id}", body)[0] == 400, body
+    assert c.req("POST", f"/api/cams/{ph.id}", b"{bukan json", {"Content-Type": "application/json"})[0] == 400
+    assert c.req("GET", f"/api/cams/{'f' * 12}")[0] == 404
     assert c.req("GET", "/api/cams/tidak-valid")[0] == 404
-    assert c.req("GET", f"/api/cams/{'a' * 12}")[0] == 404
-    assert c.req("GET", f"/api/cams/{'a' * 12}/snapshot.jpg")[0] == 404
-    assert c.req("GET", "/api/cams/../../etc/passwd")[0] in (400, 404)
-    assert [i for i in app.cams.list() if i.spec.source.startswith("file")] == []
+    assert c.req("GET", "/api/cams/%s/snapshot.jpg" % ph.id)[0] == 404, "tidak ada siaran gambar server"
+    assert c.req("GET", "/api/cams/%s/stream.mjpg" % ph.id)[0] == 404
 
 
-def test_ubah_sumber_ditolak_dan_hapus_membersihkan(srv):
+def test_frame_menolak_masukan_buruk(srv):
     app, c = srv
-    st, d = c.req("POST", "/api/cams", {"name": "Sementara", "source": "device:3"})
-    cid = d["id"]
-    st, e = c.req("POST", f"/api/cams/{cid}", {"source": "device:4"})
-    assert st == 400 and "tidak bisa diubah" in e["error"]
-    folder = app.cams.get(cid).dir
-    assert folder.is_dir()
-    assert c.req("DELETE", f"/api/cams/{cid}")[1] == {"deleted": True}
-    assert not folder.exists() and c.req("GET", f"/api/cams/{cid}")[0] == 404
-    assert cid not in (app.cams.file.read_text(encoding="utf-8"))
+    ph = Phone(c)
+    ph.register()
+    url = f"/api/cams/{ph.id}/frame"
+    jpg_h = {"Content-Type": "image/jpeg"}
+    assert c.req("POST", url, b"bukan gambar", jpg_h)[0] == 400
+    assert c.req("POST", url, b"", jpg_h)[0] == 400
+    assert c.req("POST", url, jpeg(np.zeros((8, 8, 3), np.uint8)), jpg_h)[0] == 400, "terlalu kecil"
+    good = jpeg(np.zeros((90, 160, 3), np.uint8))
+    i = good.index(b"\xff\xc0")                                                         # 'bom dekompresi': header menyatakan 30000x30000
+    bomb = good[:i + 5] + (30000).to_bytes(2, "big") + (30000).to_bytes(2, "big") + good[i + 9:]
+    st, err = c.req("POST", url, bomb, jpg_h)
+    assert st == 400 and "terlalu besar" in err["error"], err
+    assert c.req("POST", f"/api/cams/{'e' * 12}/frame", jpeg(np.zeros((90, 160, 3), np.uint8)), jpg_h)[0] == 404
+    assert c.req("POST", url, jpeg(np.zeros((90, 160, 3), np.uint8)), jpg_h)[0] == 200
 
 
-def test_sandi_rtsp_tidak_bocor_dan_kegagalan_dijelaskan(srv, caplog):
+def test_perangkat_tanpa_area_meminta_area_lalu_mulai_belajar_setelah_area_diset(srv):
     app, c = srv
-    caplog.set_level(logging.DEBUG, logger="sidewalk")
-    src = "rtsp://admin:s3cr3t@127.0.0.1:9/live?token=abc123"
-    st, d = c.req("POST", "/api/cams", {"name": "CCTV palsu", "source": src})
-    assert st == 201, d
-    cid = d["id"]
-    try:
-        info = wait_for(lambda: (i := cam_info(c, cid))["status"] == "terputus" and i, 60, msg="harus terputus")
-        assert "tidak bisa terhubung" in info["message"] and "Mencoba lagi" in info["message"]
-        everything = json.dumps(c.req("GET", "/api/cams")[1]) + json.dumps(info) + caplog.text
-        assert "s3cr3t" not in everything and "abc123" not in everything
-        assert info["source"] == "rtsp://***@127.0.0.1:9/live?token=***"
-        # belum ada frame sungguhan: editor area tidak boleh menerima kartu status sebagai "frame"
-        assert c.req("GET", f"/api/cams/{cid}/snapshot.jpg?raw=1", raw=True)[0].status == 503
-        resp, card = c.req("GET", f"/api/cams/{cid}/snapshot.jpg", raw=True)
-        assert resp.status == 200 and card[:2] == b"\xff\xd8"           # tetap ada gambar untuk ubin dasbor
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
+    ph = Phone(c)
+    ph.register()
+    street = Street()
+    ph.stream(street.frame, 5, until=lambda s: s["status"] == "perlu_area")
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI, "learn": "cepat"})[0] == 200
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "belajar" and s["learn_progress"]["have"] >= 1)
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+    assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
 
 
-def test_batas_jumlah_kamera(srv):
+def _durasi(c, ph):
+    return c.req("GET", f"/api/cams/{ph.id}/events")[1]["events"][0].get("durasi_s")
+
+
+def _siapkan(c, park_seconds=2):
+    ph = Phone(c)
+    ph.register()
+    street = Street()
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI, "learn": "cepat",
+                                                 "settings": {"park_seconds": park_seconds}})[0] == 200
+    ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau")
+    return ph, street
+
+
+def test_kendaraan_parkir_terdeteksi_langsung_lalu_durasinya_tercatat_saat_pergi(srv):
     app, c = srv
-    made = []
-    try:
-        for i in range(cam_mod.MAX_CAMERAS - len(app.cams.list())):
-            st, d = c.req("POST", "/api/cams", {"name": f"K{i}", "source": "http://127.0.0.1:9/x"})
-            assert st == 201, d
-            made.append(d["id"])
-        st, d = c.req("POST", "/api/cams", {"name": "berlebih", "source": "http://127.0.0.1:9/x"})
-        assert st == 400 and "batas" in d["error"]
-    finally:
-        for cid in made:
-            c.req("DELETE", f"/api/cams/{cid}")
+    ph, street = _siapkan(c)
+    ph.stream(lambda: street.frame(vehicle=True), 25, until=lambda s: s["counts_today"]["parkir"] == 1)
+    assert any(t["state"] in ("diam", "parkir") for t in ph.state["tracks"]), "jejak dikirim balik untuk digambar halaman"
+    box = ph.state["tracks"][0]["box"]
+    assert all(0 <= v <= 1 for v in box), "kotak dinormalisasi 0..1 agar halaman bisa menggambar di ukuran apa pun"
+
+    ev = c.req("GET", f"/api/cams/{ph.id}/events")[1]["events"]
+    assert [e["kind"] for e in ev] == ["parkir"] and "durasi_s" not in ev[0], "durasi baru diketahui saat kendaraan pergi"
+    snap = c.req("GET", ev[0]["snapshot_url"], raw=True)
+    assert snap[0].status == 200 and snap[1][:2] == b"\xff\xd8", "foto bukti tersedia"
+
+    ph.stream(street.frame, 20, until=lambda s: _durasi(c, ph) is not None)
+    dur = _durasi(c, ph)
+    assert 1.5 <= dur <= 20, dur
 
 
-def test_mode_lan_mewajibkan_kunci_untuk_api_kamera(tmp_path):
-    server, app = make_server("127.0.0.1", 0, tmp_path / "lan", lan=True, token="kunci123")
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        anon, authed = Client(app.port), Client(app.port, "ss_key=kunci123")
-        for path in ("/api/cams", "/api/events", "/api/events.csv", f"/api/cams/{'a' * 12}/stream.mjpg"):
-            assert anon.req("GET", path)[0] == 403, path
-        assert anon.req("POST", "/api/cams", {"source": "demo"})[0] == 403
-        assert authed.req("GET", "/api/cams")[0] == 200
-    finally:
-        app.close()
-        server.shutdown()
-        server.server_close()
-
-
-# ============================================================================ ketahanan
-def test_kamera_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
-    root = tmp_path / "data"
-    app = App(root)
-    cam = app.cams.create({"source": "demo", "speed": 0, "max_loops": 1})
-    wait_for(lambda: cam.info()["status"] == "selesai", 90)
-    seq = cam.info()["seq"]
-    app.cams.update(cam.spec.id, {"enabled": False})            # agar restart tidak memutar ulang rekaman
-    wait_for(lambda: cam.info()["status"] == "jeda", 10)
-    app.close()
-
-    again = App(root)
-    try:
-        restored = again.cams.get(cam.spec.id)
-        assert restored is not None and restored.spec.name == "Kamera demo" and restored.spec.enabled is False
-        assert restored.events.seq == seq == 3
-        assert restored.events.snapshot_path(1) is not None
-        wait_for(lambda: restored.info()["status"] == "jeda", 10)
-    finally:
-        again.close()
-
-
-def test_cameras_json_rusak_tidak_menjatuhkan_server(tmp_path):
-    root = tmp_path / "data"
-    root.mkdir()
-    (root / "cameras.json").write_text("{bukan json yang benar", encoding="utf-8")
-    app = App(root)
-    try:
-        assert app.cams.list() == []
-    finally:
-        app.close()
-    (root / "cameras.json").write_text(json.dumps([{"id": "x"}, "aneh", {"id": "a" * 12, "nama": "salah"}]))
-    app = App(root)
-    try:
-        assert app.cams.list() == []
-    finally:
-        app.close()
-
-
-def test_sumber_url_diuji_lewat_siaran_mjpeg_kamera_lain(srv):
-    """Jalur kamera jaringan (OpenCV/FFmpeg membaca URL) diuji dengan menyuapi satu kamera dari siaran MJPEG
-    kamera lain. RTSP memakai jalur pembukaan yang sama; yang berbeda hanya protokol."""
+def test_laporan_dan_csv_memuat_kejadian_dan_durasinya(srv):
     app, c = srv
-    st, a = c.req("POST", "/api/cams", {"name": "Sumber", "source": "demo", "speed": 1, "max_loops": None})
-    b = None
-    try:
-        wait_for(lambda: cam_info(c, a["id"])["status"] == "memantau", 30)
-        url = f"http://127.0.0.1:{app.port}/api/cams/{a['id']}/stream.mjpg"
-        st, b = c.req("POST", "/api/cams", {"name": "Penonton", "source": url})
-        assert st == 201, b
-        info = wait_for(lambda: (i := cam_info(c, b["id"]))["status"] == "perlu_area" and i, 60,
-                        msg="kamera URL tidak pernah menerima frame")
-        assert info["size"] == [640, 360] and info["kind"] == "url"
-        resp, raw = c.req("GET", f"/api/cams/{b['id']}/snapshot.jpg?raw=1", raw=True)
-        assert resp.status == 200 and raw[:2] == b"\xff\xd8"
-    finally:
-        for cam in (b, a):
-            if cam:
-                c.req("DELETE", f"/api/cams/{cam['id']}")
+    ph, street = _siapkan(c)
+    ph.stream(lambda: street.frame(vehicle=True), 25, until=lambda s: s["counts_today"]["parkir"] == 1)
+    ph.stream(street.frame, 20, until=lambda s: _durasi(c, ph) is not None)
+
+    st, r = c.req("GET", "/api/report?periode=hari_ini")
+    assert st == 200 and r["total"] == 1 and r["parkir"] == 1 and r["lama"]["semua"]["n"] == 1
+    assert r["per_kamera"][0]["nama"] == "Ponsel uji" and r["terbaru"][0]["snapshot_url"]
+    assert c.req("GET", f"/api/report?periode=7_hari&kamera={ph.id}")[1]["total"] == 1
+    assert c.req("GET", "/api/report?periode=kemarin")[0] == 400
+    assert c.req("GET", "/api/report?kamera=tidak-valid")[0] == 400
+    assert c.req("GET", f"/api/report?kamera={'a' * 12}")[0] == 404
+
+    st, body = c.req("GET", "/api/events.csv")
+    text = body.decode("utf-8-sig")
+    assert text.splitlines()[0] == "waktu,perangkat,jenis,alasan,nomor,durasi_detik"
+    assert "Ponsel uji" in text and text.count("\n") == 2
 
 
-# ====================================================================== kamera perangkat (frame didorong browser)
-def _jpeg(frame) -> bytes:
-    import cv2
-    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    assert ok
-    return buf.tobytes()
-
-
-def test_sumber_browser_diterima_dan_dikenali():
-    assert parse_source("browser").kind == "browser"
-    assert not parse_source("browser").is_recording
-    assert cam_mod.source_kind("browser") == "browser"
-    assert build_spec({"source": "browser", "name": "HP"}).learn == "normal"
-
-
-def test_ukuran_jpeg_dibaca_dari_header_tanpa_mendekode():
-    import numpy as np
-    assert cam_mod.jpeg_size(_jpeg(np.zeros((90, 160, 3), np.uint8))) == (160, 90)
-    assert cam_mod.jpeg_size(b"bukan jpeg") is None
-    assert cam_mod.jpeg_size(b"\xff\xd8\xff\xd9") is None
-    assert cam_mod.jpeg_size(b"") is None
-
-
-def test_kamera_perangkat_belajar_memantau_dan_mencatat_parkir(srv):
-    from sidewalk_sentinel.synthetic import Actor, Renderer, Scene
+def test_jeda_menghentikan_pemantauan_dan_lanjut_belajar_ulang(srv):
     app, c = srv
-    scene = Scene(seconds=30, actors=[Actor("P", (60, 36), (40, 60, 200), [(0.0, 320, 300)], stay=True)])
-    r = Renderer(scene)
-    st, d = c.req("POST", "/api/cams", {"source": "browser", "name": "HP uji", "learn": "cepat",
-                                        "settings": {"park_seconds": 1}, "roi": [list(p) for p in ROI]})
-    assert st == 201 and d["kind"] == "browser", d
-    cid = d["id"]
-    try:
-        wait_for(lambda: cam_info(c, cid)["status"] == "menunggu", 10, msg="tanpa frame harus menunggu perangkat")
-
-        def push(actors, t):
-            st, resp = c.req("POST", f"/api/cams/{cid}/frame", _jpeg(r.frame(t, actors=actors)))
-            assert st == 200, resp
-            return resp
-
-        seen = set()
-        t0 = time.time()
-        while time.time() - t0 < 20:                      # trotoar kosong: belajar latar sendiri
-            resp = push(False, 1.0)
-            seen.add(resp["status"])
-            if resp["status"] == "memantau":
-                break
-            time.sleep(0.12)
-        assert {"belajar", "memantau"} <= seen, seen
-        assert set(resp) >= {"status", "learn_progress", "tracks", "counts_today", "seq"}
-
-        boxes = []
-        t0 = time.time()
-        while time.time() - t0 < 6 and cam_info(c, cid)["counts_today"]["parkir"] == 0:
-            resp = push(True, 5.0)                        # kendaraan datang dan diam di trotoar
-            boxes += resp["tracks"]
-            time.sleep(0.12)
-        info = cam_info(c, cid)
-        assert info["counts_today"]["parkir"] == 1, info
-        assert boxes and all(0 <= v <= 1 for t in boxes for v in t["box"]), "jejak harus ternormalisasi"
-        assert {"id", "box", "state", "dwell"} <= set(boxes[0])
-        assert info["relearns"] == 0
-
-        # perangkat berhenti mengirim: menunggu, tanpa membuang latar yang sudah dipelajari
-        wait_for(lambda: cam_info(c, cid)["status"] == "menunggu", 12, msg="harus menunggu saat frame berhenti")
-        t0 = time.time()
-        while time.time() - t0 < 5 and cam_info(c, cid)["status"] != "memantau":
-            push(False, 8.0)
-            time.sleep(0.12)
-        again = cam_info(c, cid)
-        assert again["status"] == "memantau" and again["learn_progress"] == info["learn_progress"], again
-        assert again["relearns"] == 0
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
+    ph, street = _siapkan(c)
+    assert c.req("POST", f"/api/cams/{ph.id}", {"enabled": False})[0] == 200
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "jeda", 5, "harus berstatus jeda")
+    assert ph.push(street.frame())["status"] == "jeda"
+    assert c.req("POST", f"/api/cams/{ph.id}", {"enabled": True})[0] == 200
+    ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau" and s["enabled"])
 
 
-def test_frame_perangkat_menolak_masukan_buruk(srv):
-    import numpy as np
+def test_kalibrasi_ulang_membuat_latar_dipelajari_lagi(srv):
     app, c = srv
-    st, d = c.req("POST", "/api/cams", {"source": "browser", "name": "HP buruk"})
-    cid = d["id"]
-    st2, demo = c.req("POST", "/api/cams", {"source": "demo", "speed": 1})
-    try:
-        good = _jpeg(np.zeros((90, 160, 3), np.uint8))
-        assert c.req("POST", f"/api/cams/{cid}/frame", b"bukan jpeg")[0] == 400
-        assert c.req("POST", f"/api/cams/{cid}/frame", b"")[0] == 400
-
-        # 'bom dekompresi': header menyatakan 30000x30000. Harus ditolak SEBELUM mendekode (pesan khas penjaga).
-        i = good.index(b"\xff\xc0")
-        bomb = good[:i + 5] + (30000).to_bytes(2, "big") + (30000).to_bytes(2, "big") + good[i + 9:]
-        st, err = c.req("POST", f"/api/cams/{cid}/frame", bomb)
-        assert st == 400 and "terlalu besar" in err["error"], err
-
-        st, err = c.req("POST", f"/api/cams/{demo['id']}/frame", good)       # bukan kamera perangkat
-        assert st == 400 and "perangkat" in err["error"], err
-        assert c.req("POST", "/api/cams/000000000000/frame", good)[0] == 404
-        assert c.req("GET", f"/api/cams/{cid}/frame")[0] in (404, 405)
-    finally:
-        c.req("DELETE", f"/api/cams/{cid}")
-        c.req("DELETE", f"/api/cams/{demo['id']}")
+    ph, street = _siapkan(c)
+    assert c.req("POST", f"/api/cams/{ph.id}/recalibrate")[0] == 200
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "belajar")
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
 
 
-# ============================================================ lama kejadian (durasi_s) untuk laporan
-def _ev(kind="parkir", track_id=1):
-    return {"kind": kind, "label": kind, "reason": "uji", "track_id": track_id}
-
-
-def _lines(folder):
-    return (folder / "events.jsonl").read_text(encoding="utf-8").splitlines()
-
-
-def test_patch_disimpan_ditambahkan_ke_berkas_dan_dimuat_ulang(tmp_path):
-    store = EventStore(tmp_path)
-    rec = store.append(_ev(), None)
-    assert store.patch(rec["no"], durasi_s=12.34) is True
-    assert store.latest(1)[0]["durasi_s"] == 12.3
-    assert len(_lines(tmp_path)) == 2, "berkas hanya bertambah: satu baris kejadian, satu baris patch"
-    assert EventStore(tmp_path).latest(1)[0]["durasi_s"] == 12.3
-
-
-@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "12", True, None, 7 * 24 * 3600 + 1])
-def test_patch_menolak_nilai_tak_wajar(tmp_path, value):
-    store = EventStore(tmp_path)
-    rec = store.append(_ev(), None)
-    assert store.patch(rec["no"], durasi_s=value) is False
-    assert "durasi_s" not in store.latest(1)[0] and len(_lines(tmp_path)) == 1
-
-
-def test_patch_mengabaikan_kolom_asing_dan_kejadian_tak_dikenal(tmp_path):
-    store = EventStore(tmp_path)
-    rec = store.append(_ev(), None)
-    assert store.patch(rec["no"], kind="naik_trotoar", reason="palsu") is False
-    assert store.latest(1)[0]["kind"] == "parkir" and store.latest(1)[0]["reason"] == "uji"
-    assert store.patch(999, durasi_s=5) is False
-
-
-def test_baris_patch_rusak_di_berkas_dilewati_yang_sah_tetap_berlaku(tmp_path):
-    store = EventStore(tmp_path)
-    a, b = store.append(_ev(), None), store.append(_ev(track_id=2), None)
-    with open(tmp_path / "events.jsonl", "a", encoding="utf-8") as fh:
-        for bad in ('{"no": 1, "patch": "bukan kamus"}', '{"no": 77, "patch": {"durasi_s": 3}}',
-                    '{"no": 1, "patch": {"durasi_s": -5}}', '{"no": "1", "patch": {"durasi_s": 4}}',
-                    '{"no": 1, "patch": {"kind": "naik_trotoar"}}', '[1, 2]', '{"patch": {"durasi_s": 1}}', "{rusak"):
-            fh.write(bad + "\n")
-        fh.write(json.dumps({"no": b["no"], "patch": {"durasi_s": 8.0}}) + "\n")
-    loaded = {r["no"]: r for r in EventStore(tmp_path).latest(10)}
-    assert "durasi_s" not in loaded[a["no"]] and loaded[a["no"]]["kind"] == "parkir"
-    assert loaded[b["no"]]["durasi_s"] == 8.0
-
-
-def test_patch_tidak_mengubah_objek_yang_sedang_dipegang_pembaca(tmp_path):
-    store = EventStore(tmp_path)
-    rec = store.append(_ev(), None)
-    held = store.latest(1)[0]                          # mis. API sedang menserialisasi objek ini di utas lain
-    store.patch(rec["no"], durasi_s=9)
-    assert "durasi_s" not in held, "mengubah kamus di tempat bisa memicu 'dictionary changed size' di utas pembaca"
-    assert store.latest(1)[0]["durasi_s"] == 9.0
-
-
-def test_patch_setelah_folder_kamera_dihapus_tidak_melempar(tmp_path):
-    import shutil
-    folder = tmp_path / "kamera"
-    store = EventStore(folder)
-    rec = store.append(_ev(), None)
-    shutil.rmtree(folder)
-    assert store.patch(rec["no"], durasi_s=3) is False
-
-
-def test_prune_melebur_patch_ke_berkas_baru(tmp_path):
-    store = EventStore(tmp_path)
-    for i in range(3):
-        rec = store.append(_ev(track_id=i), None)
-        store.patch(rec["no"], durasi_s=10 + i)
-    assert store.prune(cam_mod._now() - timedelta(days=1), max_events=2) == 1
-    assert len(_lines(tmp_path)) == 2, "setelah dipangkas, patch sudah menyatu ke baris kejadian"
-    assert [r["durasi_s"] for r in EventStore(tmp_path).latest(5)] == [12.0, 11.0]
-
-
-class Pelacak:
-    """EventStore palsu: merekam patch yang diminta."""
-
-    def __init__(self):
-        self.patches = []
-
-    def patch(self, no, **fields):
-        self.patches.append((no, fields))
-        return True
-
-
-def test_durasi_dihitung_dari_mulai_hingga_terakhir_terlihat_setelah_jeda():
-    from sidewalk_sentinel.cameras import DurationTracker
-    st = Pelacak()
-    d = DurationTracker(st, grace=3.0)
-    d.begin(1, "parkir", no=5, t_start=10.0, t=20.0)
-    d.update({1}, 25.0)
-    d.update(set(), 26.0)                              # hilang 1 detik: belum dianggap pergi
-    d.update(set(), 27.9)
-    assert st.patches == []
-    d.update(set(), 28.0)                              # tepat 3 detik sejak terakhir terlihat (25): pergi
-    assert st.patches == [(5, {"durasi_s": 15.0})], "durasi = terakhir terlihat (25) - mulai (10), bukan saat dinyatakan pergi"
-    d.update(set(), 99.0)
-    assert len(st.patches) == 1, "tidak ditulis dua kali"
-
-
-def test_kontak_trotoar_yang_sempat_putus_tidak_memotong_durasi():
-    from sidewalk_sentinel.cameras import DurationTracker
-    st = Pelacak()
-    d = DurationTracker(st, grace=3.0)
-    d.begin(1, "parkir", 5, 0.0, 10.0)
-    d.update(set(), 11.0)
-    d.update(set(), 12.5)                              # meleset 2,5 detik...
-    d.update({1}, 13.0)                                # ...lalu terlihat lagi
-    d.update({1}, 20.0)
-    d.update(set(), 24.0)
-    assert st.patches == [(5, {"durasi_s": 20.0})]
-
-
-def test_satu_pelacak_dengan_dua_jenis_kejadian_dicatat_terpisah():
-    from sidewalk_sentinel.cameras import DurationTracker
-    st = Pelacak()
-    d = DurationTracker(st)
-    d.begin(1, "naik_trotoar", no=1, t_start=2.0, t=3.0)
-    d.begin(1, "parkir", no=2, t_start=8.0, t=18.0)    # pengendara naik, lalu berhenti dan parkir
-    d.update({1}, 30.0)
-    d.finish_all()
-    assert sorted(st.patches) == [(1, {"durasi_s": 28.0}), (2, {"durasi_s": 22.0})]
-
-
-def test_pelacak_lain_tidak_memperpanjang_durasi_dan_finish_all_menutup_semua():
-    from sidewalk_sentinel.cameras import DurationTracker
-    st = Pelacak()
-    d = DurationTracker(st)
-    d.begin(1, "parkir", 1, 0.0, 10.0)
-    d.begin(2, "parkir", 2, 5.0, 15.0)
-    d.update({2}, 20.0)
-    d.update({2}, 40.0)                                # 1 sudah pergi sejak 10; 2 masih terlihat
-    d.finish_all()
-    assert sorted(st.patches) == [(1, {"durasi_s": 10.0}), (2, {"durasi_s": 35.0})]
-
-
-def test_kamera_demo_menulis_durasi_tiap_kejadian_saat_sesi_selesai(srv, demo_selesai):
-    import re
+def test_menghapus_perangkat_membersihkan_data_dan_frame_berikutnya_404(srv):
     app, c = srv
-    st, ev = c.req("GET", f"/api/cams/{demo_selesai['id']}/events?limit=10")
-    assert len(ev["events"]) == 3
-    for e in ev["events"]:
-        assert e.get("durasi_s", 0) > 0, f"kejadian #{e['no']} ({e['kind']}) belum punya durasi"
-        konfirmasi = re.search(r"selama ([\d.]+) detik", e["reason"])
-        if konfirmasi:                                 # sudah diam/bergerak sekian detik saat dikonfirmasi
-            assert e["durasi_s"] >= float(konfirmasi.group(1)) - 0.1, e
-    pengendara = next(e for e in ev["events"] if e["kind"] == "naik_trotoar" and "jalan ke trotoar" in e["reason"]
-                      and e["durasi_s"] < 20)
-    assert 2 < pengendara["durasi_s"] < 15, "pengendara hijau melintas trotoar sekitar 7 detik lalu pergi"
+    ph, street = _siapkan(c)
+    folder = app.cams.get(ph.id).dir
+    assert folder.exists()
+    assert c.req("DELETE", f"/api/cams/{ph.id}")[1] == {"deleted": True}
+    assert not folder.exists() and c.req("GET", "/api/cams")[1]["cams"] == []
+    st, _ = c.req("POST", f"/api/cams/{ph.id}/frame", jpeg(street.frame()), {"Content-Type": "image/jpeg"})
+    assert st == 404, "halaman memakai 404 ini untuk mendaftar ulang"
+    assert Phone(c, key=ph.key).register()["id"] != ph.id
 
 
-# ============================================================ API laporan dan kolom CSV
-def test_api_laporan_ringkasan_dari_kamera_demo(srv, demo_selesai):
+def test_berhenti_mengirim_tidak_membuang_latar_yang_sudah_dipelajari(srv):
     app, c = srv
-    cid = demo_selesai["id"]
-    st, r = c.req("GET", f"/api/report?periode=hari_ini&kamera={cid}")
-    assert st == 200, r
-    assert (r["total"], r["parkir"], r["naik_trotoar"]) == (3, 1, 2) and r["kamera"] == cid
-    assert r["lama"]["semua"]["n"] == 3 and r["lama"]["parkir"]["n"] == 1 and r["lama"]["naik_trotoar"]["n"] == 2
-    assert r["lama"]["semua"]["maks"] >= r["lama"]["semua"]["rata"] >= r["lama"]["semua"]["min"] > 0
-    assert [k["id"] for k in r["per_kamera"]] == [cid] and r["per_kamera"][0]["total"] == 3
-    assert len(r["terbaru"]) == 3 and r["jam_puncak"]["jumlah"] == 3
-    assert sum(r["per_jam"]["parkir"]) == 1 and sum(r["per_jam"]["naik_trotoar"]) == 2
-    resp, jpg = c.req("GET", r["terbaru"][0]["snapshot_url"], raw=True)
-    assert resp.status == 200 and jpg[:2] == b"\xff\xd8", "foto bukti di laporan harus bisa dibuka"
-    st, semua = c.req("GET", "/api/report")                   # tanpa parameter: hari ini, semua kamera
-    assert st == 200 and semua["periode"] == "hari_ini" and semua["kamera"] == "semua" and semua["total"] >= 3
+    ph, street = _siapkan(c)
+    before = c.req("GET", f"/api/cams/{ph.id}")[1]
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "menunggu", 8, "tanpa frame, kamera menunggu perangkat")
+    ph.stream(street.frame, 6, until=lambda s: s["status"] == "memantau")
+    after = c.req("GET", f"/api/cams/{ph.id}")[1]
+    assert after["relearns"] == before["relearns"] == 0 and after["learn_progress"]["have"] == before["learn_progress"]["have"]
 
 
-def test_api_laporan_parameter_tidak_valid(srv, demo_selesai):
+def test_dua_perangkat_dipantau_terpisah_dan_laporan_menggabungkannya(srv):
     app, c = srv
-    assert c.req("GET", "/api/report?periode=tahun_ini")[0] == 400
-    assert c.req("GET", "/api/report?kamera=../etc")[0] == 400
-    assert c.req("GET", "/api/report?kamera=" + "a" * 12)[0] == 404
-    assert c.req("POST", "/api/report", {})[0] in (404, 405)
+    a, street = _siapkan(c)
+    b = Phone(c, name="Laptop uji")
+    b.register()
+    assert a.id != b.id
+    cam_a = app.cams.get(a.id)
+    cam_a.events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, None)
+    cam_b = app.cams.get(b.id)
+    cam_b.events.append({"kind": "naik_trotoar", "label": "N", "reason": "uji", "track_id": 1}, None)
+    r = c.req("GET", "/api/report?periode=hari_ini")[1]
+    assert r["total"] == 2 and {x["nama"] for x in r["per_kamera"]} == {"Ponsel uji", "Laptop uji"}
+    assert c.req("GET", f"/api/report?periode=hari_ini&kamera={b.id}")[1]["naik_trotoar"] == 1
+    feed = c.req("GET", "/api/events?limit=10")[1]["events"]
+    assert {e["camera"]["name"] for e in feed} == {"Ponsel uji", "Laptop uji"}
+    assert c.req("GET", "/api/events?kind=salah")[0] == 400
 
 
-def test_csv_memuat_durasi_dan_sel_berawalan_rumus_dinetralkan(srv, demo_selesai, monkeypatch):
+def test_nama_perangkat_berawalan_rumus_dinetralkan_di_csv(srv):
     app, c = srv
-    resp, body = c.req("GET", "/api/events.csv", raw=True)
-    rows = list(__import__("csv").reader(body.decode("utf-8-sig").splitlines()))
-    assert rows[0][-1] == "durasi_detik"
-    demo = [r for r in rows[1:] if r[1] == "Kamera demo"]
-    assert demo and all(float(r[-1]) > 0 for r in demo), "tiap kejadian demo punya durasi di CSV"
-
-    row = {"ts": "2026-11-26T08:00:00+07:00", "camera": {"id": "x", "name": "=HYPERLINK(\"http://jahat\")"},
-           "label": "+PARKIR", "reason": "@alasan", "no": 1}
-    monkeypatch.setattr(app.cams, "feed", lambda **kw: [row])
-    out = list(__import__("csv").reader(app.cams.csv().splitlines()))[1]
-    assert out[1].startswith("'=HYPERLINK") and out[2] == "'+PARKIR" and out[3] == "'@alasan" and out[5] == ""
-    assert cam_mod._cell("Depan toko") == "Depan toko" and cam_mod._cell(7) == 7
+    ph = Phone(c, name="=HYPERLINK(\"http://x\")")
+    ph.register()
+    app.cams.get(ph.id).events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, None)
+    text = c.req("GET", "/api/events.csv")[1].decode("utf-8-sig")
+    assert "'=HYPERLINK" in text and ",=HYPERLINK" not in text
 
 
-def test_append_dengan_waktu_tertentu_tercatat_dan_dimuat_ulang(tmp_path):
-    when = cam_mod._now().replace(hour=7, minute=15, second=0, microsecond=0) - timedelta(days=3)
-    store = EventStore(tmp_path)
-    rec = store.append(_ev(), None, when=when)
-    assert rec["ts"] == when.isoformat(timespec="seconds")
-    assert store.counts_since(when - timedelta(minutes=1))["parkir"] == 1
-    assert store.counts_since(when + timedelta(minutes=1))["parkir"] == 0, "waktu yang diberikan dipakai, bukan jam sekarang"
-    assert EventStore(tmp_path).pairs()[0][0] == when
-
-
-def test_api_laporan_tertutup_tanpa_kunci_pada_mode_lan(tmp_path):
+def test_api_tertutup_tanpa_kunci_pada_mode_lan(tmp_path):
     server, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token="kunci-uji")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        assert Client(app.port).req("GET", "/api/report")[0] == 403, "laporan memuat nama kamera dan foto bukti: butuh kunci"
-        st, body = Client(app.port, cookie="ss_key=kunci-uji").req("GET", "/api/report")
-        assert st == 200 and body["total"] == 0
+        anon = Client(app.port)
+        for method, path in (("GET", "/api/report"), ("GET", "/api/cams"), ("GET", "/api/events.csv"), ("POST", "/api/device")):
+            assert anon.req(method, path, {"key": new_key()} if method == "POST" else None)[0] == 403, path
+        authed = Client(app.port, cookie="ss_key=kunci-uji")
+        assert authed.req("GET", "/api/report")[1]["total"] == 0
+        assert authed.req("POST", "/api/device", {"key": new_key(), "name": "HP"})[0] == 201
     finally:
         app.close()
         server.shutdown()
         server.server_close()
+
+
+def test_semua_perangkat_dihentikan_bersih_saat_server_ditutup(tmp_path):
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    c = Client(app.port)
+    phones = [Phone(c, name=f"HP{i}") for i in range(3)]
+    for p in phones:
+        p.register()
+    threads = [cam._thread for cam in app.cams.list()]
+    app.close()
+    server.shutdown()
+    server.server_close()
+    assert all(not t.is_alive() for t in threads), "utas kamera harus berhenti saat aplikasi ditutup"
+
+
+def test_id_dan_kunci_tidak_menerima_baris_baru_di_ujung():
+    from sidewalk_sentinel.util import valid_id
+    assert valid_id("a" * 12) and not valid_id("a" * 12 + "\n") and not valid_id("")

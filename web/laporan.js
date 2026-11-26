@@ -267,7 +267,7 @@ export function perCameraHTML(r) {
   if (r.per_kamera.length < 2) return '';
   const rows = r.per_kamera.map((c) => `<tr><th scope="row">${esc(c.nama)}</th>
     <td class="num">${c.parkir}</td><td class="num">${c.naik_trotoar}</td><td class="num"><b>${c.total}</b></td></tr>`).join('');
-  return `<section class="stack" aria-labelledby="rpCam"><h2 class="h3" id="rpCam">Per kamera</h2>
-    <div class="panel rp-cams"><table class="table"><thead><tr><th scope="col">Kamera</th><th scope="col">Parkir</th>
+  return `<section class="stack" aria-labelledby="rpCam"><h2 class="h3" id="rpCam">Per perangkat</h2>
+    <div class="panel rp-cams"><table class="table"><thead><tr><th scope="col">Perangkat</th><th scope="col">Parkir</th>
     <th scope="col">Naik trotoar</th><th scope="col">Total</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }

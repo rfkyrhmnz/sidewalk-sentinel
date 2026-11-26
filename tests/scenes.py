@@ -1,4 +1,4 @@
-"""Adegan sintetis untuk uji dan demo (tanpa perlu rekaman lapangan).
+"""Adegan sintetis hanya untuk pengujian otomatis (bukan bagian aplikasi; tanpa perlu rekaman lapangan).
 
 Adegan 30 detik, kamera statis, jalan di atas dan trotoar di bawah:
 
@@ -139,14 +139,3 @@ class Renderer:
 
     def empty_frames(self, n: int = 8):
         return [self.frame(0.0, actors=False) for _ in range(n)]
-
-
-def write_video(scene: Scene, path: str) -> str:
-    r = Renderer(scene)
-    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), scene.fps, (W, H))
-    if not vw.isOpened():
-        raise RuntimeError("VideoWriter tidak bisa dibuka")
-    for _, f in r.frames():
-        vw.write(f)
-    vw.release()
-    return path

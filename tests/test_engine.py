@@ -1,4 +1,4 @@
-"""Uji mesin pada adegan sintetis. Kebenaran: 1 parkir + 2 naik trotoar (lihat synthetic.py)."""
+"""Uji mesin pada adegan sintetis. Kebenaran: 1 parkir + 2 naik trotoar (lihat scenes.py)."""
 from __future__ import annotations
 
 from collections import Counter
@@ -7,8 +7,7 @@ import pytest
 
 from sidewalk_sentinel import Config, Engine
 from sidewalk_sentinel.config import Config as Cfg
-from sidewalk_sentinel.synthetic import ROI, Renderer, default_scene, write_video
-from sidewalk_sentinel.analysis import run_analysis
+from scenes import ROI, Renderer, default_scene
 
 TRUTH = {"parkir": 1, "naik_trotoar": 2}
 
@@ -98,19 +97,19 @@ def test_trotoar_kosong_tidak_menghasilkan_apa_apa():
     assert eng.counts == {"parkir": 0, "naik_trotoar": 0}
 
 
-# ------------------------------------------------- bukti ablation tiap materi
-def test_ablation_morfologi_M3_mencegah_objek_terpecah():
+# --------------------------------------- ablation: tiap tahap pengolahan terbukti berguna
+def test_ablation_morfologi_mencegah_objek_terpecah():
     """Tanpa opening/closing, pita warna-paving memecah mask satu pengendara jadi dua blob."""
     assert run_scene().counts == TRUTH
     assert run_scene({"use_morphology": False}).counts["naik_trotoar"] > 2
 
 
-def test_ablation_buang_bayangan_M6_mencegah_parkir_palsu():
+def test_ablation_buang_bayangan_mencegah_parkir_palsu():
     assert run_scene(shadow=True).counts == TRUTH
     assert run_scene({"use_shadow_removal": False}, shadow=True).counts["parkir"] > 1
 
 
-def test_ablation_homomorfik_M2_menahan_gradien_cahaya():
+def test_ablation_homomorfik_menahan_gradien_cahaya():
     assert run_scene(gradient=0.35).counts == TRUTH
     assert run_scene({"use_homomorphic": False}, gradient=0.35).counts != TRUTH
 
@@ -121,19 +120,17 @@ def test_ablation_bukti_citra_asli_mencegah_halo_filter_homomorfik():
     assert run_scene({"use_raw_evidence": False}, shadow=True).counts != TRUTH
 
 
-# ---------------------------------------------------------- video dan keluaran
-def test_analisis_video_terkompresi_menulis_hasil(tmp_path):
-    src = tmp_path / "v.mp4"
-    write_video(default_scene(), str(src))
-    seen = []
-    res = run_analysis(src, ROI, Config.from_overrides({"park_seconds": 5}), out_dir=tmp_path / "out",
-                       event_cb=seen.append, preview_cb=lambda a, b: None)
-    assert res["summary"]["parkir"] == 1 and res["summary"]["naik_trotoar"] == 2
-    assert len(seen) == 3
-    out = tmp_path / "out"
-    assert (out / "result.json").exists() and (out / "result.csv").exists()
-    assert all((out / e["snapshot"]).stat().st_size > 1000 for e in res["events"])
-    assert Counter(e["kind"] for e in res["events"]) == Counter(parkir=1, naik_trotoar=2)
+# --------------------------------------------------------------------- foto bukti
+def test_tiap_kejadian_membawa_foto_bukti_jpeg_beranotasi():
+    r = Renderer(default_scene())
+    eng = Engine(ROI, Config(park_seconds=5))
+    eng.set_reference(r.empty_frames(8))
+    events = []
+    for t, f in r.frames():
+        events += eng.process(f, t).events
+    assert Counter(e.kind for e in events) == Counter(parkir=1, naik_trotoar=2)
+    for e in events:
+        assert e.snapshot and e.snapshot[:2] == b"\xff\xd8" and len(e.snapshot) > 1000
 
 
 # --------------------------------------------------------------- validasi masukan

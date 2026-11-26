@@ -1,11 +1,9 @@
 """Praproses citra.
 
-Materi 1  (Intensity Transformation & Spatial Filtering): penghalusan Gaussian,
-          transformasi pangkat (gamma), CLAHE, dan penyetaraan gain kecerahan.
-Materi 2  (Filtering in the Frequency Domain): filter homomorfik Gaussian high-emphasis
-          lewat FFT untuk meredam iluminasi yang berubah pelan (bayangan pohon/awan).
-Materi 6  (Color Image Processing): konversi BGR -> CIELAB dan HSV; selisih dihitung di
-          ruang yang memisahkan kecerahan (L) dari warna (a, b).
+Penghalusan Gaussian, transformasi pangkat (gamma), CLAHE, dan penyetaraan gain kecerahan.
+Filter homomorfik (Gaussian high-emphasis lewat FFT) meredam iluminasi yang berubah pelan,
+misalnya bayangan pohon atau awan. Warna diubah ke CIELAB dan HSV; selisih dihitung di ruang
+yang memisahkan kecerahan (L) dari warna (a, b).
 """
 from __future__ import annotations
 
@@ -62,7 +60,7 @@ class Preprocessor:
         return self._H[key]
 
     def homomorphic(self, L: np.ndarray) -> np.ndarray:
-        """Materi 2: log -> FFT -> kalikan H -> IFFT -> exp."""
+        """Filter homomorfik: log -> FFT -> kalikan H -> IFFT -> exp."""
         h, w = L.shape
         H = self._homomorphic_filter(h, w)
         spectrum = np.fft.rfft2(np.log1p(L))
@@ -73,17 +71,17 @@ class Preprocessor:
     def __call__(self, frame: np.ndarray) -> Prepared:
         bgr = self.resize(frame)
         k = self.cfg.blur_ksize
-        blur = cv2.GaussianBlur(bgr, (k, k), 0) if k > 1 else bgr          # M1
-        lab = cv2.cvtColor(blur, cv2.COLOR_BGR2LAB)                        # M6
-        hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)                        # M6
+        blur = cv2.GaussianBlur(bgr, (k, k), 0) if k > 1 else bgr
+        lab = cv2.cvtColor(blur, cv2.COLOR_BGR2LAB)
+        hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         L8 = lab[..., 0]
         if self.cfg.gamma != 1.0:
-            L8 = cv2.LUT(L8, self._gamma_lut)                              # M1
+            L8 = cv2.LUT(L8, self._gamma_lut)
         if self.cfg.use_clahe:
-            L8 = self._clahe.apply(L8)                                     # M1
+            L8 = self._clahe.apply(L8)
         L = L8.astype(np.float32)
         if self.cfg.use_homomorphic:
-            L = self.homomorphic(L)                                        # M2
+            L = self.homomorphic(L)
         return Prepared(bgr=bgr, L=L,
                         a=lab[..., 1].astype(np.float32),
                         b=lab[..., 2].astype(np.float32),
@@ -92,7 +90,7 @@ class Preprocessor:
 
 def match_gain(cur_L: np.ndarray, ref_L: np.ndarray, bg_mask: np.ndarray | None = None,
                lo: float = 0.6, hi: float = 1.6) -> float:
-    """Materi 1: transformasi linear (gain) agar kecerahan frame setara dengan referensi.
+    """Transformasi linear (gain) agar kecerahan frame setara dengan referensi.
 
     Gain diestimasi dari median piksel latar saja, sehingga keberadaan kendaraan tidak
     mengacaukan estimasi. Dipakai untuk mengimbangi perubahan cahaya global (awan, auto-exposure).

@@ -1,13 +1,10 @@
-"""Kamera server (mode CCTV): sumber video, pekerja yang berjalan terus, dan penyimpanan kejadian.
+"""Kamera = perangkat yang membuka aplikasi.
 
-Server menarik sendiri video dari kamera (RTSP, IP camera HTTP, webcam USB, atau rekaman yang diulang),
-belajar latar secara otomatis (lihat monitor.py), lalu mencatat kejadian ke disk. HP dan laptop hanya
-menjadi layar pemantau, jadi tidak perlu HTTPS untuk kamera di HP.
-
-Keamanan sumber: antarmuka web tidak boleh dipakai membaca berkas server atau memindai jaringan, jadi
-sumber yang diterima API dibatasi ke ``rtsp(s)://``, ``http(s)://``, ``device:N``, ``upload:ID`` (unggahan
-yang sudah ada), dan ``demo``. Alamat berkas bebas hanya boleh lewat baris perintah (``--cam``).
-Kredensial di alamat RTSP tidak pernah dikembalikan lewat API atau dicatat di log.
+Laptop memakai kamera laptop, HP memakai kamera HP. Tidak ada sumber lain: tidak ada alamat IP, RTSP, berkas video,
+atau adegan contoh. Halaman web mengambil gambar dari kamera perangkatnya sendiri, mengirimnya ke server sekitar lima kali
+per detik, dan server memantaunya secara langsung: belajar latar otomatis (lihat monitor.py), mendeteksi, lalu mencatat
+kejadian ke disk. Satu perangkat punya satu "kamera" di server; perangkat dikenali dari kunci acak yang disimpan di
+peramban, sehingga membuka aplikasi lagi melanjutkan kamera yang sama beserta area trotoar dan riwayatnya.
 """
 from __future__ import annotations
 
@@ -18,105 +15,26 @@ import logging
 import os
 import re
 import shutil
-import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
 
-from . import render  # noqa: E402
-from .config import Config  # noqa: E402
-from .jobs import check_roi, new_id, valid_id  # noqa: E402
-from .monitor import LEARN, Monitor  # noqa: E402
-from .report import compute_report  # noqa: E402
-from .synthetic import ROI as DEMO_ROI  # noqa: E402
+from .config import Config
+from .monitor import LEARN, Monitor
+from .report import compute_report
+from .store import DurationTracker, EventStore, now
+from .util import check_roi, new_id, valid_id
 
 log = logging.getLogger("sidewalk")
 
 MAX_CAMERAS = 8
-MAX_STREAMS = 12                      # penonton siaran MJPEG serentak
-URL_SCHEMES = ("rtsp", "rtsps", "http", "https")
-STATUS = ("perlu_area", "menghubungkan", "menunggu", "belajar", "memantau", "terputus", "jeda", "selesai")
-
-
-class SourceError(Exception):
-    """Sumber kamera tidak bisa dibuka."""
-
-
-RECORDING_KINDS = ("demo", "upload", "file")
-
-
-def source_kind(text: str) -> str:
-    """Jenis sumber dari teksnya, tanpa memeriksa keberadaan berkas (aman dipakai untuk menampilkan)."""
-    s = text or ""
-    if s in ("demo", "browser"):
-        return s
-    for prefix, kind in (("upload:", "upload"), ("device:", "device"), ("file:", "file")):
-        if s.startswith(prefix):
-            return kind
-    return "url"
-
-
-# ====================================================================== sumber kamera
-@dataclass(frozen=True)
-class Source:
-    kind: str            # demo | upload | device | url | file | browser
-    value: str
-
-    @property
-    def is_recording(self) -> bool:
-        return self.kind in RECORDING_KINDS
-
-
-def parse_source(text: str, trusted: bool = False) -> Source:
-    s = str(text or "").strip()
-    if not s:
-        raise ValueError("sumber kamera kosong")
-    if len(s) > 500 or any(ord(c) < 32 for c in s):
-        raise ValueError("sumber kamera tidak valid")
-    if s == "demo":
-        return Source("demo", "")
-    if s == "browser":                          # kamera perangkat: frame didorong dari halaman web, bukan ditarik server
-        return Source("browser", "")
-    if s.startswith("upload:"):
-        if not valid_id(s[7:]):
-            raise ValueError("id unggahan tidak valid")
-        return Source("upload", s[7:])
-    if s.startswith("device:"):
-        if not (s[7:].isdigit() and int(s[7:]) <= 9):
-            raise ValueError("nomor kamera USB harus 0 sampai 9")
-        return Source("device", s[7:])
-    if s.startswith("file:"):
-        if not trusted:
-            raise ValueError("sumber berkas hanya boleh dari baris perintah (--cam)")
-        path = Path(s[5:]).expanduser().resolve()
-        if not path.is_file():
-            raise ValueError(f"berkas tidak ada: {path}")
-        return Source("file", str(path))
-    try:
-        parts = urlsplit(s)
-        scheme, host = parts.scheme.lower(), parts.hostname
-    except ValueError as e:
-        raise ValueError("alamat kamera tidak valid") from e
-    if scheme in URL_SCHEMES and host:
-        return Source("url", s)
-    raise ValueError("sumber harus rtsp://..., http(s)://..., device:N, upload:ID, demo, atau browser")
-
-
-_USERINFO = re.compile(r"(://)[^/@\s]*@")
-_SECRET_QS = re.compile(r"(?i)([?&](?:pass\w*|pwd|token|key|secret|auth\w*|sig\w*)=)[^&#]*")
-
-
-def mask_source(text: str) -> str:
-    """Samarkan kredensial (user:sandi@ dan parameter rahasia) sebelum ditampilkan atau dicatat."""
-    return _SECRET_QS.sub(r"\1***", _USERINFO.sub(r"\1***@", text or ""))
-
-
+STATUS = ("perlu_area", "menunggu", "belajar", "memantau", "jeda")
+DEVICE_KEY = re.compile(r"[0-9a-f]{16,64}")
 MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
 _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 
@@ -151,11 +69,8 @@ def jpeg_size(data: bytes) -> tuple[int, int] | None:
 
 
 class PushCapture:
-    """Sumber yang frame-nya didorong dari luar (halaman web). Memakai bagian antarmuka cv2.VideoCapture yang
-    dipakai Camera._loop, sehingga alur pemantauan sama persis. Hanya frame terbaru yang disimpan: bila server
-    lebih lambat dari pengirim, frame lama dibuang, bukan menumpuk."""
-
-    push = True
+    """Saluran frame yang didorong dari halaman web. Hanya frame terbaru yang disimpan: bila server lebih lambat
+    dari pengirim, frame lama dibuang, bukan menumpuk (jeda tidak boleh bertambah seiring waktu)."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
@@ -176,9 +91,6 @@ class PushCapture:
             self._closed = True
             self._cond.notify_all()
 
-    def isOpened(self) -> bool:                  # noqa: N802 - meniru cv2.VideoCapture
-        return not self._closed
-
     def grab(self, timeout: float = 1.0) -> bool:
         with self._cond:
             if self._seq == self._taken and not self._closed:
@@ -188,317 +100,64 @@ class PushCapture:
             self._taken, self._cur = self._seq, self._frame
             return True
 
-    def retrieve(self):
-        return (self._cur is not None), self._cur
-
-    def get(self, prop) -> float:
-        return 0.0
-
-    def set(self, prop, value) -> bool:
-        return False
-
-    def release(self) -> None:                   # saluran dimiliki Camera dan dipakai ulang antarsesi
-        pass
-
-
-def open_capture(src: Source, target) -> cv2.VideoCapture:
-    """Buka sumber. `target` = hasil resolusi (jalur berkas, nomor perangkat, atau URL)."""
-    if src.kind == "device":
-        cap = cv2.VideoCapture(int(target), cv2.CAP_DSHOW) if sys.platform == "win32" else cv2.VideoCapture(int(target))
-    elif src.kind == "url":
-        try:
-            params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000]
-            cap = cv2.VideoCapture(str(target), cv2.CAP_FFMPEG, params)
-        except (TypeError, AttributeError, cv2.error):
-            cap = cv2.VideoCapture(str(target), cv2.CAP_FFMPEG)
-    else:
-        cap = cv2.VideoCapture(str(target))
-    if not cap.isOpened():
-        cap.release()
-        raise SourceError({"device": "webcam tidak bisa dibuka (dipakai aplikasi lain atau tidak ada)",
-                           "url": "tidak bisa terhubung ke kamera (cek alamat, sandi, dan jaringan)"}
-                          .get(src.kind, "video tidak bisa dibuka"))
-    try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    except cv2.error:
-        pass
-    return cap
+    def retrieve(self) -> np.ndarray | None:
+        return self._cur
 
 
 # ===================================================================== spesifikasi
 @dataclass
 class CameraSpec:
     id: str
+    device: str                       # kunci perangkat (acak, dari peramban)
     name: str
-    source: str
     roi: list | None = None
     settings: dict = field(default_factory=dict)
     learn: str = "normal"
     enabled: bool = True
-    max_loops: int | None = None      # sumber rekaman saja: None = ulangi terus
-    speed: float = 1.0                # sumber rekaman saja: 1 = waktu nyata, 0 = secepat mungkin
     created: str = ""
+
+    @classmethod
+    def from_dict(cls, item: dict) -> "CameraSpec":
+        """Muat dari cameras.json. Kolom asing diabaikan; ValueError bila isinya tidak layak dipakai."""
+        known = {f.name for f in fields(cls)}
+        spec = cls(**{k: v for k, v in item.items() if k in known})
+        if not valid_id(spec.id) or not DEVICE_KEY.fullmatch(str(spec.device or "")):
+            raise ValueError("id atau kunci perangkat tidak valid")
+        return spec
 
 
 def _clean_name(value) -> str:
     name = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
     if not 1 <= len(name) <= 40:
-        raise ValueError("nama kamera harus 1 sampai 40 karakter")
+        raise ValueError("nama perangkat harus 1 sampai 40 karakter")
     return name
 
 
-def build_spec(data: dict, existing: CameraSpec | None = None, trusted: bool = False) -> CameraSpec:
-    """Validasi dan normalisasi isi permintaan. `existing` = pembaruan (sumber tidak boleh berubah)."""
-    if existing is None:
-        src = parse_source(data.get("source", ""), trusted=trusted)
-        demo = src.kind == "demo"
-        spec = CameraSpec(id=new_id(), name="", source=str(data.get("source", "")).strip(),
-                          created=datetime.now().astimezone().isoformat(timespec="seconds"))
-        if demo:                                    # bawaan demo: cepat belajar, cepat memicu, berhenti sendiri
-            spec.name, spec.roi = "Kamera demo", [list(p) for p in DEMO_ROI]
-            spec.settings, spec.learn, spec.max_loops = {"park_seconds": 5}, "cepat", 2
-        elif src.is_recording:
-            spec.learn, spec.max_loops = "cepat", 1
-    else:
-        if "source" in data and str(data["source"]).strip() != existing.source:
-            raise ValueError("sumber kamera tidak bisa diubah; hapus lalu tambahkan kamera baru")
-        spec = CameraSpec(**asdict(existing))
-        src = Source(source_kind(spec.source), "")
-
-    if "name" in data or not spec.name:
-        spec.name = _clean_name(data.get("name", spec.name))
+def apply_changes(spec: CameraSpec, data: dict) -> CameraSpec:
+    """Salinan `spec` dengan perubahan dari `data`, tervalidasi. Yang tidak disebut tidak berubah."""
+    new = CameraSpec(**asdict(spec))
+    if "name" in data:
+        new.name = _clean_name(data["name"])
     if "roi" in data:
-        spec.roi = None if data["roi"] is None else [list(p) for p in check_roi(data["roi"])]
+        new.roi = None if data["roi"] is None else [list(p) for p in check_roi(data["roi"])]
     if "settings" in data:
         overrides = data["settings"] or {}
         if not isinstance(overrides, dict):
             raise ValueError("settings harus berupa objek")
         Config.from_overrides(overrides)            # menolak kunci tak dikenal / nilai di luar batas
-        spec.settings = dict(overrides)
+        new.settings = dict(overrides)
     if "learn" in data:
         if data["learn"] not in LEARN:
             raise ValueError(f"learn harus salah satu dari {sorted(LEARN)}")
-        spec.learn = data["learn"]
+        new.learn = data["learn"]
     if "enabled" in data:
-        spec.enabled = bool(data["enabled"])
-    if src.is_recording:
-        if "max_loops" in data:
-            ml = data["max_loops"]
-            spec.max_loops = None if ml is None else int(ml)
-            if spec.max_loops is not None and not 1 <= spec.max_loops <= 1000:
-                raise ValueError("max_loops harus 1..1000 atau kosong (ulangi terus)")
-        if "speed" in data:
-            spec.speed = float(data["speed"])
-            if not 0 <= spec.speed <= 16:
-                raise ValueError("speed harus 0..16")
-    return spec
-
-
-# ====================================================================== kejadian
-def _now() -> datetime:
-    return datetime.now().astimezone()
-
-
-MAX_DURATION_S = 7 * 24 * 3600
-PATCH_KEYS = ("durasi_s",)
-
-
-def _clean_patch(fields: dict) -> dict:
-    """Hanya kolom yang dikenal dan bernilai wajar. Berkas events.jsonl bisa rusak atau diedit tangan."""
-    out = {}
-    for k in PATCH_KEYS:
-        v = fields.get(k)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= MAX_DURATION_S:
-            out[k] = round(float(v), 1)
-    return out
-
-
-class EventStore:
-    """Kejadian satu kamera: events.jsonl (satu baris per kejadian) dan bukti foto di events/NNN.jpg.
-
-    Kejadian dicatat sekali, saat terkonfirmasi. Hal yang baru diketahui kemudian (berapa lama kendaraan akhirnya
-    berada di trotoar) ditambahkan sebagai baris `{"no": N, "patch": {...}}` di akhir berkas, lalu dilebur ke
-    rekamannya saat dimuat. Berkas tetap hanya bertambah, jadi mati listrik tidak merusak catatan lama."""
-
-    def __init__(self, folder: Path):
-        self.folder = folder
-        self.events_dir = folder / "events"
-        self.events_dir.mkdir(parents=True, exist_ok=True)
-        self._file = folder / "events.jsonl"
-        self._meta = folder / "meta.json"
-        self._lock = threading.Lock()
-        self.records: list[dict] = []
-        self._dts: list[datetime] = []
-        self._load()
-
-    def _load(self) -> None:
-        if self._file.exists():
-            index: dict[int, int] = {}
-            for line in self._file.read_text(encoding="utf-8", errors="replace").splitlines():
-                try:
-                    rec = json.loads(line)
-                    if isinstance(rec, dict) and isinstance(rec.get("patch"), dict):
-                        i = index.get(rec.get("no"))
-                        if i is not None:
-                            self.records[i] = {**self.records[i], **_clean_patch(rec["patch"])}
-                        continue
-                    dt = datetime.fromisoformat(rec["ts"])
-                    if not isinstance(rec.get("no"), int):
-                        continue
-                except (ValueError, KeyError, TypeError, AttributeError):   # baris rusak (mis. mati listrik): lewati
-                    continue
-                index[rec["no"]] = len(self.records)
-                self.records.append(rec)
-                self._dts.append(dt)
-        nxt = 1 + max((r["no"] for r in self.records), default=0)
-        try:
-            nxt = max(nxt, int(json.loads(self._meta.read_text(encoding="utf-8"))["next_no"]))
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-        self.next_no = nxt
-
-    def append(self, ev: dict, snapshot: bytes | None, when: datetime | None = None) -> dict:
-        """Catat satu kejadian. `when` (berzona waktu) hanya untuk mengimpor atau menyiapkan data uji; bawaannya sekarang."""
-        with self._lock:
-            no = self.next_no
-            self.next_no += 1
-            now = when or _now()
-            rec = {"no": no, "ts": now.isoformat(timespec="seconds"), "kind": ev["kind"], "label": ev["label"],
-                   "reason": ev["reason"], "track_id": ev["track_id"],
-                   "snapshot": f"events/{no}.jpg" if snapshot else None}
-            if snapshot:
-                (self.events_dir / f"{no}.jpg").write_bytes(snapshot)
-            with open(self._file, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            self._meta.write_text(json.dumps({"next_no": self.next_no}), encoding="utf-8")
-            self.records.append(rec)
-            self._dts.append(now)
-            return rec
-
-    def patch(self, no: int, **fields) -> bool:
-        """Tambahkan keterangan baru (mis. durasi_s) ke kejadian yang sudah dicatat. False bila tidak ada yang
-        diterapkan. Rekaman diganti dengan salinan, bukan diubah di tempat: pembaca di utas lain (API) masih memegang
-        objek lama dan tidak boleh melihat kamus yang berubah ukuran saat sedang diserialisasi."""
-        clean = _clean_patch(fields)
-        if not clean:
-            return False
-        with self._lock:
-            i = next((j for j in range(len(self.records) - 1, -1, -1) if self.records[j]["no"] == no), None)
-            if i is None:
-                return False
-            try:
-                with open(self._file, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"no": no, "patch": clean}) + "\n")
-            except OSError:                                    # folder kamera sudah dihapus
-                return False
-            self.records[i] = {**self.records[i], **clean}
-            return True
-
-    def snapshot_path(self, no: int) -> Path | None:
-        p = self.events_dir / f"{int(no)}.jpg"
-        return p if p.is_file() else None
-
-    def after(self, no: int, limit: int = 200) -> list[dict]:
-        with self._lock:
-            return [r for r in self.records if r["no"] > no][:limit]
-
-    def latest(self, limit: int = 50, before_no: int | None = None, kind: str | None = None) -> list[dict]:
-        with self._lock:
-            rows = [r for r in reversed(self.records)
-                    if (before_no is None or r["no"] < before_no) and (kind is None or r["kind"] == kind)]
-        return rows[:limit]
-
-    def counts_since(self, since: datetime) -> dict:
-        out = {"parkir": 0, "naik_trotoar": 0}
-        with self._lock:
-            for r, dt in zip(self.records, self._dts):
-                if dt >= since and r["kind"] in out:
-                    out[r["kind"]] += 1
-        return out
-
-    @property
-    def seq(self) -> int:
-        with self._lock:
-            return self.records[-1]["no"] if self.records else 0
-
-    def pairs(self) -> list[tuple[datetime, dict]]:
-        with self._lock:
-            return list(zip(self._dts, self.records))
-
-    def prune(self, cutoff: datetime, max_events: int) -> int:
-        """Hapus kejadian lebih tua dari `cutoff` dan sisakan paling banyak `max_events` terbaru."""
-        with self._lock:
-            keep = [i for i, d in enumerate(self._dts) if d >= cutoff][-max_events:]
-            if len(keep) == len(self.records):
-                return 0
-            keep_set = set(keep)
-            for i, r in enumerate(self.records):
-                if i not in keep_set:
-                    (self.events_dir / f"{r['no']}.jpg").unlink(missing_ok=True)
-            tmp = self._file.with_suffix(".tmp")
-            tmp.write_text("".join(json.dumps(self.records[i], ensure_ascii=False) + "\n" for i in keep),
-                           encoding="utf-8")
-            tmp.replace(self._file)
-            removed = len(self.records) - len(keep)
-            self.records = [self.records[i] for i in keep]
-            self._dts = [self._dts[i] for i in keep]
-            return removed
-
-
-# ================================================================ lama kejadian
-GRACE_S = 3.0           # kendaraan dianggap sudah pergi bila tidak terlihat di trotoar selama ini (waktu mesin)
-
-
-class DurationTracker:
-    """Mencatat berapa lama tiap kejadian berlangsung. Kejadian dibuka saat terkonfirmasi; selama pelacaknya masih
-    terlihat di zona trotoar, waktu terakhir terlihat diperbarui. Lepas dari zona lebih dari GRACE_S (atau sesi
-    berakhir), durasi = terakhir terlihat - mulai kondisi terpenuhi, lalu ditulis ke kejadian.
-
-    Jeda GRACE_S mencegah satu-dua frame yang meleset (kontak dengan trotoar sempat di bawah ambang) memotong
-    durasi kendaraan yang sebenarnya masih ada. Kuncinya (track, jenis): satu pelacak bisa punya dua kejadian,
-    misalnya pengendara naik ke trotoar lalu berhenti di sana."""
-
-    def __init__(self, store: EventStore, grace: float = GRACE_S):
-        self.store, self.grace = store, grace
-        self._open: dict[tuple[int, str], list] = {}      # (track, jenis) -> [no, mulai, terakhir terlihat]
-
-    def begin(self, track_id: int, kind: str, no: int, t_start: float, t: float) -> None:
-        self._open[(track_id, kind)] = [no, t_start, t]
-
-    def update(self, present: set[int], t: float) -> None:
-        for key in list(self._open):
-            o = self._open[key]
-            if key[0] in present:
-                o[2] = t
-            elif t - o[2] >= self.grace:
-                self._finish(key)
-
-    def finish_all(self) -> None:
-        for key in list(self._open):
-            self._finish(key)
-
-    def _finish(self, key: tuple[int, str]) -> None:
-        no, t0, last = self._open.pop(key)
-        self.store.patch(no, durasi_s=max(0.0, last - t0))
+        new.enabled = bool(data["enabled"])
+    return new
 
 
 # ======================================================================= gambar
-def status_card(lines: list[str], size=(640, 360)) -> np.ndarray:
-    """Gambar pengganti saat belum ada frame: teks status di atas panel gelap bergaya HUD."""
-    w, h = size
-    img = np.full((h, w, 3), (24, 16, 10), np.uint8)
-    cv2.rectangle(img, (6, 6), (w - 7, h - 7), (90, 70, 40), 1)
-    y = h // 2 - 12 * (len(lines) - 1)
-    for i, line in enumerate(lines):
-        scale = 0.7 if i == 0 else 0.5
-        (tw, _), _ = cv2.getTextSize(line, render.FONT, scale, 1)
-        cv2.putText(img, line, (max(10, (w - tw) // 2), y + i * 26), render.FONT, scale,
-                    render.CYAN if i == 0 else render.DIM, 1, cv2.LINE_AA)
-    return img
-
-
 def _cell(value):
-    """Nama kamera berasal dari pengguna. Sel yang diawali = + - @ dibaca Excel sebagai rumus, jadi diberi tanda petik."""
+    """Nama perangkat berasal dari pengguna. Sel yang diawali = + - @ dibaca Excel sebagai rumus, jadi diberi tanda petik."""
     if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
         return "'" + value
     return value
@@ -508,46 +167,30 @@ def _ascii(text: str, limit: int = 24) -> str:
     return text.encode("ascii", "replace").decode()[:limit]
 
 
-def _shrink(frame: np.ndarray, width: int) -> np.ndarray:
-    h, w = frame.shape[:2]
-    if w <= width:
-        return frame
-    return cv2.resize(frame, (width, max(1, round(h * width / w))), interpolation=cv2.INTER_AREA)
-
-
 # ======================================================================= kamera
 class Camera:
-    """Satu kamera: thread yang terus membaca sumber, memantau, dan mencatat kejadian."""
+    """Satu kamera perangkat: utas yang menerima frame, memantau, dan mencatat kejadian."""
 
-    def __init__(self, spec: CameraSpec, root: Path, resolver):
+    def __init__(self, spec: CameraSpec, root: Path):
         self.spec = spec
         self.dir = root / spec.id
         self.events = EventStore(self.dir)
         self._durations = DurationTracker(self.events)
-        self._resolver = resolver
         self._lock = threading.RLock()
-        self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._flags = {"reconf": False, "recal": False}
         self._thread: threading.Thread | None = None
+        self.channel = PushCapture()
         self.removed = False
         # status publik
-        self.status, self.message = "menghubungkan", ""
+        self.status, self.message = "menunggu", "Menunggu gambar dari perangkat"
         self.learn = (0, 0)
         self.relearns = 0
         self.fps = 0.0
         self.size: tuple[int, int] | None = None
         self.connected_since: float | None = None
-        # gambar terbaru
-        self._jpg: bytes | None = None
-        self._jpg_ver = 0
-        self._jpg_t = 0.0
-        self._frame: np.ndarray | None = None
-        self._watch_until = 0.0
         self._last_proc: float | None = None
-        # kamera perangkat: frame didorong lewat push(); jejak terakhir dikirim balik agar halaman bisa menggambarnya
-        self.channel: PushCapture | None = PushCapture() if source_kind(spec.source) == "browser" else None
         self._tracks: list[dict] = []
 
     # -------------------------------------------------------------- siklus hidup
@@ -559,15 +202,12 @@ class Camera:
         self.removed = True
         self._stop.set()
         self._wake.set()
-        if self.channel:
-            self.channel.close()
-        with self._cond:
-            self._cond.notify_all()
+        self.channel.close()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
     def reconfigure(self, spec: CameraSpec, restart: bool = True) -> None:
-        """Terapkan spesifikasi baru. `restart` = bangun ulang sesi (belajar latar dari awal)."""
+        """Terapkan spesifikasi baru. `restart` = bangun ulang pemantau (belajar latar dari awal)."""
         with self._lock:
             self.spec = spec
             if restart:
@@ -588,70 +228,10 @@ class Camera:
         with self._lock:
             self.status, self.message = status, message
 
-    # ------------------------------------------------------------------ gambar
-    def touch(self) -> None:
-        """Ada penonton: render gambar beranotasi dengan laju penuh beberapa detik ke depan."""
-        self._watch_until = time.monotonic() + 8.0
-
-    def _want_image(self) -> bool:
-        now = time.monotonic()
-        return now < self._watch_until or self._jpg is None or now - self._jpg_t > 5.0
-
-    def _publish(self, img: np.ndarray) -> None:
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 72])
-        if ok:
-            with self._cond:
-                self._jpg, self._jpg_t = buf.tobytes(), time.monotonic()
-                self._jpg_ver += 1
-                self._cond.notify_all()
-
-    def _publish_last(self, monitor: Monitor | None) -> None:
-        """Terbitkan frame terakhir yang diproses: kamera yang berhenti (selesai/jeda) harus menampilkan
-        adegan terakhirnya, bukan gambar basi dari beberapa detik lalu (tanpa penonton gambar jarang diperbarui)."""
-        if monitor is not None and monitor.state == "memantau" and monitor.engine.last:
-            self._publish(monitor.engine.annotated())
-
-    def _publish_plain(self, frame: np.ndarray, caption: str) -> None:
-        img = _shrink(frame, 640).copy()
-        render.put_text(img, caption, (8, 18), render.CYAN, 0.45)
-        self._publish(img)
-
-    def jpeg(self) -> bytes:
-        """Gambar beranotasi terbaru; bila belum ada, kartu status. Selalu mengembalikan gambar."""
-        self.touch()
-        with self._lock:
-            jpg, status, message = self._jpg, self.status, self.message
-        if jpg is not None:
-            return jpg
-        lines = {"menghubungkan": ["MENGHUBUNGKAN", "menunggu frame pertama"],
-                 "menunggu": ["MENUNGGU PERANGKAT", "buka halaman kamera ini lalu nyalakan kamera"],
-                 "terputus": ["TERPUTUS", message or "mencoba lagi"],
-                 "jeda": ["DIJEDA", "tekan Lanjutkan untuk memantau"],
-                 "selesai": ["REKAMAN SELESAI", "tekan Putar ulang"]}.get(status, [status.upper(), message])
-        ok, buf = cv2.imencode(".jpg", status_card(lines), [cv2.IMWRITE_JPEG_QUALITY, 80])
-        return buf.tobytes()
-
-    def raw_jpeg(self) -> bytes | None:
-        """Frame asli terbaru tanpa anotasi (untuk menandai area). None bila belum ada frame sungguhan."""
-        self.touch()
-        with self._lock:
-            frame = self._frame
-        if frame is None:
-            return None
-        ok, buf = cv2.imencode(".jpg", _shrink(frame, 960), [cv2.IMWRITE_JPEG_QUALITY, 88])
-        return buf.tobytes() if ok else None
-
-    def wait_frame(self, last_ver: int, timeout: float = 5.0) -> tuple[bytes | None, int]:
-        with self._cond:
-            if self._jpg_ver == last_ver and not self.removed:
-                self._cond.wait(timeout)
-            return self._jpg, self._jpg_ver
-
-    # ------------------------------------------------------------------ kamera perangkat
+    # ------------------------------------------------------------------ perangkat
     def push(self, jpeg: bytes) -> dict:
-        """Terima satu frame dari halaman web. ValueError bila bukan kamera perangkat atau frame tidak wajar."""
-        if self.channel is None:
-            raise ValueError("kamera ini bukan kamera perangkat; frame hanya diterima dari sumber 'browser'")
+        """Terima satu frame dari halaman web. ValueError bila frame tidak wajar. Mengembalikan keadaan terkini
+        (status, jejak kendaraan, hitungan) agar halaman bisa menggambarnya tanpa permintaan kedua."""
         size = jpeg_size(jpeg)
         if size is None:
             raise ValueError("frame bukan JPEG yang valid")
@@ -666,22 +246,19 @@ class Camera:
 
     def live_state(self) -> dict:
         with self._lock:
-            return {"status": self.status, "message": self.message,
+            return {"status": self.status, "message": self.message, "enabled": self.spec.enabled,
                     "learn_progress": {"have": self.learn[0], "need": self.learn[1]},
                     "tracks": list(self._tracks), "seq": self.events.seq,
-                    "counts_today": self.events.counts_since(_now().replace(hour=0, minute=0, second=0, microsecond=0))}
+                    "counts_today": self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))}
 
-    # ------------------------------------------------------------------ informasi
     def info(self) -> dict:
-        today = _now().replace(hour=0, minute=0, second=0, microsecond=0)
-        counts = self.events.counts_since(today)
+        counts = self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))
         with self._lock:
             spec = self.spec
             last = self.events.records[-1] if self.events.records else None
             return {
-                "id": spec.id, "name": spec.name, "source": mask_source(spec.source), "kind": source_kind(spec.source),
-                "roi": spec.roi, "settings": spec.settings, "learn": spec.learn, "enabled": spec.enabled,
-                "max_loops": spec.max_loops, "speed": spec.speed, "created": spec.created,
+                "id": spec.id, "name": spec.name, "roi": spec.roi, "settings": spec.settings, "learn": spec.learn,
+                "enabled": spec.enabled, "created": spec.created,
                 "status": self.status, "message": self.message,
                 "learn_progress": {"have": self.learn[0], "need": self.learn[1]},
                 "relearns": self.relearns, "fps": round(self.fps, 1), "size": list(self.size) if self.size else None,
@@ -692,7 +269,6 @@ class Camera:
 
     # ---------------------------------------------------------------- pekerja
     def _run(self) -> None:
-        attempt = 0
         while not self._stop.is_set():
             if not self.spec.enabled:
                 self._set("jeda", "Dijeda")
@@ -702,25 +278,27 @@ class Camera:
             outcome = self._session()
             if outcome == "stop":
                 return
-            if outcome == "putus":
-                attempt += 1
-                wait = min(30, 2 ** min(attempt, 5))
-                base = self.message or "sumber terputus"
-                for left in range(wait, 0, -1):
-                    self._set("terputus", f"{base}. Mencoba lagi dalam {left} dtk")
-                    if self._stop.wait(1.0) or self._wake.is_set():
-                        break
-                self._wake.clear()
-            elif outcome == "selesai":
-                self._set("selesai", "Rekaman selesai diputar")
-                while not self._stop.is_set() and not self._wake.is_set():
-                    self._wake.wait(0.5)
-                self._wake.clear()
-                self._take("recal")             # "putar ulang" = mulai sesi baru
-                self._take("reconf")
-            else:                               # 'ulang' (konfigurasi berubah) atau 'jeda'
-                attempt = 0
-                self._wake.clear()
+            self._wake.clear()
+
+    def _session(self) -> str:
+        """Satu rangkaian pemantauan dengan satu Monitor. Berakhir saat konfigurasi berubah atau dijeda."""
+        spec = self.spec
+        self._take("reconf")                              # pemantau baru ini sudah memakai spesifikasi terbaru
+        self._take("recal")
+        try:
+            cfg = Config.from_overrides(spec.settings)
+        except ValueError:
+            log.warning("perangkat %s: pengaturan tersimpan tidak valid; memakai bawaan", spec.name)
+            cfg = Config()
+        try:
+            return self._loop(self._build_monitor(spec, cfg), cfg)
+        except Exception:               # noqa: BLE001
+            log.exception("perangkat %s: pemantauan berhenti karena galat", spec.name)
+            self._set("menunggu", "Galat internal; memulai ulang")
+            self._stop.wait(2.0)
+            return "ulang"
+        finally:
+            self._durations.finish_all()                 # sesi berakhir (jeda, ubah area, hapus): tutup yang masih terbuka
 
     def _build_monitor(self, spec: CameraSpec, cfg: Config) -> Monitor | None:
         if not spec.roi:
@@ -730,144 +308,80 @@ class Camera:
                                           f"P:{mon.counts['parkir']} N:{mon.counts['naik_trotoar']}")
         return mon
 
-    def _session(self) -> str:
-        spec = self.spec
-        try:
-            src = parse_source(spec.source, trusted=True)
-            cfg = Config.from_overrides(spec.settings)
-            if src.kind == "browser":
-                cap = self.channel
-                self._set("menunggu", "Menunggu kamera perangkat")
-            else:
-                target = self._resolver(src)
-                self._set("menghubungkan", "Menghubungkan ke kamera")
-                cap = open_capture(src, target)
-        except (ValueError, SourceError) as e:
-            self._set("terputus", str(e))
-            return "putus"
-        except Exception:               # noqa: BLE001
-            log.exception("kamera %s: galat saat membuka sumber", spec.name)
-            self._set("terputus", "galat internal saat membuka sumber")
-            return "putus"
-        try:
-            return self._loop(cap, src, spec, cfg)
-        except Exception:               # noqa: BLE001
-            log.exception("kamera %s: sesi berhenti karena galat", spec.name)
-            self._set("terputus", "galat internal; mencoba lagi")
-            return "putus"
-        finally:
-            cap.release()
-            self._durations.finish_all()                 # sesi berakhir (jeda, putus, hapus): tutup yang masih terbuka
-
-    def _loop(self, cap: cv2.VideoCapture, src: Source, spec: CameraSpec, cfg: Config) -> str:
-        rec = src.is_recording
-        fps_src = cap.get(cv2.CAP_PROP_FPS) if rec else 0.0
-        if rec and not 1.0 <= fps_src <= 120.0:
-            fps_src = 10.0
-        step = max(1, round(fps_src / cfg.target_fps)) if rec else 1
-        monitor = self._build_monitor(spec, cfg)
+    def _loop(self, monitor: Monitor | None, cfg: Config) -> str:
+        cap = self.channel
         wall0 = time.monotonic()
-        t = t_base = 0.0
-        frame_i = loops = errors = 0
-        n_push = 0                          # kamera perangkat: jumlah frame yang pernah diterima
         last_proc = -1e9
         got = False
+        errors = 0
         self.learn, self.relearns = (0, 0), 0
+        self._tracks = []
+        self._set("perlu_area" if monitor is None else "menunggu",
+                  "Tandai area trotoar untuk mulai memantau" if monitor is None else "Menunggu gambar dari perangkat")
 
         while True:
             if self._stop.is_set():
                 return "stop"
-            if not self.spec.enabled:
-                self._publish_last(monitor)
-                return "jeda"
-            if self._take("reconf"):
+            if not self.spec.enabled or self._take("reconf"):
                 return "ulang"
             if self._take("recal") and monitor is not None:
                 monitor.recalibrate("diminta pengguna")
             if not cap.grab():
-                if getattr(cap, "push", False):
-                    # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu, JANGAN buang latar yang
-                    # sudah dipelajari. Gambar terakhir tetap tampil.
-                    if got and time.monotonic() - cap.last_push > 3.0:
-                        got = False
-                        self.connected_since = None
-                        self._set("menunggu", "Perangkat berhenti mengirim gambar. Buka lagi halaman kamera ini.")
-                    continue
-                if rec:
-                    loops += 1
-                    if spec.max_loops is not None and loops >= spec.max_loops:
-                        self._publish_last(monitor)
-                        return "selesai"
-                    t_base, frame_i = t + 1.0 / fps_src, 0
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    if monitor is not None and monitor.state == "memantau":
-                        monitor.engine.tracker.reset()      # adegan rekaman melompat ke awal
-                    continue
-                self._set("terputus", "aliran video berhenti")
-                return "putus"
+                # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu, JANGAN buang latar yang sudah
+                # dipelajari. Bila perangkat kembali, pemantauan lanjut dari sana.
+                if got and time.monotonic() - cap.last_push > 3.0:
+                    got = False
+                    self.connected_since = None
+                    self._set("menunggu", "Perangkat berhenti mengirim gambar. Buka lagi aplikasi ini.")
+                continue
 
-            now = time.monotonic()
-            if rec:
-                t = t_base + frame_i / fps_src
-                frame_i += 1
-                if (frame_i - 1) % step:
-                    continue
-                if spec.speed > 0:
-                    delay = wall0 + t / spec.speed - now
-                    if delay > 0 and self._stop.wait(delay):
-                        return "stop"
-            else:
-                t = now - wall0
-                if now - last_proc < 1.0 / cfg.target_fps:
-                    continue
-                last_proc = now
-            ok, frame = cap.retrieve()
-            if not ok or frame is None:
+            now_m = time.monotonic()
+            if now_m - last_proc < 1.0 / cfg.target_fps:
+                continue
+            last_proc = now_m
+            frame = cap.retrieve()
+            if frame is None:
                 continue
             if not got:
                 got = True
                 self.connected_since = time.time()
-                if n_push and monitor is not None and monitor.state == "memantau":
+                if monitor is not None and monitor.state == "memantau":
                     monitor.engine.tracker.reset()        # setelah jeda panjang, jejak lama tidak berlaku
-            n_push += 1
             self._note_frame(frame)
 
             if monitor is None:
                 self._set("perlu_area", "Tandai area trotoar untuk mulai memantau")
-                if self._want_image():
-                    self._publish_plain(frame, "TANDAI AREA TROTOAR")
                 continue
             try:
-                report = monitor.feed(frame, t)
+                report = monitor.feed(frame, now_m - wall0)
                 errors = 0
-            except Exception:           # noqa: BLE001 - satu frame buruk tidak boleh mematikan kamera
+            except Exception:           # noqa: BLE001 - satu frame buruk tidak boleh mematikan pemantauan
                 errors += 1
-                log.exception("kamera %s: gagal memproses frame", spec.name)
+                log.exception("perangkat %s: gagal memproses frame", self.spec.name)
                 if errors >= 20:
-                    self._set("terputus", "terlalu banyak galat saat memproses frame")
-                    return "putus"
+                    self._set("menunggu", "Terlalu banyak galat saat memproses frame; memulai ulang")
+                    return "ulang"
                 continue
-            self._apply(report, monitor, frame)
+            self._apply(report, monitor)
 
     def _note_frame(self, frame: np.ndarray) -> None:
-        now = time.monotonic()
+        t = time.monotonic()
         with self._lock:
-            self._frame = frame
             self.size = (frame.shape[1], frame.shape[0])
-            if self._last_proc is not None and now > self._last_proc:
-                inst = 1.0 / (now - self._last_proc)
+            if self._last_proc is not None and t > self._last_proc:
+                inst = 1.0 / (t - self._last_proc)
                 self.fps = inst if self.fps == 0 else 0.9 * self.fps + 0.1 * inst
-            self._last_proc = now
+            self._last_proc = t
 
-    def _apply(self, rep, monitor: Monitor, frame: np.ndarray) -> None:
+    def _apply(self, rep, monitor: Monitor) -> None:
         with self._lock:
             self.learn, self.relearns = rep.learn, monitor.relearns
         if rep.state == "belajar":
             self._durations.finish_all()                 # pelacak direset saat belajar ulang
             have, need = rep.learn
-            self._set("belajar", f"Belajar latar {have} dari {need}" + (f" ({rep.note})" if rep.note else ""))
-            if self._want_image():
-                self._publish_plain(frame, f"BELAJAR LATAR {have}/{need}")
+            with self._lock:
+                self._tracks = []
+            self._set("belajar", f"Mempelajari latar {have} dari {need}" + (f" ({rep.note})" if rep.note else ""))
             return
         self._set("memantau", "")
         W, H = monitor.engine.size if rep.processed else (1, 1)
@@ -877,27 +391,20 @@ class Camera:
         for ev in rep.events:
             rec = self.events.append(ev.as_dict(), ev.snapshot)
             self._durations.begin(ev.track_id, ev.kind, rec["no"], ev.t_start, ev.t)
-            log.info("kamera %s: %s (kejadian #%d)", self.spec.name, ev.kind, rec["no"])
+            log.info("perangkat %s: %s (kejadian #%d)", self.spec.name, ev.kind, rec["no"])
         if rep.processed:
             self._durations.update({v["id"] for v in rep.tracks if v["in_roi"]}, monitor.engine.last["t"])
-        if self._want_image():
-            if rep.processed:
-                self._publish(monitor.engine.annotated())
-            else:                                    # frame penutup belajar: engine belum memprosesnya
-                self._publish_plain(frame, "LATAR SIAP, MEMANTAU")
 
 
 # ====================================================================== manajer
 class CameraManager:
-    def __init__(self, data_root: str | Path, resolver, retention_days: int = 30, max_events: int = 5000):
-        self.root = Path(data_root) / "cams"
+    def __init__(self, data_root: str | Path, retention_days: int = 30, max_events: int = 5000):
+        self.root = Path(data_root) / "devices"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.file = Path(data_root) / "cameras.json"
-        self._resolver = resolver
+        self.file = Path(data_root) / "devices.json"
         self.retention_days, self.max_events = retention_days, max_events
         self._cams: dict[str, Camera] = {}
         self._lock = threading.RLock()
-        self._streams = threading.BoundedSemaphore(MAX_STREAMS)
         self._stop = threading.Event()
 
     # ------------------------------------------------------------------- mulai
@@ -906,16 +413,14 @@ class CameraManager:
             try:
                 items = json.loads(self.file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                log.warning("cameras.json rusak; kamera tidak dipulihkan")
+                log.warning("%s rusak; perangkat tidak dipulihkan", self.file.name)
                 items = []
             for item in items if isinstance(items, list) else []:
                 try:
-                    spec = CameraSpec(**item)
-                    if not valid_id(spec.id):
-                        continue
-                except TypeError:
+                    spec = CameraSpec.from_dict(item)
+                except (TypeError, ValueError, AttributeError):
                     continue
-                cam = Camera(spec, self.root, self._resolver)
+                cam = Camera(spec, self.root)
                 self._cams[spec.id] = cam
                 cam.start()
         threading.Thread(target=self._janitor, name="cam-janitor", daemon=True).start()
@@ -932,21 +437,21 @@ class CameraManager:
         tmp.write_text(json.dumps([asdict(c.spec) for c in self._cams.values()], ensure_ascii=False, indent=1),
                        encoding="utf-8")
         try:
-            os.chmod(tmp, 0o600)              # memuat sandi RTSP: batasi pembacaan
+            os.chmod(tmp, 0o600)              # kunci perangkat mengenali pemiliknya: batasi pembacaan
         except OSError:
             pass
         tmp.replace(self.file)
 
     def _janitor(self) -> None:
         while not self._stop.is_set():
-            cutoff = _now() - timedelta(days=self.retention_days)
+            cutoff = now() - timedelta(days=self.retention_days)
             with self._lock:
                 cams = list(self._cams.values())
             for cam in cams:
                 try:
                     n = cam.events.prune(cutoff, self.max_events)
                     if n:
-                        log.info("kamera %s: %d kejadian lama dihapus", cam.spec.name, n)
+                        log.info("perangkat %s: %d kejadian lama dihapus", cam.spec.name, n)
                 except OSError:
                     log.exception("gagal merapikan kejadian %s", cam.spec.name)
             self._stop.wait(6 * 3600)
@@ -960,25 +465,43 @@ class CameraManager:
         with self._lock:
             return list(self._cams.values())
 
-    def create(self, data: dict, trusted: bool = False) -> Camera:
+    def register(self, key: str, name: str = "") -> tuple[Camera, bool]:
+        """Kamera milik perangkat dengan kunci `key`; dibuat bila belum ada. Mengembalikan (kamera, baru?).
+
+        Nama bawaan dari peramban hanya dipakai saat pertama kali; sesudah itu nama yang diubah pemilik tetap."""
+        if not DEVICE_KEY.fullmatch(str(key or "")):
+            raise ValueError("kunci perangkat tidak valid")
         with self._lock:
+            for cam in self._cams.values():
+                if cam.spec.device == key:
+                    return cam, False
             if len(self._cams) >= MAX_CAMERAS:
-                raise ValueError(f"batas {MAX_CAMERAS} kamera tercapai; hapus salah satu dulu")
-            spec = build_spec(data, trusted=trusted)
-            cam = Camera(spec, self.root, self._resolver)
+                raise ValueError(f"batas {MAX_CAMERAS} perangkat tercapai; hapus salah satu di Setelan")
+            try:
+                base = _clean_name(name)
+            except ValueError:
+                base = "Perangkat"
+            taken = {c.spec.name for c in self._cams.values()}
+            final, n = base, 1
+            while final in taken:                          # nama kembar menyulitkan membaca laporan
+                n += 1
+                final = f"{base[:36]} {n}"
+            spec = CameraSpec(id=new_id(), device=key, name=final, created=now().isoformat(timespec="seconds"))
+            cam = Camera(spec, self.root)
             self._cams[spec.id] = cam
             self._save()
         cam.start()
-        return cam
+        return cam, True
 
     def update(self, cid: str, data: dict) -> Camera | None:
         with self._lock:
             cam = self._cams.get(cid)
             if cam is None:
                 return None
-            old = asdict(cam.spec)
-            spec = build_spec(data, existing=cam.spec)
-            new = asdict(spec)
+            spec = apply_changes(cam.spec, data)
+            if "name" in data and any(c.spec.name == spec.name for c in self._cams.values() if c is not cam):
+                raise ValueError("sudah ada perangkat dengan nama itu")
+            old, new = asdict(cam.spec), asdict(spec)
             if new != old:
                 light = {"name", "enabled"}               # tidak perlu belajar latar ulang
                 cam.reconfigure(spec, restart=any(new[k] != old[k] for k in new if k not in light))
@@ -995,15 +518,9 @@ class CameraManager:
         shutil.rmtree(cam.dir, ignore_errors=True)
         return True
 
-    def acquire_stream(self) -> bool:
-        return self._streams.acquire(blocking=False)
-
-    def release_stream(self) -> None:
-        self._streams.release()
-
     # ---------------------------------------------------------------- kejadian
     def feed(self, limit: int = 50, offset: int = 0, kind: str | None = None) -> list[dict]:
-        """Kejadian semua kamera, terbaru dulu. Paginasi `offset` (kursor waktu bisa melewatkan dua kejadian
+        """Kejadian semua perangkat, terbaru dulu. Paginasi `offset` (kursor waktu bisa melewatkan dua kejadian
         yang jatuh pada detik yang sama di batas halaman)."""
         rows: list[tuple[datetime, dict]] = []
         for cam in self.list():
@@ -1014,20 +531,20 @@ class CameraManager:
         rows.sort(key=lambda x: (x[0], x[1]["no"]), reverse=True)
         return [r for _, r in rows[offset:offset + limit]]
 
-    def report(self, periode: str, camera_id: str | None = None, now: datetime | None = None) -> dict:
-        """Laporan ringkasan. ValueError bila periode tidak dikenal, KeyError bila kamera tidak ada."""
+    def report(self, periode: str, camera_id: str | None = None, at: datetime | None = None) -> dict:
+        """Laporan ringkasan. ValueError bila periode tidak dikenal, KeyError bila perangkat tidak ada."""
         cams = self.list()
         if camera_id is not None:
             cams = [c for c in cams if c.spec.id == camera_id]
             if not cams:
                 raise KeyError(camera_id)
         entries = [(c.spec.id, c.spec.name, c.events.pairs()) for c in cams]
-        return compute_report(entries, periode, now or _now(), camera_id)
+        return compute_report(entries, periode, at or now(), camera_id)
 
     def csv(self) -> str:
         out = io.StringIO()
         w = csv.writer(out)
-        w.writerow(["waktu", "kamera", "jenis", "alasan", "nomor", "durasi_detik"])
+        w.writerow(["waktu", "perangkat", "jenis", "alasan", "nomor", "durasi_detik"])
         for r in reversed(self.feed(limit=100000)):
             w.writerow([_cell(c) for c in (r["ts"], r["camera"]["name"], r["label"], r["reason"], r["no"],
                                            r.get("durasi_s", ""))])

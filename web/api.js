@@ -1,4 +1,4 @@
-// Pembungkus fetch/XHR tipis. Semua pesan galat berbahasa Indonesia dan menyebut cara memperbaiki.
+// Pembungkus fetch tipis. Semua pesan galat berbahasa Indonesia dan menyebut cara memperbaiki.
 
 export class ApiError extends Error {
   constructor(message, status = 0) {
@@ -19,7 +19,7 @@ async function parse(res) {
 
 function network(err) {
   if (err instanceof ApiError) return err;
-  return new ApiError('Server tidak terjangkau. Pastikan python main.py serve masih berjalan dan perangkat satu jaringan.', 0);
+  return new ApiError('Server tidak terjangkau. Pastikan python main.py masih berjalan dan perangkat satu jaringan dengannya.', 0);
 }
 
 export async function getJSON(url) {
@@ -27,14 +27,19 @@ export async function getJSON(url) {
   catch (e) { throw network(e); }
 }
 
-export async function postJSON(url, body = {}, method = 'POST') {
+export async function postJSON(url, body = {}) {
   try {
     return await parse(await fetch(url, {
-      method, credentials: 'same-origin',
+      method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }));
   } catch (e) { throw network(e); }
+}
+
+export async function del(url) {
+  try { return await parse(await fetch(url, { method: 'DELETE', credentials: 'same-origin' })); }
+  catch (e) { throw network(e); }
 }
 
 export async function postBlob(url, blob, type) {
@@ -43,20 +48,4 @@ export async function postBlob(url, blob, type) {
       method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': type }, body: blob,
     }));
   } catch (e) { throw network(e); }
-}
-
-export function upload(file, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name || 'video.mp4'));
-    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-    xhr.onload = () => {
-      let data = null;
-      try { data = JSON.parse(xhr.responseText); } catch { /* abaikan */ }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new ApiError((data && data.error) || `Unggahan gagal (kode ${xhr.status}).`, xhr.status));
-    };
-    xhr.onerror = () => reject(new ApiError('Koneksi terputus saat mengunggah. Pastikan HP dan laptop di Wi-Fi yang sama, lalu coba lagi.', 0));
-    xhr.send(file);
-  });
 }
