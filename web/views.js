@@ -320,6 +320,10 @@ export function viewSetelan({ view, device: D, info }) {
   const sync = () => {
     setText($id('sParkV'), `${$id('sPark').value} dtk`);
     setText($id('sSensV'), SENS_LABEL[$id('sSens').value]);
+    for (const id of ['sPark', 'sSens']) {                  // bagian trek di kiri gagang berwarna, seperti kontrol geser iOS
+      const r = $id(id);
+      r.style.setProperty('--p', `${((r.value - r.min) / (r.max - r.min)) * 100}%`);
+    }
   };
   $id('sPark').oninput = () => { st.park = Number($id('sPark').value); sync(); };
   $id('sSens').oninput = () => { st.sens = Number($id('sSens').value); sync(); };
