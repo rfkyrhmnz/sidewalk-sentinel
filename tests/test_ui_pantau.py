@@ -704,3 +704,88 @@ def test_tombol_hapus_muat_di_layar_hp_dan_tidak_menutupi_foto(server, api, page
 
 def cam_events(api, cid):
     return [e["no"] for e in api.req("GET", f"/api/cams/{cid}/events?limit=50")[1]["events"]]
+
+
+# =================================================== pemisahan data pusat dan perangkat
+def _lewat_tunnel(api, name, ip):
+    """Mendaftarkan perangkat seolah masuk lewat tunnel (IP asli di header Cloudflare)."""
+    from support import new_key
+    st, d = api.req("POST", "/api/device", {"key": new_key(), "name": name},
+                    {"Host": "demo.trycloudflare.com", "Cf-Connecting-Ip": ip})
+    assert st == 201, d
+    return d["id"]
+
+
+def test_perangkat_di_peramban_hanya_melihat_datanya_sendiri(server, api, browser):
+    app, url = server
+    app.trust_proxy = True
+    ctx = browser.new_context(**MOBILE, extra_http_headers={"Cf-Connecting-Ip": "203.0.113.7"})   # seperti HP lewat tunnel
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        other = _lewat_tunnel(api, "Gerbang belakang", "198.51.100.9")
+        m = midnight()
+        seed(app, other, "parkir", m + timedelta(seconds=4))
+        seed(app, other, "naik_trotoar", m + timedelta(seconds=5))
+        pg.add_init_script(SCENE)
+        pg.goto(url)
+        pg.wait_for_selector("#vf video", timeout=15000)
+        own = api.wait(lambda: next((c["id"] for c in cams(api) if c["id"] != other), None), 15, "perangkat ini belum terdaftar")
+        seed(app, own, "naik_trotoar", m + timedelta(seconds=6))
+        assert pg.evaluate("fetch('/api/info').then(r => r.json()).then(j => j.role)") == "perangkat"
+
+        pg.goto(url + "#/kejadian")
+        pg.wait_for_selector("#feed .event")
+        assert pg.locator("#feed .event").count() == 1
+        assert "Gerbang belakang" not in pg.inner_text("body")
+
+        pg.goto(url + "#/laporan")
+        pg.wait_for_selector(".rp-total")
+        assert pg.inner_text(".rp-total") == "1", "laporan perangkat hanya memuat kejadiannya sendiri"
+        assert "Gerbang belakang" not in pg.inner_text("body") and pg.locator("#rpDev:visible").count() == 0
+
+        pg.goto(url + "#/setelan")
+        pg.wait_for_selector("#sPrivText")
+        assert "Anda hanya melihat data perangkat ini" in pg.inner_text("#sPrivText")
+        assert "pusat" in pg.inner_text("#sPrivText").lower() and "alamat IP" in pg.inner_text("#sPrivText")
+        pg.wait_for_timeout(800)                                       # daftar 'perangkat lain' dimuat sesudah halaman
+        assert pg.locator("#sOthers:visible").count() == 0
+        body = pg.inner_text("body")
+        assert "Gerbang belakang" not in body and "198.51.100.9" not in body
+        assert "Unduh kejadian perangkat ini" in body
+    finally:
+        ctx.close()
+        app.trust_proxy = False
+    assert not errors, errors
+
+
+def test_pusat_melihat_semua_perangkat_dan_ip_penandanya_di_peramban(server, api, page):
+    app, url = server
+    app.trust_proxy = True
+    try:
+        other = _lewat_tunnel(api, "Gerbang belakang", "203.0.113.7")
+    finally:
+        app.trust_proxy = False
+    m = midnight()
+    seed(app, other, "parkir", m + timedelta(seconds=4))
+    page.add_init_script(SCENE)
+    page.goto(url)
+    page.wait_for_selector("#vf video", timeout=15000)
+    own = api.wait(lambda: next((c["id"] for c in cams(api) if c["id"] != other), None), 15, "perangkat ini belum terdaftar")
+    seed(app, own, "naik_trotoar", m + timedelta(seconds=6))
+    assert page.evaluate("fetch('/api/info').then(r => r.json()).then(j => j.role)") == "pusat"
+
+    page.goto(url + "#/kejadian")
+    page.wait_for_function("() => document.querySelectorAll('#feed .event').length === 2")
+    assert "Gerbang belakang" in page.inner_text("#feed")
+
+    page.goto(url + "#/laporan")
+    page.wait_for_function("() => document.querySelector('.rp-total') && document.querySelector('.rp-total').textContent === '2'")
+
+    page.goto(url + "#/setelan")
+    page.wait_for_selector("#sOthers:not([hidden])")
+    assert "komputer pusat" in page.inner_text("#sPrivText") and "semua perangkat" in page.inner_text("#sPrivText")
+    row = page.inner_text("#devs")
+    assert "Gerbang belakang" in row and "IP 203.0.113.7" in row, row
+    assert "Unduh semua kejadian" in page.inner_text("body")

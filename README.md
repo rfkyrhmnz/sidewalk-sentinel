@@ -163,15 +163,17 @@ lisensi yang sama, atau memakai lisensi Enterprise dari Ultralytics. Bobot hasil
 
 ## Antarmuka server
 
-Aplikasi web dan API dilayani pustaka standar Python. Titik akhir utama:
+Aplikasi web dan API dilayani pustaka standar Python. Semua titik akhir data dibatasi menurut peran (lihat **Privasi**):
+perangkat hanya mendapat datanya sendiri, pusat mendapat semuanya, dan perangkat orang lain dijawab `404` persis seperti
+perangkat yang tidak ada. Titik akhir utama:
 
 | Titik akhir | Fungsi |
 |---|---|
 | `GET /hp` | halaman kode QR di laptop (mode `--hp`) |
-| `GET /api/connect` | keadaan sambungan HP: tautan berkunci, gambar QR (SVG), dan perangkat yang sedang mengirim |
-| `GET /api/info` | versi, nilai bawaan, dan status model (`state`: belum, memuat, siap, galat) |
+| `GET /api/connect` | (hanya pusat) keadaan sambungan HP: tautan berkunci, gambar QR (SVG), dan perangkat yang sedang mengirim |
+| `GET /api/info` | versi, peran peminta (`pusat` atau `perangkat`), nilai bawaan, dan status model |
 | `POST /api/detector/retry` | memuat ulang model kendaraan setelah galat |
-| `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya |
+| `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya; menjawab dengan cookie `ss_dev` |
 | `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini |
 | `POST /api/cams/<id>/propose-zone` | usulan poligon trotoar dari gambar terbaru perangkat (titik awal penyunting zona manual) |
 | `GET/POST/DELETE /api/cams/<id>` | informasi, setelan, dan penghapusan data perangkat |
@@ -203,8 +205,8 @@ models/trotoar.pt           model segmentasi trotoar (YOLO11n-seg) untuk zona ot
 sidewalk_sentinel/          detector (YOLO kendaraan, model trotoar, mask ke poligon); engine (kotak -> pelacak ->
                             keputusan); zone (zona trotoar otomatis); config, features, tracker, decision, render;
                             cameras (kamera perangkat, manajer); store (kejadian, lama kejadian); report (laporan);
-                            server; tls (sertifikat untuk jalur Wi-Fi); tunnel (cloudflared); qr (pembuat kode QR
-                            tanpa pustaka luar); util
+                            server; access (peran pusat atau perangkat, IP penanda); tls (sertifikat untuk jalur Wi-Fi);
+                            tunnel (cloudflared); qr (pembuat kode QR tanpa pustaka luar); util
 web/                        aplikasi web (PWA): index.html, app.css, app.js (kerangka dan navigasi), device.js (kamera),
                             pantau.js (layar pantau), overlay.js (zona dan kotak deteksi), views.js (Kejadian, Laporan,
                             Setelan), laporan.js (grafik dan ringkasan), hp.html dan hp.js (halaman kode QR),
@@ -231,6 +233,9 @@ dan detektor diganti tiruan (`tests/support.py`).
   yang terlewat sebentar, kendaraan yang pergi, ukuran minimum, dan pengaturan yang diteruskan ke detektor.
 - `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart (termasuk setelan
   versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, dan pelacak lama kejadian.
+- `test_access.py` dan `test_isolation.py`: aturan peran (sambungan lokal sungguhan, header proxy, Host, DNS rebinding,
+  IP penanda) dan pemisahan data di setiap jalur API: perangkat A tidak bisa membaca, mengubah, atau menghapus milik B,
+  tamu tanpa perangkat tidak melihat apa pun, pusat melihat semuanya, dan IP tidak pernah sampai ke perangkat.
 - `test_qr.py`: pembuat QR dibaca dekoder QR OpenCV, dan semua panjang teks dibaca balik oleh pembaca mandiri yang
   memeriksa syndrome Reed-Solomon tiap blok.
 - `test_hp.py`: tunnel dengan `cloudflared` tiruan (alamat dari log, gagal, putus, batas waktu), `--hp` dari ujung ke
@@ -258,6 +263,43 @@ Foto bukti memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days
 arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan` atau `--https`, server hanya menerima koneksi dari komputer itu
 sendiri; dengan tunnel (`--hp`) server tetap hanya di komputer itu dan siapa pun yang memegang tautan berkunci bisa
 masuk lewat tunnel, jadi jangan bagikan kode QR atau tautannya. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
+
+### Pusat dan perangkat
+
+Ada dua peran. **Pusat** adalah peramban di komputer yang menjalankan server (buka lewat `localhost` atau `127.0.0.1`):
+ia melihat semua perangkat, termasuk foto bukti dan IP-nya, dan boleh menghapus kejadian atau perangkat mana pun.
+**Perangkat** (HP, atau peramban lain) hanya melihat dan mengubah datanya sendiri: umpan, laporan, CSV, dan foto bukti
+perangkat lain dijawab seolah tidak ada. Setelan perangkat memberi tahu pemiliknya bahwa pusat bisa melihat datanya.
+
+Hak akses sengaja **tidak** ditentukan oleh alamat IP:
+
+- Perangkat dikenali dari kunci rahasia acak di browsernya (cookie `ss_dev`, `HttpOnly`, `SameSite=Strict`, hanya untuk `/api`).
+  Kunci itu tidak pernah ikut di jawaban API mana pun.
+- Pusat dikenali dari sambungan yang benar-benar lokal. Tiga syarat harus terpenuhi bersama: penyambung loopback, tidak
+  ada header proxy (Cloudflare selalu menambahkan `Cf-*` dan `X-Forwarded-*`), dan header `Host` berupa `localhost` atau
+  IP loopback. Ragu berarti bukan pusat. Syarat `Host` sekaligus menolak serangan DNS rebinding.
+- IP dicatat sebagai **penanda** dan hanya ditampilkan di pusat (Setelan, Perangkat lain). Di belakang tunnel, IP asli HP
+  dibaca dari `Cf-Connecting-Ip`, dan header itu hanya dipercaya bila server sendiri yang menjalankan tunnel dan
+  sambungannya dari loopback. Bila IP sebuah perangkat tiba-tiba berganti, pusat bisa melihatnya.
+
+Kenapa bukan IP: di belakang tunnel semua permintaan tampak datang dari `127.0.0.1`, jadi aturan "IP laptop boleh melihat
+semuanya" memberi hak pusat kepada setiap HP yang masuk lewat tunnel. IP juga berganti (Wi-Fi ke data seluler) dan dipakai
+bersama (NAT), sehingga HP yang sah bisa terkunci keluar atau orang lain ikut terbuka.
+
+Batas yang perlu diketahui:
+
+- Kunci perangkat bersifat pembawa (bearer): siapa pun yang menyalin kunci dari penyimpanan lokal sebuah HP menjadi
+  perangkat itu. IP penanda hanya membantu pusat melihat kejadian semacam itu, tidak mencegahnya.
+- Program lain di laptop pusat tampak sebagai pusat. Pemisahan ini melindungi perangkat satu dari yang lain, bukan laptop
+  dari pemiliknya sendiri.
+- Laptop yang membuka aplikasi lewat alamat LAN-nya sendiri (bukan `localhost`) dihitung sebagai perangkat biasa.
+- Nama perangkat harus unik, sehingga mengganti nama menjadi nama perangkat lain ditolak: itu membocorkan bahwa nama
+  tersebut ada. Isi datanya tetap tertutup.
+- Aturan pusat bergantung pada `cloudflared` yang meneruskan header `Host` asli dan menambahkan header `Cf-*`. Perilaku
+  itu belum diuji dengan tunnel Cloudflare sungguhan di sini (uji memakai peminta tiruan dengan header yang sama). Bila
+  tunnel lain menulis ulang `Host` menjadi `localhost` dan membuang semua header, sambungannya akan dianggap pusat.
+- IP termasuk data pribadi. Disimpan di `data/devices.json`, ikut terhapus bersama perangkatnya, dan hanya terlihat di
+  pusat. Beri tahu pemilik perangkat sebelum memakainya.
 
 ## Riwayat repositori
 

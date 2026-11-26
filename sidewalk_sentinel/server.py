@@ -3,6 +3,9 @@
 Mode LAN (``--lan``): server mendengarkan di semua antarmuka agar bisa dibuka dari HP; semua
 permintaan wajib membawa cookie kunci acak yang dipasang saat tautan berkunci dibuka sekali.
 
+Pemisahan data: perangkat hanya melihat datanya sendiri (dikenali dari kunci rahasia di cookie ``ss_dev``); pusat, yaitu
+peramban di mesin server ini, melihat semua perangkat. Aturannya ada di ``access.py``; IP hanya penanda, bukan kunci.
+
 Mode HP (``--hp``): satu perintah untuk memakai HP sebagai kamera. Bila cloudflared terpasang, server tetap hanya
 di laptop (127.0.0.1) dan sebuah tunnel Cloudflare memberi alamat https publik; bila tidak, server berjalan di
 LAN dengan HTTPS. Alamat HP berkunci itu ditampilkan sebagai kode QR di terminal dan di halaman ``/hp``.
@@ -26,7 +29,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from . import qr, tls, tunnel
+from . import access, qr, tls, tunnel
 from .cameras import MAX_CAMERAS, CameraManager
 from .detector import (DEFAULT_SIDEWALK, DEFAULT_WEIGHTS, DetectorUnavailable, SidewalkSegmenter,
                        VehicleDetector)
@@ -59,6 +62,7 @@ class App:
         self.host = "127.0.0.1"
         self.lan = False
         self.https = False
+        self.trust_proxy = False                  # benar bila server sendiri menjalankan tunnel (lihat access.client_ip)
         self._connect = {"mode": None, "state": "off", "url": None, "svg": None, "message": ""}
         self._connect_lock = threading.Lock()
         self.detector, self.sidewalk = detector, sidewalk
@@ -145,15 +149,42 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     # ---------------------------------------------------------------- otorisasi
+    def _cookie(self, name: str) -> str:
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
     def _authorized(self) -> bool:
         token = self.app.token
         if token is None:
             return True
-        for part in self.headers.get("Cookie", "").split(";"):
-            k, _, v = part.strip().partition("=")
-            if k == "ss_key" and hmac.compare_digest(v, token):
-                return True
-        return False
+        return hmac.compare_digest(self._cookie("ss_key"), token)
+
+    def _client_ip(self) -> str:
+        return access.client_ip(self.client_address[0], self.headers, self.app.trust_proxy)
+
+    def _who(self):
+        """('pusat', None), ('perangkat', kamera miliknya), atau ('tamu', None) bila belum punya perangkat terdaftar."""
+        if access.is_center(self.client_address[0], self.headers):
+            return "pusat", None
+        cam = self.app.cams.by_key(self._cookie("ss_dev"))
+        return ("perangkat", cam) if cam is not None else ("tamu", None)
+
+    def _scope(self, who) -> list:
+        """Perangkat yang boleh dilihat peminta: pusat semuanya, perangkat hanya miliknya, tamu tidak satu pun."""
+        role, cam = who
+        if role == "pusat":
+            return self.app.cams.list()
+        return [cam] if cam is not None else []
+
+    def _device_cookie(self, key: str) -> str:
+        """Kunci perangkat sebagai cookie: hanya untuk /api, tidak terbaca skrip, tidak ikut permintaan lintas situs."""
+        cookie = f"ss_dev={key}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=31536000"
+        proxied_https = (self.app.trust_proxy and access.is_loopback(self.client_address[0])
+                         and self.headers.get("X-Forwarded-Proto", "").lower() == "https")
+        return cookie + ("; Secure" if self.app.https or proxied_https else "")
 
     # ----------------------------------------------------------------- dispatch
     def do_GET(self):
@@ -275,17 +306,23 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         seg = path.strip("/").split("/")          # ['api', ...]
         n = len(seg)
+        who = self._who()
+        center = who[0] == "pusat"
+        scope = self._scope(who)
 
         if method == "GET" and path == "/api/info":
             d = Config()
             return self._json({
                 "name": "Sidewalk Sentinel", "version": __version__, "auth": app.token is not None,
+                "role": "pusat" if center else "perangkat",
                 "lan_url": f"http://{lan_ip()}:{app.port}/" if app.lan else None,
                 "defaults": {"park_seconds": d.park_seconds, "conf": d.conf, "min_box_frac": d.min_box_frac},
                 "detector": {**app.detector.status(), "sidewalk_model": bool(app.sidewalk and app.sidewalk.available)},
             })
 
         if method == "GET" and path == "/api/connect":
+            if not center:
+                return self._error(403, "hanya pusat (laptop yang menjalankan server) yang bisa membuka sambungan HP")
             c = app.connect_info()
             if c["state"] == "off":
                 return self._json({"state": "off", "mode": None, "url": None, "svg": None, "message": "", "devices": []})
@@ -306,10 +343,12 @@ class Handler(BaseHTTPRequestHandler):
                 cam, created = app.cams.register(body.get("key"), body.get("name", ""))
             except ValueError as e:
                 return self._error(400, str(e))
-            return self._json(cam.info(), 201 if created else 200)
+            app.cams.note_ip(cam, self._client_ip())
+            return self._json(cam.info(admin=center), 201 if created else 200,
+                              {"Set-Cookie": self._device_cookie(body["key"])})
 
         if n >= 2 and seg[1] == "cams":
-            return self._cam_routes(method, seg, query)
+            return self._cam_routes(method, seg, query, center, scope)
 
         if n == 2 and seg[1] == "events" and method == "GET":
             kind = query.get("kind", [None])[0]
@@ -318,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 limit = max(1, min(200, int(query.get("limit", ["40"])[0])))
                 offset = max(0, int(query.get("offset", ["0"])[0]))
-                rows = app.cams.feed(limit, offset, kind)
+                rows = app.cams.feed(limit, offset, kind, scope)
             except ValueError:
                 return self._error(400, "parameter limit/offset tidak valid")
             return self._json({"events": rows})
@@ -328,41 +367,41 @@ class Handler(BaseHTTPRequestHandler):
             if camera is not None and not valid_id(camera):
                 return self._error(400, "id perangkat tidak valid")
             try:
-                return self._json(app.cams.report(query.get("periode", ["hari_ini"])[0], camera))
+                return self._json(app.cams.report(query.get("periode", ["hari_ini"])[0], camera, cams=scope))
             except ValueError as e:
                 return self._error(400, str(e))
             except KeyError:
                 return self._error(404, "perangkat tidak ditemukan")
 
         if n == 2 and seg[1] == "events.csv" and method in ("GET", "HEAD"):
-            return self._send(200, app.cams.csv().encode("utf-8-sig"), "text/csv; charset=utf-8",
+            return self._send(200, app.cams.csv(scope).encode("utf-8-sig"), "text/csv; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="sidewalk-kejadian.csv"'})
 
         return self._error(404, "endpoint tidak dikenal")
 
-    def _cam_routes(self, method: str, seg: list[str], query: dict) -> None:
+    def _cam_routes(self, method: str, seg: list[str], query: dict, center: bool, scope: list) -> None:
         mgr = self.app.cams
         n = len(seg)
 
         if n == 2:
             if method == "GET":
-                return self._json({"cams": [c.info() for c in mgr.list()], "max": MAX_CAMERAS,
+                return self._json({"cams": [c.info(admin=center) for c in scope], "max": MAX_CAMERAS,
                                    "now": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             return self._error(405, "metode tidak diizinkan")
 
         cam = mgr.get(seg[2]) if valid_id(seg[2]) else None
-        if cam is None:
+        if cam is None or cam not in scope:                # perangkat orang lain dijawab sama seperti yang tidak ada
             return self._error(404, "perangkat tidak ditemukan")
 
         if n == 3:
             if method == "GET":
-                return self._json(cam.info())
+                return self._json(cam.info(admin=center))
             if method == "POST":
                 try:
                     updated = mgr.update(cam.spec.id, self._read_json())
                 except (ValueError, TypeError) as e:
                     return self._error(400, str(e))
-                return self._json(updated.info()) if updated else self._error(404, "perangkat tidak ditemukan")
+                return self._json(updated.info(admin=center)) if updated else self._error(404, "perangkat tidak ditemukan")
             if method == "DELETE":
                 return self._json({"deleted": mgr.delete(cam.spec.id)})
             return self._error(405, "metode tidak diizinkan")
@@ -380,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if n == 4 and seg[3] == "frame" and method == "POST":
             body = self._read_body(3 * 1024 * 1024)
+            mgr.note_ip(cam, self._client_ip())
             try:
                 return self._json(cam.push(body))
             except ValueError as e:
@@ -494,6 +534,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
                                   sidewalk_weights=sidewalk_weights, device=device)
     except tls.TlsUnavailable as e:
         raise SystemExit(str(e))
+    app.trust_proxy = mode == "tunnel"                # IP asli HP ada di header Cloudflare (hanya dari loopback)
     scheme = "https" if https else "http"
     bar = "=" * 62
     print(f"\n{bar}\n  SIDEWALK SENTINEL v{__version__}\n{bar}")

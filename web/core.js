@@ -108,6 +108,13 @@ export function dur(s) {
   return mm ? `${j}${N}jam ${mm}${N}mnt` : `${j}${N}jam`;
 }
 
+/** IP penanda perangkat untuk ditampilkan di pusat. 127.0.0.1 berarti peramban di komputer server itu sendiri. */
+export function ipLabel(ip) {
+  if (!ip) return 'IP belum tercatat';
+  if (ip === '127.0.0.1' || ip === '::1') return 'Komputer pusat (lokal)';
+  return `IP ${ip}`;
+}
+
 /** Satu baris kejadian: foto bukti, jenis, waktu, perangkat, dan lamanya bila sudah terukur.
  *  Dengan `onDelete` baris mendapat tombol hapus: ketukan pertama meminta konfirmasi, ketukan kedua memanggil
  *  `onDelete(e)`. Pemanggil yang menggambar ulang daftarnya; galat ditampilkan sebagai toast dan tombol pulih. */
