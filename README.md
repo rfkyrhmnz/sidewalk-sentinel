@@ -161,6 +161,25 @@ lisensi yang sama, atau memakai lisensi Enterprise dari Ultralytics. Bobot hasil
 - Jalur HTTPS baru diuji pada Chrome di Linux dengan kamera tiruan, belum pada HP sungguhan. Pemberitahuan hanya
   muncul selama halaman terbuka; notifikasi saat aplikasi tertutup belum ada.
 
+## Tampilan
+
+Bahasa visualnya kaca cair: permukaan tembus pandang yang mengaburkan cahaya di belakangnya, bertepi bercahaya, dengan
+kilau tipis di sisi atas. Kamera adalah tokoh utamanya. Bingkainya menyala sesuai keadaan (hijau saat memantau, biru saat
+mencari atau memuat, kuning saat perlu tindakan, merah saat galat), dan warna yang sama menyalakan latar. Pengguna yang
+mengaktifkan "kurangi transparansi" di sistemnya mendapat permukaan padat (bila peramban mendukung pengaturan itu), dan hasil cetak tetap putih tanpa kaca.
+
+Tata letak menyesuaikan layar, tanpa gulir mendatar di ukuran apa pun:
+
+| Layar | Menu | Halaman Pantau |
+|---|---|---|
+| HP tegak (320 px ke atas) | bawah | satu kolom |
+| tablet tegak | bawah | kamera di atas, hitungan dan kejadian terbaru berdampingan di bawahnya |
+| HP mendatar | samping, ramping | kamera di kiri, hitungan dan kejadian di kanan |
+| laptop, tablet mendatar | samping | sama, kolom kanan lebih lebar |
+| layar sangat lebar | samping | isi dibatasi 1480 px dan diletakkan di tengah |
+
+Area aman (poni dan bilah gestur) dihormati, dan sasaran ketuk menu minimal 44 px.
+
 ## Antarmuka server
 
 Aplikasi web dan API dilayani pustaka standar Python. Semua titik akhir data dibatasi menurut peran (lihat **Privasi**):
@@ -250,7 +269,8 @@ dan detektor diganti tiruan (`tests/support.py`).
   kendaraan): kamera menyala sendiri, zona ditemukan tanpa menandai apa pun, zona manual dan kembali ke otomatis, status
   mencari trotoar, alur sampai parkir terdeteksi dan lamanya masuk
   Laporan, model memuat atau galat, izin kamera ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak
-  HP dan desktop, serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  HP dan desktop, 12 ukuran layar dari 320 px sampai 2560 px (tanpa gulir mendatar, menu tidak menutupi isi, teks tidak
+  keluar dari tombol), bahan kaca, serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 

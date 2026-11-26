@@ -789,3 +789,96 @@ def test_pusat_melihat_semua_perangkat_dan_ip_penandanya_di_peramban(server, api
     row = page.inner_text("#devs")
     assert "Gerbang belakang" in row and "IP 203.0.113.7" in row, row
     assert "Unduh semua kejadian" in page.inner_text("body")
+
+
+# ===================================================================== tata letak responsif dan bahan kaca
+
+# (lebar, tinggi, menu): menu "bawah" untuk layar tegak yang sempit, "samping" untuk laptop, tablet mendatar, dan HP mendatar
+UKURAN = [
+    (320, 640, "bawah"), (360, 740, "bawah"), (390, 844, "bawah"), (430, 932, "bawah"), (768, 1024, "bawah"),
+    (568, 320, "samping"), (667, 375, "samping"), (844, 390, "samping"), (1024, 768, "samping"),
+    (1366, 800, "samping"), (1920, 1080, "samping"), (2560, 1080, "samping"),
+]
+RUTE = ("", "laporan", "kejadian", "setelan")
+
+_UKUR = """() => {
+  const r = s => { const e = document.querySelector(s); if (!e) return null; const b = e.getBoundingClientRect();
+    return { x: b.x, y: b.y, w: b.width, h: b.height, r: b.right, b: b.bottom }; };
+  const view = document.querySelector('#view'), last = view.lastElementChild;
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  return { sw: document.documentElement.scrollWidth, iw: innerWidth, ih: innerHeight,
+    nav: r('#nav'), brand: r('.brand'), chip: r('#conn'), vf: r('#vf'), side: r('.side'),
+    meter: r('.meter'), recent: r('#recent'), viewLeft: view.getBoundingClientRect().x + parseFloat(getComputedStyle(view).paddingLeft),
+    lastBottom: last ? last.getBoundingClientRect().bottom : 0,
+    spill: [...document.querySelectorAll('#view .btn, #view .seg button, #view .live-chip')].filter(b => b.scrollWidth > b.clientWidth + 1).map(b => b.textContent.trim()),
+    links: [...document.querySelectorAll('#nav a')].map(a => { const b = a.getBoundingClientRect(); return { w: b.width, h: b.height }; }) };
+}"""
+
+
+def _berpotongan(a, b):
+    return a and b and a["x"] < b["r"] and b["x"] < a["r"] and a["y"] < b["b"] and b["y"] < a["b"]
+
+
+@pytest.mark.parametrize("w,h,menu", UKURAN)
+def test_semua_halaman_muat_tanpa_gulir_mendatar_di_semua_ukuran_layar(server, api, browser, w, h, menu):
+    app, url = server
+    mobile = w < 900 and h < 1100
+    ctx = browser.new_context(viewport={"width": w, "height": h}, is_mobile=mobile, has_touch=mobile)
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        pg.add_init_script(SCENE)
+        pg.goto(url)
+        pg.wait_for_selector("#vf video", timeout=15000)
+        cid = only_cam(api, pg)["id"]
+        for i, kind in enumerate(["parkir", "naik_trotoar", "parkir", "parkir"]):          # baris kejadian dan laporan perlu isi
+            seed(app, cid, kind, midnight() + timedelta(hours=7 + i, minutes=10 * i), 12 + i * 9)
+        for rute in RUTE:
+            pg.goto(url + ("#/" + rute if rute else ""))
+            pg.wait_for_selector("#nav a[aria-current='page']")
+            pg.wait_for_selector({"": "#recent .event", "laporan": ".rp-tile", "kejadian": "#feed .event", "setelan": "#sPark"}[rute], timeout=20000)
+            m = pg.evaluate(_UKUR)
+            where = f"{w}x{h} #{rute or 'pantau'}"
+            assert m["sw"] <= w and m["iw"] <= w, f"{where}: halaman melebar ke kanan (isi {m['sw']}, jendela {m['iw']}, layar {w})"
+            nav = m["nav"]
+            assert nav["x"] >= -0.5 and nav["r"] <= w + 0.5 and nav["y"] >= -0.5 and nav["b"] <= h + 0.5, f"{where}: menu keluar layar {nav}"
+            for k in ("brand", "chip"):
+                assert m[k]["x"] >= -0.5 and m[k]["r"] <= w + 0.5, f"{where}: {k} terpotong {m[k]}"
+                assert not _berpotongan(nav, m[k]), f"{where}: menu menutupi {k}"
+            assert not m["spill"], f"{where}: teks keluar dari tombol {m['spill']}"
+            assert all(a["w"] >= 44 and a["h"] >= 44 for a in m["links"]), f"{where}: sasaran ketuk menu < 44 px {m['links']}"
+            if menu == "bawah":
+                assert nav["y"] > h - 110 and abs((nav["x"] + nav["w"] / 2) - w / 2) < 1, f"{where}: menu harus di bawah dan di tengah"
+                assert m["lastBottom"] <= nav["y"] + 1, f"{where}: ujung halaman tertutup menu"
+            else:
+                assert nav["x"] < 60 and nav["w"] < 100, f"{where}: menu harus ramping di sisi kiri"
+                assert nav["r"] <= m["viewLeft"] + 0.5, f"{where}: menu menimpa isi halaman"
+            if not rute:
+                vf = m["vf"]
+                assert vf["w"] >= 200 and vf["x"] >= 0 and vf["r"] <= w + 0.5, f"{where}: kotak bidik tidak muat {vf}"
+                if w >= 960 or menu == "samping":                  # ada ruang: hitungan dan kejadian terbaru di sisi kanan kamera
+                    assert m["side"]["x"] >= vf["r"] - 1, f"{where}: kolom samping seharusnya di kanan kamera"
+                elif w >= 700:                                      # tablet tegak: di bawah kamera, hitungan di kiri dan terbaru di kanan
+                    assert m["side"]["y"] >= vf["b"] - 1 and m["recent"]["x"] > m["meter"]["r"] - 1
+                else:                                               # HP tegak: satu kolom, kamera paling atas
+                    assert m["side"]["y"] >= vf["b"] - 1 and abs(m["side"]["x"] - vf["x"]) < 4
+    finally:
+        ctx.close()
+    assert not errors, errors
+
+
+def test_bahan_kaca_terpasang_dan_isi_kontrol_geser_mengikuti_nilai(server, api, page):
+    page.add_init_script(SCENE)
+    page.goto(page.base + "#/setelan")
+    page.wait_for_selector("#sPark")
+    blur = page.evaluate("""() => ['#nav', '.panel', '#conn'].map(s => { const e = document.querySelector(s); const c = getComputedStyle(e);
+      return [s, c.backdropFilter || c.webkitBackdropFilter, c.boxShadow]; })""")
+    for sel, filt, shadow in blur:
+        assert "blur" in filt, f"{sel}: kaca tanpa kabur latar ({filt})"
+        assert "inset" in shadow, f"{sel}: kaca tanpa kilau tepi ({shadow})"
+    p = lambda i: page.evaluate(f"document.querySelector('{i}').style.getPropertyValue('--p')")
+    assert p("#sPark") == "{:.0f}%".format((10 - 5) / (120 - 5) * 100) or p("#sPark").startswith("4.3")     # bawaan 10 dtk
+    for sel, value, expect in (("#sPark", "120", "100%"), ("#sPark", "5", "0%"), ("#sSens", "5", "100%"), ("#sSens", "3", "50%")):
+        page.evaluate(f"(() => {{ const r = document.querySelector('{sel}'); r.value = '{value}'; r.dispatchEvent(new Event('input')); }})()")
+        assert p(sel) == expect, f"{sel}={value}: isi trek {p(sel)}, seharusnya {expect}"
