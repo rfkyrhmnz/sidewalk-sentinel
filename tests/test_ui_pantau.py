@@ -423,6 +423,45 @@ def test_https_dengan_kunci_kamera_perangkat_mengirim_lewat_tls(tmp_path, browse
     assert not errors, errors
 
 
+def test_tautan_berkunci_tetap_bisa_dibuka_di_browser_lain_setelah_aplikasi_terbuka(tmp_path, browser):
+    """Pratinjau pemindai QR lalu "Buka di Safari": dua wadah cookie berbeda, hanya alamat yang pindah."""
+    token = "kunci-pindah-browser"
+    srv, app = make_server("127.0.0.1", 0, tmp_path / "data", lan=True, token=token, detector=ColorDetector())
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{app.port}/"
+    pertama, kedua, tanpa_kunci = (browser.new_context(**MOBILE) for _ in range(3))
+    try:
+        a = pertama.new_page()
+        a.add_init_script(SCENE)
+        a.goto(base + f"?k={token}")
+        a.wait_for_selector("#nav a")
+        a.goto(a.url.split("#")[0] + "#/laporan")
+        a.wait_for_selector(".rp-tile, .empty")
+        assert f"k={token}" in a.url, "kunci hilang dari alamat setelah halaman terbuka; pindah browser jadi gagal"
+        assert "ss_key" in {c["name"] for c in pertama.cookies()}
+
+        b = kedua.new_page()                                          # wadah cookie kosong, alamat disalin dari bilah alamat yang pertama
+        b.add_init_script(SCENE)
+        assert kedua.cookies() == []
+        b.goto(a.url)
+        b.wait_for_selector("#nav a")
+        b.wait_for_selector("#vf video, .rp-tile, .empty", timeout=15000)
+        assert "ss_key" in {c["name"] for c in kedua.cookies()}, "browser kedua harus ikut mendapat cookie kunci"
+        assert kedua.request.get(base + "api/info").status == 200, "API harus terbuka di browser kedua"
+
+        c = tanpa_kunci.new_page()                                    # alamat polos: ditolak, dengan petunjuk yang benar
+        c.goto(base)
+        text = c.inner_text("body")
+        assert "Akses ditolak" in text and "--lan" not in text and "QR" in text
+        assert tanpa_kunci.request.get(base + "api/info").status == 403
+    finally:
+        for ctx in (pertama, kedua, tanpa_kunci):
+            ctx.close()
+        app.close()
+        srv.shutdown()
+        srv.server_close()
+
+
 # ===================================================================== bersih dari fitur lama
 def test_tidak_ada_penyebutan_materi_kuliah_atau_sumber_lain():
     """Teknik pengolahan citra hanyalah alat; aplikasi tidak memetakan dirinya ke materi kuliah dan tidak punya sumber

@@ -72,9 +72,10 @@ def test_mode_lan_butuh_kunci(tmp_path):
         assert c.req("GET", "/")[0] == 403
         assert c.req("GET", "/api/info")[0] == 403
         assert c.req("GET", "/?k=salah")[0] == 403
-        resp, _ = c.req("GET", "/?k=rahasia123", raw=True)
-        assert resp.status == 302 and "ss_key=rahasia123" in resp.getheader("Set-Cookie")
-        assert "HttpOnly" in resp.getheader("Set-Cookie")
+        resp, body = c.req("GET", "/?k=rahasia123", raw=True)
+        assert resp.status == 200 and resp.getheader("Location") is None, "tautan berkunci tidak boleh mengalihkan: kunci harus tetap di alamat"
+        assert "ss_key=rahasia123" in resp.getheader("Set-Cookie") and "HttpOnly" in resp.getheader("Set-Cookie")
+        assert resp.getheader("Referrer-Policy") == "no-referrer", "kunci ada di alamat, jadi tidak boleh bocor lewat Referer"
         authed = Client(app.port, cookie="ss_key=rahasia123")
         assert authed.req("GET", "/")[0] == 200
         assert authed.req("GET", "/api/info")[0] == 200
@@ -117,5 +118,43 @@ def test_koneksi_keepalive_tidak_kacau_bila_body_tak_dibaca(srv, tmp_path):
         conn.close()
     finally:
         lan_app.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_tautan_berkunci_bisa_dipindah_antar_browser_tanpa_cookie(tmp_path):
+    """Pratinjau pemindai QR dan Safari punya wadah cookie sendiri: yang terbawa saat pindah hanya alamatnya."""
+    server, app = make_server("127.0.0.1", 0, tmp_path / "d", lan=True, token="rahasia123")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = "/?k=rahasia123"
+        for _ in range(2):                                      # dua browser berbeda, tanpa cookie satu pun, memakai alamat yang sama
+            resp, body = Client(app.port).req("GET", url, raw=True)
+            assert resp.status == 200 and b"<html" in body.lower()
+        assert Client(app.port).req("GET", "/")[0] == 403, "alamat polos tanpa kunci tetap ditolak"
+        halaman = Client(app.port).req("GET", "/")[1]
+        assert b"--lan" not in halaman, "teks penolakan tidak boleh menyuruh mode yang tidak dipakai"
+        assert b"/hp" in halaman and b"?k=" in halaman, "teks penolakan harus menunjuk cara memperbaikinya"
+    finally:
+        app.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_kunci_di_tautan_hanya_membuka_halaman_dan_tahan_karakter_aneh(tmp_path):
+    server, app = make_server("127.0.0.1", 0, tmp_path / "d", lan=True, token="rahasia123")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        c = Client(app.port)
+        assert c.req("GET", "/api/info?k=rahasia123")[0] == 403, "kunci di tautan tidak membuka API"
+        assert c.req("POST", "/?k=rahasia123", {})[0] == 403, "hanya GET dan HEAD yang membuka halaman lewat tautan"
+        assert c.req("GET", "/index.html?k=rahasia123")[0] == 403, "hanya alamat halaman utama dan /hp"
+        for k in ("%C3%A9", "%FF%FE", "rahasia123%00", "x" * 4000, ""):      # non-ASCII, bukan UTF-8, NUL, terlalu panjang, kosong
+            assert c.req("GET", f"/?k={k}")[0] == 403, k
+        assert Client(app.port, cookie="ss_key=r\u00e9ahasia").req("GET", "/api/info")[0] == 403
+        resp, _ = c.req("HEAD", "/?k=rahasia123", raw=True)
+        assert resp.status == 200 and "ss_key=rahasia123" in resp.getheader("Set-Cookie")
+    finally:
+        app.close()
         server.shutdown()
         server.server_close()
