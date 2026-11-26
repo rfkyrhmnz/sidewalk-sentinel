@@ -32,6 +32,8 @@ export const ICON = {
   check: I('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
   close: I('<path d="M6 6l12 12M18 6L6 18"/>'),
   undo: I('<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/>'),
+  camera: I('<path d="M4 8.5A1.5 1.5 0 015.5 7H8l1.2-2h5.6L16 7h2.5A1.5 1.5 0 0120 8.5v9a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 014 17.5z"/><circle cx="12" cy="13" r="3.2"/>'),
+  cameraOff: I('<path d="M9.5 7l.7-2h3.6l1.2 2h2.5A1.5 1.5 0 0120 8.5V16M17 19H5.5A1.5 1.5 0 014 17.5v-9A1.5 1.5 0 015.5 7H6"/><path d="M9.9 10.2a3.2 3.2 0 004.4 4.4"/><path d="M3.5 3.5l17 17"/>'),
 };
 
 export function toast(title, text = '', kind = '') {

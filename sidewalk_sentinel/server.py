@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from . import access, qr, tls, tunnel
-from .cameras import MAX_CAMERAS, CameraManager
+from .cameras import MAX_CAMERAS, CameraClosed, CameraManager
 from .detector import (DEFAULT_SIDEWALK, DEFAULT_WEIGHTS, DetectorUnavailable, SidewalkSegmenter,
                        VehicleDetector)
 from .config import Config
@@ -440,6 +440,8 @@ class Handler(BaseHTTPRequestHandler):
             mgr.note_ip(cam, self._client_ip())
             try:
                 return self._json(cam.push(body))
+            except CameraClosed:
+                return self._error(409, "kamera ditutup")
             except ValueError as e:
                 return self._error(400, str(e))
 

@@ -326,3 +326,15 @@ def test_ip_tersimpan_di_disk_dipulihkan_dan_berkas_yang_diedit_tangan_dibersihk
         assert m3.get(cam.spec.id).spec.ip == "" and m3.get(cam.spec.id).spec.ip_since == ""
     finally:
         m3.shutdown()
+
+
+def test_menutup_kamera_hanya_untuk_perangkat_sendiri_dan_terlihat_di_pusat(dua):
+    app, center, a, b, *_ = dua
+    st, d = a.req("POST", f"/api/cams/{a.id}", {"closed": True})
+    assert st == 200 and d["closed"] is True
+    assert a.req("POST", f"/api/cams/{b.id}", {"closed": True}) == (404, NOT_FOUND), "kamera orang lain tidak bisa ditutup"
+    st, d = center.req("GET", "/api/cams")
+    assert {c["name"]: c["closed"] for c in d["cams"]} == {"Ponsel Ayu": True, "Ponsel Budi": False}
+    st, d = b.req("GET", "/api/cams")
+    assert [(c["name"], c["closed"]) for c in d["cams"]] == [("Ponsel Budi", False)], "B hanya melihat dirinya sendiri"
+    assert a.req("POST", f"/api/cams/{a.id}", {"closed": False})[1]["closed"] is False

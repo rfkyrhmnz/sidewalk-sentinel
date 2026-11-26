@@ -462,6 +462,119 @@ def test_tautan_berkunci_tetap_bisa_dibuka_di_browser_lain_setelah_aplikasi_terb
         srv.server_close()
 
 
+# ===================================================================== tutup kamera (privasi)
+
+# Mencatat setiap aliran kamera yang dibuka halaman, agar tes bisa memastikan semuanya benar-benar berhenti.
+TRACK = """
+(() => {
+  const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  window.__streams = [];
+  navigator.mediaDevices.getUserMedia = async (c) => { const s = await real(c); window.__streams.push(s); return s; };
+})();
+"""
+SEMUA_BERHENTI = "window.__streams.length > 0 && window.__streams.every(s => s.getTracks().every(t => t.readyState === 'ended'))"
+
+
+def _frames(page):
+    """Daftar permintaan kirim-gambar yang keluar dari halaman ini (diisi terus)."""
+    sent = []
+    page.on("request", lambda r: sent.append(r.url) if r.method == "POST" and r.url.endswith("/frame") else None)
+    return sent
+
+
+def test_tutup_kamera_mematikan_aliran_menghentikan_gambar_dan_tetap_tertutup_setelah_muat_ulang(server, api, page):
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    sent = _frames(page)
+    cam = start_monitoring(page, api)
+    assert page.evaluate("window.__streams.length") == 1 and sent, "syarat awal: kamera menyala dan gambar terkirim"
+
+    page.click("#closeCam")
+    page.wait_for_selector("#blocked:not([hidden])")
+    assert page.evaluate(SEMUA_BERHENTI), "semua aliran kamera harus berhenti seketika (lampu kamera padam)"
+    assert page.evaluate("document.querySelector('video').srcObject") is None
+    assert "Kamera ditutup" in page.inner_text("#blocked") and page.locator("#bAct").inner_text() == "Buka kamera"
+    assert page.locator("#conn").inner_text().strip() == "Kamera ditutup"
+    assert page.evaluate("document.documentElement.dataset.state") == "ditutup"
+    assert page.locator("#tools button").count() == 0, "tertutup: hanya tombol Buka kamera di kartu"
+    assert page.evaluate("getComputedStyle(document.querySelector('#media')).visibility") == "hidden", "tidak boleh ada sisa gambar"
+    api.wait(lambda: cams(api)[0]["status"] == "ditutup" and cams(api)[0]["closed"], 10, "server harus tahu kamera ditutup")
+    assert only_cam(api, page)["id"] == cam["id"]
+
+    page.wait_for_timeout(600)                                         # sisa permintaan yang sudah di jalan
+    n = len(sent)
+    page.wait_for_timeout(2500)
+    assert len(sent) == n, "tidak boleh ada gambar terkirim selama kamera ditutup"
+
+    page.reload()
+    page.wait_for_selector("#blocked:not([hidden])")
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__streams.length") == 0, "muat ulang tidak boleh menyalakan kamera"
+    assert page.locator("#conn").inner_text().strip() == "Kamera ditutup" and cams(api)[0]["closed"] is True
+    page.evaluate("location.hash = '#/setelan'")                         # setelan tetap bisa dibuka saat kamera tertutup
+    page.wait_for_selector("#sPark", timeout=10000)
+    assert "Tutup kamera" in page.inner_text("#sPrivText")
+    page.evaluate("location.hash = '#/'")
+    page.wait_for_selector("#bAct")
+
+    page.click("#bAct")                                                  # buka kembali
+    page.wait_for_selector("#conn[data-st='memantau']", timeout=40000)
+    assert page.evaluate("window.__streams.length") == 1 and page.evaluate("localStorage.getItem('ss_closed')") is None
+    api.wait(lambda: cams(api)[0]["closed"] is False, 10)
+    page.wait_for_timeout(1500)
+    assert len(sent) > n, "gambar terkirim lagi setelah dibuka"
+
+
+def test_pusat_menutup_kamera_perangkat_dari_jauh_dan_tetap_tertutup(server, api, page):
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    cam = start_monitoring(page, api)
+    assert api.req("POST", f"/api/cams/{cam['id']}", {"closed": True})[0] == 200
+    page.wait_for_selector("#conn[data-st='ditutup']", timeout=10000)
+    assert page.evaluate(SEMUA_BERHENTI), "perangkat harus ikut mematikan kameranya"
+    assert page.evaluate("localStorage.getItem('ss_closed')") == "1", "penutupan dari pusat harus bertahan setelah muat ulang"
+    page.reload()
+    page.wait_for_selector("#conn[data-st='ditutup']")
+    assert page.evaluate("window.__streams.length") == 0
+
+    # pusat tidak bisa menyalakan kamera orang: perangkat tetap tertutup dan memulihkan tanda tertutup di server
+    assert api.req("POST", f"/api/cams/{cam['id']}", {"closed": False})[1]["closed"] is False
+    page.reload()
+    page.wait_for_selector("#conn[data-st='ditutup']")
+    assert page.evaluate("window.__streams.length") == 0, "pusat membuka tanda di server, kamera perangkat tidak boleh ikut menyala"
+    api.wait(lambda: cams(api)[0]["closed"] is True, 10, "perangkat harus menegaskan lagi bahwa kameranya tertutup")
+
+    # penyimpanan lokal terhapus tetapi server masih menandai tertutup: yang lebih ketat menang, kamera menutup lagi
+    page.evaluate("localStorage.removeItem('ss_closed')")
+    page.reload()
+    page.wait_for_function("window.__streams.length === 0 || window.__streams.every(s => s.getTracks().every(t => t.readyState === 'ended'))")
+    page.wait_for_selector("#conn[data-st='ditutup']", timeout=10000)
+    assert page.evaluate(SEMUA_BERHENTI) or page.evaluate("window.__streams.length") == 0
+    assert page.evaluate("localStorage.getItem('ss_closed')") == "1"
+
+
+@pytest.mark.parametrize("w,h", [(320, 640), (390, 844), (844, 390), (768, 1024), (1366, 800)])
+def test_kartu_kamera_ditutup_muat_di_kotak_bidik_dan_tidak_melebarkan_halaman(server, api, browser, w, h):
+    mobile = w < 900 and h < 1100
+    ctx = browser.new_context(viewport={"width": w, "height": h}, is_mobile=mobile, has_touch=mobile)
+    pg = ctx.new_page()
+    try:
+        pg.add_init_script(SCENE)
+        pg.add_init_script("localStorage.setItem('ss_closed', '1')")
+        pg.goto(server[1])
+        pg.wait_for_selector("#bAct")
+        box = pg.evaluate("""() => { const r = s => { const b = document.querySelector(s).getBoundingClientRect(); return { x: b.x, y: b.y, r: b.right, b: b.bottom, w: b.width, h: b.height }; };
+          return { vf: r('#vf'), card: r('.blocked-card'), btn: r('#bAct'), sw: document.documentElement.scrollWidth }; }""")
+        vf, card, btn = box["vf"], box["card"], box["btn"]
+        assert box["sw"] <= w, f"{w}x{h}: halaman melebar ({box['sw']})"
+        assert card["x"] >= vf["x"] - 0.5 and card["r"] <= vf["r"] + 0.5, f"{w}x{h}: kartu keluar dari kotak bidik (samping)"
+        assert card["y"] >= vf["y"] - 0.5 and card["b"] <= vf["b"] + 0.5, f"{w}x{h}: kartu terpotong kotak bidik (atas atau bawah)"
+        assert btn["h"] >= 44 and btn["b"] <= vf["b"], f"{w}x{h}: tombol Buka kamera terlalu kecil atau tertutup"
+        assert vf["w"] / vf["h"] <= 16 / 9 + 0.02, f"{w}x{h}: kotak bidik tidak boleh lebih lebar dari 16:9"
+    finally:
+        ctx.close()
+
+
 # ===================================================================== bersih dari fitur lama
 def test_tidak_ada_penyebutan_materi_kuliah_atau_sumber_lain():
     """Teknik pengolahan citra hanyalah alat; aplikasi tidak memetakan dirinya ke materi kuliah dan tidak punya sumber
@@ -871,8 +984,9 @@ def test_semua_halaman_muat_tanpa_gulir_mendatar_di_semua_ukuran_layar(server, a
         pg.goto(url)
         pg.wait_for_selector("#vf video", timeout=15000)
         cid = only_cam(api, pg)["id"]
+        awal, kini = midnight(), store_now()                                                # tersebar di sepanjang hari ini, tak pernah di masa depan
         for i, kind in enumerate(["parkir", "naik_trotoar", "parkir", "parkir"]):          # baris kejadian dan laporan perlu isi
-            seed(app, cid, kind, midnight() + timedelta(hours=7 + i, minutes=10 * i), 12 + i * 9)
+            seed(app, cid, kind, awal + (kini - awal) * (i + 1) / 6, 12 + i * 9)
         for rute in RUTE:
             pg.goto(url + ("#/" + rute if rute else ""))
             pg.wait_for_selector("#nav a[aria-current='page']")

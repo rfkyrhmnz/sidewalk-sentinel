@@ -541,3 +541,102 @@ def test_api_hapus_kejadian_perangkat_lain_atau_tak_dikenal_ditolak(srv):
     assert c.req("DELETE", "/api/cams/tidakada/events/1")[0] == 404
     assert c.req("GET", "/api/report?periode=hari_ini")[1]["total"] == 1
     assert c.req("POST", f"/api/cams/{ph.id}/events/1")[0] == 404, "hanya DELETE dan GET yang dikenal"
+
+
+# ======================================================================== tutup kamera (privasi)
+@pytest.mark.parametrize("nilai", ["false", "true", 1, 0, None, "", [], {}])
+def test_closed_harus_benar_benar_boolean(nilai):
+    with pytest.raises(ValueError):
+        apply_changes(_spec(), {"closed": nilai})
+
+
+def test_closed_diterapkan_dan_nilai_aneh_di_berkas_dibaca_sebagai_tertutup():
+    assert apply_changes(_spec(), {"closed": True}).closed is True
+    assert apply_changes(_spec(closed=True), {"closed": False}).closed is False
+    assert apply_changes(_spec(closed=True), {"name": "Baru"}).closed is True, "yang tidak disebut tidak berubah"
+    item = {"id": "a" * 12, "device": "b" * 24, "name": "X"}
+    assert CameraSpec.from_dict(item).closed is False, "berkas lama tanpa kolom ini: terbuka seperti biasa"
+    assert CameraSpec.from_dict({**item, "closed": "salah-ketik"}).closed is True, "ragu berarti tertutup"
+
+
+def test_tutup_menolak_frame_menghapus_gambar_di_memori_dan_buka_melanjutkan(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    cam = app.cams.get(ph.id)
+    assert cam.channel.latest() is not None, "syarat awal: ada gambar terakhir di memori"
+
+    st, info = c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    assert st == 200 and info["closed"] is True
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5, "status harus ditutup")
+
+    st, body = c.req("POST", f"/api/cams/{ph.id}/frame", jpeg(street.frame()), {"Content-Type": "image/jpeg"})
+    assert st == 409 and body == {"error": "kamera ditutup"}, "frame ditolak, bukan diterima lalu diabaikan"
+    st, body = c.req("POST", f"/api/cams/{ph.id}/frame", b"bukan jpeg sama sekali", {"Content-Type": "image/jpeg"})
+    assert st == 409 and body == {"error": "kamera ditutup"}, "ditolak sebelum isinya dibaca: isi rusak pun dijawab tertutup, bukan 400"
+    assert cam.channel.latest() is None, "gambar terakhir harus hilang dari memori server"
+    now = c.req("GET", f"/api/cams/{ph.id}")[1]
+    assert now["fps"] == 0 and now["size"] is None and now["uptime_s"] is None
+    assert cam.live_state()["tracks"] == [] and cam.live_state()["closed"] is True
+    assert c.req("POST", f"/api/cams/{ph.id}/propose-zone")[0] == 409, "tanpa gambar tidak ada usulan zona"
+
+    assert c.req("POST", f"/api/cams/{ph.id}", {"closed": False})[1]["closed"] is False
+    ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau" and not s["closed"])
+
+
+def test_tutup_tidak_mengubah_jeda_dan_membuka_kembali_ke_keadaan_semula(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    assert c.req("POST", f"/api/cams/{ph.id}", {"enabled": False})[0] == 200
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "jeda", 5)
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5, "tertutup menang atas jeda")
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": False})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "jeda", 5, "dibuka: kembali ke jeda, bukan memantau")
+    assert c.req("GET", f"/api/cams/{ph.id}")[1]["enabled"] is False
+
+
+def test_frame_yang_terlambat_tiba_setelah_tutup_ikut_terhapus(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    cam = app.cams.get(ph.id)
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5)
+    cam.channel.put(street.frame())                          # menyusup lewat jalur yang tidak melewati push()
+    c.wait(lambda: cam.channel.latest() is None, 3, "pekerja harus membuang gambar yang tersisa")
+
+
+def test_tutup_bertahan_setelah_server_dimulai_ulang(tmp_path):
+    m = CameraManager(tmp_path, detector=ColorDetector())
+    m.start()
+    cam, _ = m.register(new_key(), "Ponsel")
+    m.update(cam.spec.id, {"closed": True})
+    m.shutdown()
+    m2 = CameraManager(tmp_path, detector=ColorDetector())
+    m2.start()
+    try:
+        (again,) = m2.list()
+        assert again.spec.closed is True, "tertutup harus tetap tertutup sampai pemilik membukanya"
+        deadline = time.time() + 5
+        while again.status != "ditutup" and time.time() < deadline:
+            time.sleep(0.05)
+        assert again.status == "ditutup"
+    finally:
+        m2.shutdown()
+
+
+def test_frame_yang_berpapasan_dengan_penutupan_tidak_tertinggal_di_memori(tmp_path):
+    """Penutupan masuk di antara 'frame diterima' dan 'frame disimpan'. Pekerja tidak dijalankan di sini, jadi hanya
+    pemeriksaan sesudah penyimpanan di push() yang bisa menghapusnya (tanpa menunggu putaran pekerja berikutnya)."""
+    from dataclasses import replace
+
+    from sidewalk_sentinel.cameras import Camera
+    cam = Camera(_spec(), tmp_path, ColorDetector())
+    asli = cam.channel.put
+
+    def put_lalu_ditutup(frame):
+        asli(frame)
+        cam.spec = replace(cam.spec, closed=True)           # pemilik menekan Tutup tepat sesudah frame disimpan
+
+    cam.channel.put = put_lalu_ditutup
+    cam.push(jpeg(Street().frame()))
+    assert cam.channel.latest() is None, "frame yang tersimpan sesudah penutupan harus langsung dihapus"

@@ -201,9 +201,9 @@ perangkat yang tidak ada. Titik akhir utama:
 | `GET /api/info` | versi, peran peminta (`pusat` atau `perangkat`), nilai bawaan, dan status model |
 | `POST /api/detector/retry` | memuat ulang model kendaraan setelah galat |
 | `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya; menjawab dengan cookie `ss_dev` |
-| `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini |
+| `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini. Dijawab `409` bila kamera ditutup (isinya tidak dibaca) |
 | `POST /api/cams/<id>/propose-zone` | usulan poligon trotoar dari gambar terbaru perangkat (titik awal penyunting zona manual) |
-| `GET/POST/DELETE /api/cams/<id>` | informasi, setelan, dan penghapusan data perangkat |
+| `GET/POST/DELETE /api/cams/<id>` | informasi, setelan (`name`, `roi`, `settings`, `enabled` untuk Jeda, `closed` untuk Tutup kamera), dan penghapusan data perangkat |
 | `GET /api/cams/<id>/events` | kejadian perangkat (`?after=<no>`) |
 | `DELETE /api/cams/<id>/events/<no>` | hapus satu kejadian beserta foto buktinya (nomor tidak dipakai ulang) |
 | `GET /api/events` | semua kejadian (`kind`, `limit`, `offset`) |
@@ -279,7 +279,8 @@ dan detektor diganti tiruan (`tests/support.py`).
   mencari trotoar, alur sampai parkir terdeteksi dan lamanya masuk
   Laporan, model memuat atau galat, izin kamera ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak
   HP dan desktop, 12 ukuran layar dari 320 px sampai 2560 px (tanpa gulir mendatar, menu tidak menutupi isi, teks tidak
-  keluar dari tombol), bahan kaca, serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  keluar dari tombol), bahan kaca, tutup kamera (semua aliran berhenti, tidak ada gambar terkirim, bertahan setelah muat ulang,
+  ditutup dari pusat, kartu muat di kotak bidik), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 
@@ -292,6 +293,21 @@ Foto bukti memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days
 arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan` atau `--https`, server hanya menerima koneksi dari komputer itu
 sendiri; dengan tunnel (`--hp`) server tetap hanya di komputer itu dan siapa pun yang memegang tautan berkunci bisa
 masuk lewat tunnel, jadi jangan bagikan kode QR atau tautannya. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
+
+### Tutup kamera
+
+Tombol **Tutup kamera** di layar Pantau mematikan kamera sepenuhnya, berbeda dari **Jeda** yang hanya berhenti mencatat
+sementara kamera dan pengiriman gambar tetap berjalan. Selama ditutup:
+
+- aliran kamera dimatikan seketika (lampu kamera padam) dan halaman tidak mengirim gambar apa pun;
+- server menolak frame dengan `409` tanpa membaca isinya, dan gambar terakhir yang tersimpan di memori dibuang;
+- status perangkat menjadi **Ditutup**, juga di pusat (Setelan, Perangkat lain);
+- kamera tetap tertutup setelah halaman dimuat ulang, aplikasi dibuka lagi, atau server dimulai ulang, sampai pemilik menekan
+  **Buka kamera**. Nilai yang meragukan dibaca sebagai tertutup.
+
+Pusat juga bisa menutup kamera perangkat lain lewat API (`closed: true`); perangkat itu mematikan kameranya pada gambar
+berikutnya dan tetap tertutup. Hanya perangkat itu sendiri yang menyalakan kameranya lagi, dengan menekan Buka kamera.
+Kejadian dan foto bukti yang sudah tercatat tidak ikut terhapus; hapus lewat halaman Kejadian bila perlu.
 
 ### Pusat dan perangkat
 
