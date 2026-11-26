@@ -163,8 +163,8 @@ def test_connect_dan_halaman_hp_butuh_kunci(locked):
     anon = Client(app.port)
     assert anon.req("GET", "/api/connect")[0] == 403
     assert anon.req("GET", "/hp")[0] == 403
-    resp, _ = anon.req("GET", "/hp?k=kunci-hp", raw=True)                 # tautan berkunci di /hp memasang cookie
-    assert resp.status == 302 and resp.getheader("Location") == "/hp" and "ss_key=kunci-hp" in resp.getheader("Set-Cookie")
+    resp, body = anon.req("GET", "/hp?k=kunci-hp", raw=True)              # tautan berkunci di /hp memasang cookie dan langsung menampilkan halaman
+    assert resp.status == 200 and resp.getheader("Location") is None and "ss_key=kunci-hp" in resp.getheader("Set-Cookie")
     assert anon.req("GET", "/hp?k=salah")[0] == 403
     st, body = c.req("GET", "/hp")
     assert st == 200 and b"Hubungkan HP" in body and b"/hp.js" in body

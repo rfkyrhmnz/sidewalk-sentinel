@@ -88,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = f"SidewalkSentinel/{__version__}"
     app: App
+    _extra: tuple | list = ()                      # header tambahan untuk satu jawaban (lihat end_headers)
 
     # ------------------------------------------------------------------- dasar
     def log_message(self, fmt, *args):  # tenang: hanya kesalahan yang dicatat
@@ -156,11 +157,23 @@ class Handler(BaseHTTPRequestHandler):
                 return v
         return ""
 
+    @staticmethod
+    def _same(given: str, token: str) -> bool:
+        """Perbandingan waktu-tetap. Lewat bytes agar karakter non-ASCII di tautan atau cookie hanya berarti salah, bukan galat."""
+        return hmac.compare_digest(given.encode("utf-8", "replace"), token.encode("utf-8", "replace"))
+
     def _authorized(self) -> bool:
         token = self.app.token
         if token is None:
             return True
-        return hmac.compare_digest(self._cookie("ss_key"), token)
+        return self._same(self._cookie("ss_key"), token)
+
+    def end_headers(self) -> None:
+        for k, v in self._extra:                      # Set-Cookie dari tautan berkunci, dipasang pada jawaban halaman itu sendiri
+            self.send_header(k, v)
+        self._extra = []
+        self.send_header("Referrer-Policy", "no-referrer")     # kunci ada di alamat halaman: jangan ikut terkirim ke situs lain
+        super().end_headers()
 
     def _client_ip(self) -> str:
         return access.client_ip(self.client_address[0], self.headers, self.app.trust_proxy)
@@ -201,6 +214,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         self._body_read = False
+        self._extra: list[tuple[str, str]] = []
         try:
             self._dispatch_inner(method)
         finally:
@@ -214,25 +228,29 @@ class Handler(BaseHTTPRequestHandler):
             url = urlparse(self.path)
             path, query = url.path, parse_qs(url.query)
 
-            if self.app.token is not None and path in ("/", "/hp") and "k" in query:
-                if hmac.compare_digest(query["k"][0], self.app.token):
-                    cookie = f"ss_key={self.app.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
-                    if self.app.https:
-                        cookie += "; Secure"
-                    self.send_response(302)
-                    self.send_header("Location", path)
-                    self.send_header("Set-Cookie", cookie)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
+            # Tautan berkunci (?k=...) membuka halaman dan memasang cookie pada jawaban yang sama, tanpa mengalihkan. Kunci
+            # sengaja tetap ada di alamat: pratinjau pemindai QR dan Safari punya wadah cookie yang terpisah, jadi bila
+            # alamat dipindah antar browser (mis. "Buka di Safari") hanya alamat yang terbawa, dan cookie tidak.
+            unlocked = False
+            if (self.app.token is not None and path in ("/", "/hp") and method in ("GET", "HEAD") and "k" in query
+                    and self._same(query["k"][0], self.app.token)):
+                unlocked = True
+                cookie = f"ss_key={self.app.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                if self.app.https:
+                    cookie += "; Secure"
+                self._extra.append(("Set-Cookie", cookie))
 
-            if not self._authorized() and path not in PUBLIC_PATHS:
+            if not unlocked and not self._authorized() and path not in PUBLIC_PATHS:
                 if path.startswith("/api/"):
                     return self._error(403, "tidak diizinkan: buka tautan berkunci dari terminal")
-                page = ("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-                        "<body style='background:#05070d;color:#e8f1ff;font:16px system-ui;padding:2rem'>"
-                        "<h2>Akses ditolak</h2><p>Buka tautan berkunci yang dicetak di terminal "
-                        "(<code>python main.py serve --lan</code>).</p>")
+                page = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                        "<body style='background:#05060f;color:#f5f6ff;font:16px/1.5 system-ui;padding:2rem;max-width:34rem'>"
+                        "<h2>Akses ditolak</h2>"
+                        "<p>Alamat ini tidak memuat kunci yang berlaku. Kunci berganti setiap server dijalankan ulang.</p>"
+                        "<p>Pindai kode QR yang baru di layar laptop (halaman <code>/hp</code>), atau buka tautan lengkap "
+                        "yang dicetak di terminal.</p>"
+                        "<p>Bila membuka dari pratinjau pemindai, pindahkan ke Safari dengan alamat lengkap yang sama "
+                        "(termasuk <code>?k=...</code>).</p>")
                 return self._send(403, page.encode(), "text/html; charset=utf-8")
 
             if path.startswith("/api/"):

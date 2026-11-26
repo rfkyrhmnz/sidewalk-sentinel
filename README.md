@@ -53,6 +53,14 @@ Buka terminal baru sesudah memasang agar `cloudflared` dikenali. Server tetap ha
 (`127.0.0.1`); HP masuk lewat tunnel dengan tautan berkunci acak, dan permintaan tanpa kunci ditolak. Alamat tunnel dan
 kuncinya berganti setiap `--hp` dijalankan ulang.
 
+Kunci tetap ada di alamat halaman (`...?k=...`) dan tidak dihapus setelah halaman terbuka. Itu disengaja: pratinjau
+pemindai QR di iPhone dan Safari menyimpan cookie secara terpisah, jadi bila alamat dipindah dengan "Buka di Safari" hanya
+alamatnya yang ikut. Selama alamatnya lengkap, browser mana pun yang membukanya langsung masuk. Akibatnya kunci terlihat
+di bilah alamat dan riwayat HP: jangan bagikan tangkapan layarnya, dan jangan menyalin alamat itu ke tempat lain.
+Setiap browser yang dipakai terdaftar sebagai perangkat sendiri, jadi pindah browser menambah satu perangkat di Setelan
+(hapus yang lama di sana). Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara
+memperbaikinya.
+
 Bila `cloudflared` tidak ditemukan, `--hp` otomatis memakai jalur Wi-Fi: HTTPS lokal dengan kode QR di terminal. HP dan
 laptop harus satu Wi-Fi, firewall Windows harus mengizinkan Python (pilih **Allow** saat ditanya), dan browser memberi
 peringatan sertifikat sekali (sertifikat dibuat otomatis dan ditandatangani sendiri, tersimpan di `data/tls/`):
@@ -262,7 +270,8 @@ dan detektor diganti tiruan (`tests/support.py`).
   API `/api/connect`.
 - `test_ui_hp.py`: halaman `/hp` di Chrome; kode QR di layar dibaca kembali dari tangkapan layar dan harus sama dengan
   tautan berkunci.
-- `test_server.py` dan `test_tls.py`: API, kunci LAN, keamanan masukan, sertifikat HTTPS, dan cookie `Secure`.
+- `test_server.py` dan `test_tls.py`: API, kunci LAN (termasuk pindah browser hanya dengan alamat, dan kunci berisi karakter
+  aneh), keamanan masukan, sertifikat HTTPS, dan cookie `Secure`.
 - `test_laporan.py`: agregasi laporan dengan data buatan (batas tengah malam, zona waktu, jam puncak, lama yang belum
   terukur, keadaan kosong).
 - `test_ui_pantau.py`: antarmuka di Chrome lewat Playwright dengan kamera tiruan (kanvas yang menggambar jalan dan

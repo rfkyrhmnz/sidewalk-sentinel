@@ -153,7 +153,7 @@ def test_cookie_kunci_bertanda_secure_lewat_https(https_server):
         cookie = r.getheader("Set-Cookie") or ""
     finally:
         conn.close()
-    assert r.status == 302 and "ss_key=rahasia-uji" in cookie
+    assert r.status == 200 and "ss_key=rahasia-uji" in cookie
     assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=Lax" in cookie
 
 
