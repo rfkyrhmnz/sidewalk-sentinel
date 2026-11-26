@@ -32,10 +32,7 @@ class Engine:
     def __init__(self, roi_norm, detector, cfg: Config | None = None):
         self.cfg = cfg or Config()
         self.cfg.validate()
-        pts = [(float(min(1, max(0, x))), float(min(1, max(0, y)))) for x, y in roi_norm]
-        if len(pts) < 3:
-            raise ValueError("ROI trotoar butuh minimal 3 titik")
-        self.roi_norm = pts
+        self.roi_norm = self._clean(roi_norm)
         self.detector = detector
         self.tracker = CentroidTracker(self.cfg)
         self.decider = Decider(self.cfg)
@@ -47,12 +44,29 @@ class Engine:
         self.header_fn = None          # opsional: fungsi(t) -> teks judul HUD (nama perangkat dan jam)
 
     # --------------------------------------------------------------------- setup
-    def _setup(self, h: int, w: int) -> None:
-        self.size = (w, h)
+    @staticmethod
+    def _clean(roi_norm) -> list[tuple[float, float]]:
+        pts = [(float(min(1, max(0, x))), float(min(1, max(0, y)))) for x, y in roi_norm]
+        if len(pts) < 3:
+            raise ValueError("ROI trotoar butuh minimal 3 titik")
+        return pts
+
+    def _rasterize(self) -> None:
+        w, h = self.size
         self.roi_px = np.array([[x * w, y * h] for x, y in self.roi_norm], dtype=np.int32)
         self.roi_mask = np.zeros((h, w), np.uint8)
         cv2.fillPoly(self.roi_mask, [self.roi_px], 255)
+
+    def _setup(self, h: int, w: int) -> None:
+        self.size = (w, h)
+        self._rasterize()
         self.tracker.reset()                        # ukuran berubah: jejak lama tidak berlaku
+
+    def set_roi(self, roi_norm) -> None:
+        """Ganti zona tanpa membuang jejak kendaraan (dipakai zona otomatis yang diperbarui terus-menerus)."""
+        self.roi_norm = self._clean(roi_norm)
+        if self.size is not None:
+            self._rasterize()
 
     def _fit(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]

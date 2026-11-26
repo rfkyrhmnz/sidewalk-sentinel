@@ -46,6 +46,7 @@ function route() {
   const hash = location.hash || '#/';
   if (/^#\/kejadian/.test(hash)) P.unseen = 0;
   renderNav(hash);
+  document.body.dataset.page = (hash.match(/^#\/([a-z]*)/) || [])[1] || 'pantau';
   for (const [re, fn] of ROUTES) {
     if (re.test(hash)) { current = fn() || current; window.scrollTo(0, 0); view.focus({ preventScroll: true }); return; }
   }
@@ -55,7 +56,8 @@ window.addEventListener('hashchange', route);
 
 // ------------------------------------------------------------------ penanda status
 const CHIP = {
-  memantau: 'Memantau', memuat: 'Memuat model', model_galat: 'Model galat', perlu_area: 'Tandai zona', jeda: 'Dijeda', menunggu: 'Menunggu',
+  memantau: 'Memantau', memuat: 'Memuat model', mencari_trotoar: 'Mencari trotoar', model_galat: 'Model galat', perlu_area: 'Tandai zona',
+  jeda: 'Dijeda', menunggu: 'Menunggu',
 };
 
 function renderChip() {
@@ -70,6 +72,7 @@ function renderChip() {
   }
   const chip = $id('conn');
   chip.dataset.st = code;
+  document.documentElement.dataset.state = code;          // cahaya latar mengikuti keadaan pemantauan
   setText(chip.querySelector('span'), text);
 }
 

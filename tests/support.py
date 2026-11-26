@@ -167,6 +167,15 @@ class FakeSegmenter:
         self.roi = None if roi is None else [list(p) for p in roi]
         self.calls = 0
 
+    def mask(self, frame: np.ndarray, conf: float = 0.25, imgsz: int = 640) -> np.ndarray:
+        """Mask trotoar seukuran frame (kosong bila trotoar 'tidak terlihat')."""
+        self.calls += 1
+        h, w = frame.shape[:2]
+        m = np.zeros((h, w), np.uint8)
+        if self.roi is not None:
+            cv2.fillPoly(m, [np.array([[x * w, y * h] for x, y in self.roi], np.int32)], 1)
+        return m.astype(bool)
+
     def propose(self, frame: np.ndarray, max_points: int = 10):
         self.calls += 1
         return None if self.roi is None else {"roi": self.roi, "coverage": 0.3}

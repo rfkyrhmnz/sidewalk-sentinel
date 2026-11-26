@@ -257,10 +257,17 @@ export function viewSetelan({ view, device: D, info }) {
         <div id="sMsg"></div>
       </div></section>
 
+    <section class="stack" aria-labelledby="sZona"><h2 class="h3" id="sZona">Zona trotoar</h2>
+      <div class="panel stack">
+        <p class="small" id="sZoneText"></p>
+        <div class="row" id="sZoneRow"></div>
+        <div id="sZoneMsg"></div>
+      </div></section>
+
     <section class="stack" aria-labelledby="sModel"><h2 class="h3" id="sModel">Model deteksi</h2>
       <div class="panel stack">
         <p class="small"><b>Kendaraan</b> (mobil, motor, bus, truk, sepeda): YOLO <span class="num">${esc(det.weights || 'yolo11n.pt')}</span>. <span id="sModelState"></span></p>
-        <p class="small"><b>Zona trotoar otomatis</b>: ${det.sidewalk_model ? 'tersedia, model trotoar ditemukan.' : 'tidak tersedia. Letakkan model segmentasi di <span class="num">models/trotoar.pt</span>, atau tandai zona sendiri di layar pantau.'}</p>
+        <p class="small"><b>Trotoar</b>: ${det.sidewalk_model ? 'model segmentasi trotoar ditemukan, zona dicari otomatis dari gambar kamera.' : 'model segmentasi tidak ditemukan. Letakkan di <span class="num">models/trotoar.pt</span> agar zona dicari otomatis, atau gambar zona sendiri di layar pantau.'}</p>
         <p class="faint small">Tangan, orang, dan benda lain tidak pernah dihitung sebagai kendaraan karena bukan kelas kendaraan model.</p>
       </div></section>
 
@@ -288,6 +295,24 @@ export function viewSetelan({ view, device: D, info }) {
     for (const o of view.querySelectorAll('[data-size]')) o.setAttribute('aria-pressed', String(o === b));
   };
   sync();
+  const manual = cam.zone === 'manual';
+  const zoneRow = $id('sZoneRow');
+  if (manual && cam.auto_available) {
+    setText($id('sZoneText'), 'Anda menggambar zona sendiri, jadi model tidak mengubahnya. Kembali ke zona otomatis bila ingin model mencari trotoar sendiri.');
+    zoneRow.innerHTML = `<button class="btn line" id="sZoneAuto" type="button">${ICON.sync}<span>Kembali ke otomatis</span></button>`;
+    $id('sZoneAuto').onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try { await D.save({ roi: null }); toast('Zona otomatis aktif', 'Model mencari trotoar dari gambar kamera.'); location.hash = '#/'; }
+      catch (err) { btn.disabled = false; showError($id('sZoneMsg'), err); }
+    };
+  } else if (manual) {
+    setText($id('sZoneText'), 'Zona digambar manual. Zona otomatis tidak tersedia karena model trotoar tidak ditemukan.');
+  } else if (cam.auto_available) {
+    setText($id('sZoneText'), 'Zona dicari otomatis dari gambar kamera dan menyesuaikan diri bila kamera digeser. Untuk menggambar sendiri, buka layar pantau lalu pilih Zona manual.');
+  } else {
+    setText($id('sZoneText'), 'Zona belum ada. Tanpa model trotoar, gambar zona di layar pantau.');
+  }
   const MODEL_STATE = { siap: 'Siap dipakai.', memuat: 'Sedang dimuat.', galat: 'Belum siap. Lihat layar pantau untuk penyebabnya.', belum: 'Belum dimuat.' };
   const ms = D.state && D.state.detector;
   setText($id('sModelState'), ms ? (MODEL_STATE[ms.state] || '') : '');
@@ -329,7 +354,7 @@ export function viewSetelan({ view, device: D, info }) {
   };
   armed($id('sDel'), async () => {
     await del(`/api/cams/${cam.id}`);
-    toast('Data dihapus', 'Perangkat ini mulai dari awal. Tandai zona trotoar lagi.');
+    toast('Data dihapus', 'Perangkat ini mulai dari awal.');
     location.hash = '#/';                               // gambar berikutnya dijawab 404; perangkat mendaftar ulang sendiri
   });
 

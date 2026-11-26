@@ -197,15 +197,87 @@ def test_frame_menolak_masukan_buruk(srv):
     assert c.req("POST", url, jpeg(np.zeros((90, 160, 3), np.uint8)), jpg_h)[0] == 200
 
 
-def test_perangkat_tanpa_area_meminta_area_lalu_langsung_memantau_setelah_area_diset(srv):
+def test_tanpa_model_trotoar_perangkat_meminta_area_lalu_langsung_memantau_setelah_area_diset(tmp_path):
+    server, app = make_server("127.0.0.1", 0, tmp_path / "data", detector=ColorDetector(), sidewalk=None)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        c = Client(app.port)
+        ph = Phone(c)
+        ph.register()
+        street = Street()
+        ph.stream(street.frame, 5, until=lambda s: s["status"] == "perlu_area")
+        assert ph.state["zone"] == "manual" or ph.state["roi"] is None
+        assert c.req("GET", f"/api/cams/{ph.id}")[1]["auto_available"] is False
+        assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI})[0] == 200
+        ph.stream(street.frame, 10, until=lambda s: s["status"] == "memantau")      # tanpa fase belajar latar
+        assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
+    finally:
+        app.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_zona_otomatis_ditemukan_sendiri_tanpa_langkah_menandai(srv):
     app, c = srv
     ph = Phone(c)
     ph.register()
     street = Street()
-    ph.stream(street.frame, 5, until=lambda s: s["status"] == "perlu_area")
+    assert c.req("GET", f"/api/cams/{ph.id}")[1]["auto_available"] is True
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+    assert ph.state["zone"] == "auto" and ph.state["roi"], "zona dari model langsung dipakai"
+    ys = [p[1] for p in ph.state["roi"]]
+    assert min(ys) == pytest.approx(0.62, abs=0.03) and max(ys) == pytest.approx(0.95, abs=0.03)
+    cam = c.req("GET", f"/api/cams/{ph.id}")[1]
+    assert cam["roi"] == ph.state["roi"] and cam["zone"] == "auto"
+    assert app.cams.get(ph.id).spec.roi is None, "zona otomatis tidak disimpan sebagai zona manual"
+
+
+def test_kendaraan_parkir_di_zona_otomatis_dicatat_tanpa_pernah_menandai_zona(srv):
+    app, c = srv
+    ph = Phone(c)
+    ph.register()
+    assert c.req("POST", f"/api/cams/{ph.id}", {"settings": {"park_seconds": 2}})[0] == 200
+    street = Street()
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+    ph.stream(lambda: street.frame(vehicle=True), 25, until=lambda s: s["counts_today"]["parkir"] == 1)
+
+
+def test_trotoar_tak_terlihat_berstatus_mencari_lalu_memantau_begitu_muncul(srv):
+    app, c = srv
+    app.sidewalk.roi = None
+    ph = Phone(c)
+    ph.register()
+    street = Street()
+    ph.stream(street.frame, 10, until=lambda s: s["status"] == "mencari_trotoar")
+    assert ph.state["roi"] is None and "trotoar" in ph.state["message"].lower()
+    app.sidewalk.roi = FakeSegmenter().roi                                    # kamera diarahkan ke trotoar
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau")
+
+
+def test_zona_manual_menggantikan_otomatis_dan_bisa_kembali_ke_otomatis(srv):
+    app, c = srv
+    ph = Phone(c)
+    ph.register()
+    street = Street()
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau" and s["zone"] == "auto")
     assert c.req("POST", f"/api/cams/{ph.id}", {"roi": ROI})[0] == 200
-    ph.stream(street.frame, 10, until=lambda s: s["status"] == "memantau")      # tanpa fase belajar latar
-    assert ph.state["tracks"] == [] and ph.state["counts_today"] == {"parkir": 0, "naik_trotoar": 0}
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau" and s["zone"] == "manual")
+    assert ph.state["roi"] == [list(p) for p in ROI]
+    assert c.req("POST", f"/api/cams/{ph.id}", {"roi": None})[0] == 200
+    ph.stream(street.frame, 15, until=lambda s: s["status"] == "memantau" and s["zone"] == "auto")
+
+
+def test_model_trotoar_rusak_tidak_menjatuhkan_kamera_dan_meminta_zona_manual(srv):
+    app, c = srv
+
+    def rusak(frame, conf=0.25, imgsz=640):
+        raise RuntimeError("bobot rusak")
+
+    app.sidewalk.mask = rusak
+    ph = Phone(c)
+    ph.register()
+    ph.stream(Street().frame, 10, until=lambda s: s["status"] == "perlu_area")
+    assert "manual" in ph.state["message"]
 
 
 def _durasi(c, ph):

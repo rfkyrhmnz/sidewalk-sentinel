@@ -77,6 +77,9 @@ def mask_to_polygon(mask: np.ndarray, max_points: int = 10, min_frac: float = 0.
     cnt = max(contours, key=cv2.contourArea)
     if cv2.contourArea(cnt) < min_frac * h * w:
         return None
+    hull = cv2.convexHull(cnt)
+    if cv2.contourArea(hull) <= 1.25 * cv2.contourArea(cnt):
+        cnt = hull                                # bentuk nyaris cembung: gigitan kecil (mis. kendaraan di tepi trotoar) ditutup
     peri = cv2.arcLength(cnt, True)
     pts = cnt
     for eps in np.linspace(0.005, 0.12, 24):         # makin kasar sampai cukup sedikit titik

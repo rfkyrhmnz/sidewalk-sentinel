@@ -4,33 +4,49 @@ Pemakaian:  python tools/make_icons.py
 """
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 OUT = Path(__file__).resolve().parent.parent / "web"
-BG, PANEL, LINE = (10, 20, 36), (17, 28, 48), (42, 59, 92)
-WHITE, YELLOW, CYAN = (233, 240, 251), (255, 211, 31), (56, 225, 255)
+TOP, BOTTOM = (23, 29, 74), (7, 10, 28)
+WHITE, MINT, CYAN = (238, 241, 255), (77, 245, 192), (98, 214, 255)
+
+
+def diagonal(size: int, a, b) -> Image.Image:
+    """Gradien diagonal dari kiri atas (a) ke kanan bawah (b)."""
+    ramp = Image.linear_gradient("L").resize((size, size))                 # atas -> bawah
+    side = ramp.rotate(90, expand=True).transpose(Image.FLIP_LEFT_RIGHT)   # kiri -> kanan
+    mask = ImageChops.add(ramp, side, scale=2)
+    return Image.composite(Image.new("RGB", (size, size), b), Image.new("RGB", (size, size), a), mask)
 
 
 def draw(size: int) -> Image.Image:
-    s = size / 512
     big = 4                                   # supersampling agar tepi halus
-    img = Image.new("RGB", (size * big, size * big), BG)
+    n = size * big
+    k = n / 512
+    img = diagonal(n, TOP, BOTTOM)
+
+    glow = Image.new("L", (n, n), 0)          # cahaya mint di bawah tengah, seperti latar aplikasi
+    ImageDraw.Draw(glow).ellipse([100 * k, 190 * k, 412 * k, 500 * k], fill=110)
+    glow = glow.filter(ImageFilter.GaussianBlur(70 * k))
+    img = Image.composite(Image.new("RGB", (n, n), MINT), img, glow)
+
     d = ImageDraw.Draw(img)
-    k = s * big
+    w = int(20 * k)
 
-    def box(x0, y0, x1, y1):
-        return [x0 * k, y0 * k, x1 * k, y1 * k]
+    def corner(x, y, sx, sy):                 # sudut bidikan: dua garis bertemu, ujung dan siku dibulatkan
+        pts = [(x, y + sy * 56 * k), (x, y), (x + sx * 56 * k, y)]
+        d.line(pts, fill=WHITE, width=w, joint="curve")
+        for px, py in (pts[0], pts[1], pts[2]):
+            d.ellipse([px - w / 2, py - w / 2, px + w / 2, py + w / 2], fill=WHITE)
 
-    d.rounded_rectangle(box(96, 96, 416, 416), radius=56 * k, fill=PANEL, outline=LINE, width=int(8 * k))
-    d.rectangle(box(136, 246, 376, 262), fill=WHITE)
-    for i in range(7):                         # ubin taktil berupa titik kuning
-        cx = 156 + i * 33.3
-        d.ellipse(box(cx - 12, 322, cx + 12, 346), fill=YELLOW)
-    w = int(14 * k)
-    for (x, y, dx, dy) in ((148, 196, 1, -1), (364, 196, -1, -1)):
-        d.line([(x * k, (y + dy * 36) * k), (x * k, y * k), ((x + dx * 36) * k, y * k)], fill=CYAN, width=w, joint="curve")
-    d.line([(148 * k, 364 * k), (148 * k, 380 * k)], fill=CYAN, width=w)
-    d.line([(364 * k, 364 * k), (364 * k, 380 * k)], fill=CYAN, width=w)
+    for cx, cy, sx, sy in ((128, 128, 1, 1), (384, 128, -1, 1), (128, 384, 1, -1), (384, 384, -1, -1)):
+        corner(cx * k, cy * k, sx, sy)
+
+    x0, y0, x1, y1 = int(206 * k), int(230 * k), int(306 * k), int(330 * k)   # trapesium bergradasi: trotoar dalam perspektif
+    grad = diagonal(max(x1 - x0, y1 - y0), CYAN, MINT).crop((0, 0, x1 - x0, y1 - y0))
+    trap = Image.new("L", (n, n), 0)
+    ImageDraw.Draw(trap).polygon([(206 * k, 330 * k), (228 * k, 230 * k), (284 * k, 230 * k), (306 * k, 330 * k)], fill=255)
+    img.paste(grad, (x0, y0), trap.crop((x0, y0, x1, y1)))
     return img.resize((size, size), Image.LANCZOS)
 
 

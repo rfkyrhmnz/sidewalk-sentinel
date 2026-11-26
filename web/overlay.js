@@ -3,14 +3,23 @@
 
 export const PRESET = [[0.04, 0.62], [0.96, 0.62], [0.96, 0.95], [0.04, 0.95]];
 
-const COLORS = { parkir: '#ff5a5f', naik_trotoar: '#d94ff7', diam: '#ffb020', bergerak: '#35e0ff', luar: '#8da2c0' };
-const NAMES = { parkir: 'Parkir', naik_trotoar: 'Naik trotoar', diam: 'Diam', bergerak: 'Bergerak', luar: '' };
-const KERB = '#ffd31f';
-const SCAN = '#35e0ff';
-const FONT = '700 13px Bahnschrift, "DIN Alternate", "Roboto Condensed", system-ui, sans-serif';
-const HIT_VERTEX = 26;      // radius sentuh titik sudut, piksel layar
+const COLORS = { parkir: '#ff6b7a', naik_trotoar: '#b39bff', diam: '#ffc857', bergerak: '#62d6ff', luar: '#c9d2f0' };
+const ZONE = { auto: '98, 214, 255', manual: '255, 200, 87' };     // zona otomatis biru, zona manual kuning
+const FONT = '600 12.5px "Segoe UI Variable Text", system-ui, -apple-system, Roboto, sans-serif';
+const HIT_VERTEX = 28;      // radius sentuh titik sudut, piksel layar
 const HIT_MID = 22;
 const MIN_POINTS = 3;
+
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : '');
+function pill(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
 
 export class Overlay {
   constructor(host) {
@@ -23,6 +32,7 @@ export class Overlay {
     this.tracks = [];
     this.parkSeconds = 10;
     this.mode = 'view';
+    this.kind = 'auto';
     this.scan = false;
     this.drag = -1;
     this.lastTap = { i: -1, t: 0 };
@@ -56,13 +66,15 @@ export class Overlay {
   getZone() { return this.zone ? this.zone.map((p) => [p[0], p[1]]) : null; }
   setTracks(tracks, parkSeconds) { this.tracks = tracks || []; if (parkSeconds) this.parkSeconds = parkSeconds; this.draw(); }
 
+  setZoneKind(kind) { if (kind !== this.kind) { this.kind = kind; this.draw(); } }
+
   setMode(mode) {
     this.mode = mode;
     this.canvas.classList.toggle('edit', mode === 'edit');
     this.canvas.setAttribute('aria-hidden', mode === 'edit' ? 'false' : 'true');
     if (mode === 'edit') {
       this.canvas.setAttribute('role', 'img');
-      this.canvas.setAttribute('aria-label', 'Penyunting zona trotoar. Seret titik kuning agar garis menutupi trotoar. Seret titik kecil di tengah sisi untuk menambah sudut. Ketuk dua kali sebuah titik untuk menghapusnya.');
+      this.canvas.setAttribute('aria-label', 'Penyunting zona trotoar. Seret titik putih agar garis menutupi trotoar. Seret titik kecil di tengah sisi untuk menambah sudut. Ketuk dua kali sebuah titik untuk menghapusnya.');
     } else {
       this.canvas.removeAttribute('role');
       this.canvas.removeAttribute('aria-label');
@@ -94,53 +106,55 @@ export class Overlay {
     const { ctx, w, h } = this;
     ctx.clearRect(0, 0, w, h);
     if (this.zone && this.zone.length >= MIN_POINTS) this._drawZone();
+    if (this.scan) this._drawScan();
     if (this.mode === 'view') this._drawTracks();
     else this._drawHandles();
   }
 
   _drawZone() {
-    const { ctx } = this;
+    const { ctx, h } = this;
     const px = this.px();
     const edit = this.mode === 'edit';
+    const rgb = ZONE[edit ? 'manual' : this.kind] || ZONE.auto;
+    const ys = px.map((p) => p[1]);
+    const g = ctx.createLinearGradient(0, Math.min(...ys), 0, Math.max(...ys, h * 0.01));
+    g.addColorStop(0, `rgba(${rgb}, ${edit ? .10 : .05})`);
+    g.addColorStop(1, `rgba(${rgb}, ${edit ? .30 : .20})`);
     this.path(px);
-    ctx.fillStyle = edit ? 'rgba(53, 224, 255, .16)' : 'rgba(53, 224, 255, .08)';
+    ctx.fillStyle = g;
     ctx.fill();
-    if (this.scan) this._drawScan(px);
     ctx.lineJoin = 'round';
     ctx.lineWidth = edit ? 2.5 : 2;
-    ctx.setLineDash([9, 7]);                              // marka kerb: garis putus-putus kuning
-    ctx.strokeStyle = KERB;
-    ctx.globalAlpha = edit ? 1 : 0.85;
+    ctx.strokeStyle = `rgba(${rgb}, ${edit ? 1 : .9})`;
+    ctx.shadowColor = `rgba(${rgb}, .8)`;
+    ctx.shadowBlur = 12;
     this.path(px);
     ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
   }
 
-  // Garis pindai menyapu zona saat latar dipelajari: terlihat bagian mana yang sedang diamati.
-  _drawScan(px) {
-    const { ctx } = this;
-    const ys = px.map((p) => p[1]);
-    const top = Math.min(...ys), bottom = Math.max(...ys);
-    const phase = (performance.now() / 1600) % 2;
+  // Berkas cahaya menyapu gambar saat model memuat atau mencari trotoar: terlihat bahwa aplikasi sedang bekerja.
+  _drawScan() {
+    const { ctx, w, h } = this;
+    const phase = (performance.now() / 2200) % 2;
     const f = phase < 1 ? phase : 2 - phase;
-    const y = top + f * (bottom - top);
-    ctx.save();
-    this.path(px);
-    ctx.clip();
-    const g = ctx.createLinearGradient(0, y - 34, 0, y + 34);
-    g.addColorStop(0, 'rgba(53, 224, 255, 0)');
-    g.addColorStop(0.5, 'rgba(53, 224, 255, .38)');
-    g.addColorStop(1, 'rgba(53, 224, 255, 0)');
+    const y = f * h;
+    const band = Math.max(60, h * 0.22);
+    const g = ctx.createLinearGradient(0, y - band, 0, y + band);
+    g.addColorStop(0, 'rgba(98, 214, 255, 0)');
+    g.addColorStop(0.5, 'rgba(98, 214, 255, .26)');
+    g.addColorStop(1, 'rgba(98, 214, 255, 0)');
     ctx.fillStyle = g;
-    ctx.fillRect(0, y - 34, this.w, 68);
-    ctx.strokeStyle = SCAN;
+    ctx.fillRect(0, y - band, w, band * 2);
+    ctx.strokeStyle = 'rgba(190, 240, 255, .85)';
     ctx.lineWidth = 1.5;
+    ctx.shadowColor = 'rgba(98, 214, 255, .9)';
+    ctx.shadowBlur = 10;
     ctx.beginPath();
     ctx.moveTo(0, y);
-    ctx.lineTo(this.w, y);
+    ctx.lineTo(w, y);
     ctx.stroke();
-    ctx.restore();
+    ctx.shadowBlur = 0;
   }
 
   _drawHandles() {
@@ -149,65 +163,80 @@ export class Overlay {
     const px = this.px();
     px.forEach(([x, y], i) => {                           // titik tengah sisi: seret untuk menambah sudut
       const [nx, ny] = px[(i + 1) % px.length];
-      const mx = (x + nx) / 2, my = (y + ny) / 2;
       ctx.beginPath();
-      ctx.arc(mx, my, 5, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(6, 11, 20, .85)';
+      ctx.arc((x + nx) / 2, (y + ny) / 2, 5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 255, 255, .28)';
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = KERB;
+      ctx.strokeStyle = 'rgba(255, 255, 255, .7)';
       ctx.stroke();
     });
     px.forEach(([x, y], i) => {
+      const r = i === this.drag ? 13 : 10;
       ctx.beginPath();
-      ctx.arc(x, y, i === this.drag ? 13 : 10, 0, Math.PI * 2);
-      ctx.fillStyle = '#060b14';
+      ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 200, 87, .28)';
       ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = KERB;
-      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#f1f4ff';
+      ctx.shadowColor = 'rgba(0, 0, 0, .55)';
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
     });
   }
 
   _drawTracks() {
     const { ctx, w, h } = this;
     ctx.font = FONT;
+    ctx.textBaseline = 'middle';
     for (const t of this.tracks) {
       const [bx, by, bw, bh] = t.box;
       const x = bx * w, y = by * h, bwp = bw * w, bhp = bh * h;
       const color = COLORS[t.state] || COLORS.luar;
-      const arm = Math.max(8, Math.min(bwp, bhp) * 0.28);
-      ctx.lineWidth = t.state === 'luar' ? 1.5 : 2.5;
+      const radius = Math.min(14, bwp / 4, bhp / 4);
+      const alert = t.state === 'parkir' || t.state === 'naik_trotoar';
+      pill(ctx, x, y, bwp, bhp, radius);                  // kotak membulat dengan cahaya tipis
+      ctx.fillStyle = color + (alert ? '22' : '12');
+      ctx.fill();
+      ctx.lineWidth = alert ? 2.5 : 1.75;
       ctx.strokeStyle = color;
-      ctx.beginPath();
-      [[x, y, 1, 1], [x + bwp, y, -1, 1], [x, y + bhp, 1, -1], [x + bwp, y + bhp, -1, -1]].forEach(([cx, cy, dx, dy]) => {
-        ctx.moveTo(cx + dx * arm, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + dy * arm);
-      });
+      ctx.shadowColor = color;
+      ctx.shadowBlur = alert ? 14 : 6;
       ctx.stroke();
-      if (t.state !== 'luar') {
-        ctx.globalAlpha = 0.35;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x, y, bwp, bhp);
-        ctx.globalAlpha = 1;
-      }
-      let label = NAMES[t.state];
-      if (label && t.state === 'parkir' && t.dwell >= 1) label = `${label} ${Math.round(t.dwell)} dtk`;
-      if (t.state === 'diam') {
-        label = `Diam ${Math.round(t.dwell)}/${Math.round(this.parkSeconds)} dtk`;
-        ctx.fillStyle = 'rgba(40, 40, 40, .9)';
-        ctx.fillRect(x, y + bhp + 4, bwp, 4);
+      ctx.shadowBlur = 0;
+
+      let text = cap(t.label || 'kendaraan');
+      if (t.state === 'parkir') text = `${text} parkir${t.dwell >= 1 ? ` ${Math.round(t.dwell)} dtk` : ''}`;
+      else if (t.state === 'naik_trotoar') text = `${text} naik trotoar`;
+      else if (t.state === 'diam') {
+        text = `${text} diam ${Math.round(t.dwell)}/${Math.round(this.parkSeconds)} dtk`;
+        const bar = Math.max(24, bwp - 2 * radius);        // kemajuan menuju batas parkir
+        pill(ctx, x + radius, y + bhp + 6, bar, 5, 2.5);
+        ctx.fillStyle = 'rgba(255, 255, 255, .22)';
+        ctx.fill();
+        pill(ctx, x + radius, y + bhp + 6, Math.max(5, bar * Math.min(1, t.dwell / this.parkSeconds)), 5, 2.5);
         ctx.fillStyle = color;
-        ctx.fillRect(x, y + bhp + 4, bwp * Math.min(1, t.dwell / this.parkSeconds), 4);
-      }
-      if (!label) continue;
-      if (t.id != null) label = `#${t.id} ${label}`;
-      const tw = ctx.measureText(label).width;
-      const lx = Math.max(0, Math.min(x, w - tw - 12));
-      const ly = y - 24 < 0 ? y + bhp + 12 : y - 24;
-      ctx.fillStyle = 'rgba(6, 11, 20, .88)';
-      ctx.fillRect(lx, ly, tw + 12, 20);
+        ctx.fill();
+      } else if (t.state === 'bergerak') text = `${text} bergerak`;
+
+      const tw = ctx.measureText(text).width;              // label pil: titik berwarna lalu nama kendaraan
+      const pw = tw + 30, ph = 24;
+      const lx = Math.max(4, Math.min(x, w - pw - 4));
+      const ly = y - ph - 6 < 4 ? Math.min(h - ph - 4, y + bhp + 14) : y - ph - 6;
+      pill(ctx, lx, ly, pw, ph, ph / 2);
+      ctx.fillStyle = 'rgba(8, 11, 32, .78)';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255, 255, 255, .18)';
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(lx + 13, ly + ph / 2, 4, 0, Math.PI * 2);
       ctx.fillStyle = color;
-      ctx.fillText(label, lx + 6, ly + 14.5);
+      ctx.fill();
+      ctx.fillStyle = '#eef1ff';
+      ctx.fillText(text, lx + 23, ly + ph / 2 + 0.5);
     }
   }
 
