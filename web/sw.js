@@ -1,5 +1,5 @@
 // Service worker: cangkang aplikasi tetap bisa dibuka tanpa jaringan. API tidak pernah di-cache.
-const CACHE = 'sentinel-v6';
+const CACHE = 'sentinel-v7';
 const SHELL = ['/', '/app.css', '/app.js', '/api.js', '/core.js', '/device.js', '/overlay.js', '/pantau.js', '/views.js', '/laporan.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

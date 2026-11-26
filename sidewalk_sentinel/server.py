@@ -2,6 +2,10 @@
 
 Mode LAN (``--lan``): server mendengarkan di semua antarmuka agar bisa dibuka dari HP; semua
 permintaan wajib membawa cookie kunci acak yang dipasang saat tautan berkunci dibuka sekali.
+
+Mode HP (``--hp``): satu perintah untuk memakai HP sebagai kamera. Bila cloudflared terpasang, server tetap hanya
+di laptop (127.0.0.1) dan sebuah tunnel Cloudflare memberi alamat https publik; bila tidak, server berjalan di
+LAN dengan HTTPS. Alamat HP berkunci itu ditampilkan sebagai kode QR di terminal dan di halaman ``/hp``.
 """
 from __future__ import annotations
 
@@ -14,13 +18,15 @@ import secrets
 import socket
 import ssl
 import sys
+import threading
 import time
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from . import tls
+from . import qr, tls, tunnel
 from .cameras import MAX_CAMERAS, CameraManager
 from .detector import (DEFAULT_SIDEWALK, DEFAULT_WEIGHTS, DetectorUnavailable, SidewalkSegmenter,
                        VehicleDetector)
@@ -53,9 +59,22 @@ class App:
         self.host = "127.0.0.1"
         self.lan = False
         self.https = False
+        self._connect = {"mode": None, "state": "off", "url": None, "svg": None, "message": ""}
+        self._connect_lock = threading.Lock()
         self.detector, self.sidewalk = detector, sidewalk
         self.cams = CameraManager(self.root, retention_days, detector=detector, sidewalk=sidewalk)
         self.cams.start()
+
+    def set_connect(self, **kw) -> None:
+        """Keadaan sambungan HP: mode (tunnel atau lan), state (off, memulai, siap, gagal), url berkunci, pesan."""
+        with self._connect_lock:
+            self._connect.update(kw)
+            if kw.get("url"):
+                self._connect["svg"] = qr.svg(qr.make(kw["url"]))
+
+    def connect_info(self) -> dict:
+        with self._connect_lock:
+            return dict(self._connect)
 
     def close(self) -> None:
         self.cams.shutdown()
@@ -164,13 +183,13 @@ class Handler(BaseHTTPRequestHandler):
             url = urlparse(self.path)
             path, query = url.path, parse_qs(url.query)
 
-            if self.app.token is not None and path == "/" and "k" in query:
+            if self.app.token is not None and path in ("/", "/hp") and "k" in query:
                 if hmac.compare_digest(query["k"][0], self.app.token):
                     cookie = f"ss_key={self.app.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
                     if self.app.https:
                         cookie += "; Secure"
                     self.send_response(302)
-                    self.send_header("Location", "/")
+                    self.send_header("Location", path)
                     self.send_header("Set-Cookie", cookie)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -200,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------- statis
     def _static(self, path: str) -> None:
-        rel = "index.html" if path in ("", "/") else path.lstrip("/")
+        rel = "index.html" if path in ("", "/") else "hp.html" if path == "/hp" else path.lstrip("/")
         target = (WEB_DIR / rel).resolve()
         if WEB_DIR.resolve() not in target.parents or not target.is_file():
             return self._error(404, "tidak ditemukan")
@@ -265,6 +284,13 @@ class Handler(BaseHTTPRequestHandler):
                 "defaults": {"park_seconds": d.park_seconds, "conf": d.conf, "min_box_frac": d.min_box_frac},
                 "detector": {**app.detector.status(), "sidewalk_model": bool(app.sidewalk and app.sidewalk.available)},
             })
+
+        if method == "GET" and path == "/api/connect":
+            c = app.connect_info()
+            if c["state"] == "off":
+                return self._json({"state": "off", "mode": None, "url": None, "svg": None, "message": "", "devices": []})
+            devices = [{"name": cam.spec.name, "status": cam.status} for cam in app.cams.list() if cam.status != "menunggu"]
+            return self._json({**c, "devices": devices})
 
         if path == "/api/detector/retry":
             if method != "POST":
@@ -430,12 +456,30 @@ def make_server(host: str, port: int, data_dir: str | Path, lan: bool = False,
     return server, app
 
 
+def _show_qr(url: str) -> None:
+    """Cetak kode QR ke terminal. Terminal yang tidak bisa menampilkan blok Unicode tetap mendapat tautannya."""
+    try:
+        print("\n" + qr.terminal(qr.make(url)) + "\n")
+        print("  Arahkan kamera HP ke kode di atas, lalu ketuk tautan yang muncul.")
+    except (UnicodeEncodeError, ValueError):
+        print("  (terminal ini tidak bisa menampilkan kode QR; buka halaman /hp di laptop)")
+    print(f"  Tautan : {url}")
+    print("  Jangan dibagikan: siapa pun yang punya tautan ini bisa membuka kamera Anda.\n")
+
+
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "data", lan: bool = False,
           retention_days: int = 30, https: bool = False, weights: str = DEFAULT_WEIGHTS,
-          sidewalk_weights: str | Path | None = DEFAULT_SIDEWALK, device: str | None = None) -> None:
+          sidewalk_weights: str | Path | None = DEFAULT_SIDEWALK, device: str | None = None,
+          hp: bool = False, open_browser: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
+    exe = tunnel.find_cloudflared() if hp else None
+    mode = ("tunnel" if exe else "lan") if hp else None
+    if mode == "tunnel":
+        https = False                                 # Cloudflare yang memegang HTTPS; cloudflared bicara HTTP ke server ini
+    elif mode == "lan":
+        https = True                                  # tanpa tunnel: HTTPS lokal agar kamera HP boleh menyala
     lan = lan or https                                # HTTPS dipakai agar HP bisa membuka kamera, jadi harus terjangkau dari LAN
-    token = secrets.token_urlsafe(12) if lan else None
+    token = secrets.token_urlsafe(12) if (lan or mode == "tunnel") else None
     if lan:
         host = "0.0.0.0"
     ip = lan_ip()
@@ -448,8 +492,39 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
     scheme = "https" if https else "http"
     bar = "=" * 62
     print(f"\n{bar}\n  SIDEWALK SENTINEL v{__version__}\n{bar}")
-    print(f"  Laptop : {scheme}://localhost:{app.port}/" + (f"?k={token}" if token else ""))
-    if lan:
+    page = "hp" if mode == "tunnel" else ""
+    print(f"  Laptop : {scheme}://localhost:{app.port}/{page}" + (f"?k={token}" if token else ""))
+    tun, opener = None, None
+    if mode == "tunnel":
+        print("  HP     : membuat tunnel Cloudflare, tunggu beberapa detik...")
+        print("           (server hanya terbuka di laptop ini; HP masuk lewat tunnel dengan tautan berkunci)")
+        app.set_connect(mode="tunnel", state="memulai", message="Membuat tunnel Cloudflare, tunggu beberapa detik.")
+
+        def on_url(base: str) -> None:
+            url = f"{base}/?k={token}"
+            app.set_connect(state="siap", url=url, message="Siap. Scan kode ini dengan kamera HP.")
+            _show_qr(url)
+
+        def on_fail(message: str) -> None:
+            app.set_connect(state="gagal", message=message)
+            print(f"\n  Tunnel gagal: {message}\n")
+
+        tun = tunnel.Tunnel(tunnel.command(exe, app.port), on_url, on_fail)
+        tun.start()
+        if open_browser:                              # halaman QR di laptop; dibatalkan bila server berhenti lebih dulu
+            opener = threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{app.port}/hp?k={token}"))
+            opener.daemon = True
+            opener.start()
+    elif mode == "lan":
+        url = f"https://{ip}:{app.port}/?k={token}"
+        app.set_connect(mode="lan", state="siap", url=url,
+                        message="Siap. HP dan laptop harus di Wi-Fi yang sama; browser memberi peringatan sertifikat sekali.")
+        print("  HP     : cloudflared tidak ditemukan, jadi memakai jaringan Wi-Fi (HP dan laptop harus satu Wi-Fi).")
+        print("           Browser memberi peringatan sertifikat sekali: Chrome > Lanjutan > Lanjutkan ke situs;")
+        print("           Safari > Tampilkan Detail > buka situs web ini.")
+        print(f"           Lebih mudah dan tanpa peringatan: pasang cloudflared ({tunnel.INSTALL_HINT}), lalu jalankan ulang.")
+        _show_qr(url)
+    elif lan:
         print(f"  HP     : {scheme}://{ip}:{app.port}/?k={token}")
         print("           (HP dan laptop harus di Wi-Fi yang sama; tautan ini berkunci)")
         if https:
@@ -457,7 +532,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
             print("           Chrome: Lanjutan > Lanjutkan ke situs. Safari: Tampilkan Detail > buka situs web ini.")
             print("           Sesudah itu izinkan kamera; pemantauan mulai sendiri.")
         else:
-            print("  Catatan: kamera HP butuh HTTPS. Jalankan ulang dengan --https untuk memakainya.")
+            print("  Catatan: kamera HP butuh HTTPS. Jalankan ulang dengan --hp (atau --https) untuk memakainya.")
     side = "siap" if app.sidewalk and app.sidewalk.available else "tidak ditemukan (zona ditandai manual)"
     print(f"  Model  : kendaraan = {app.detector.weights}  |  trotoar = {side}")
     print(f"  Data   : {app.root}  (kejadian disimpan {retention_days} hari)")
@@ -467,5 +542,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str | Path = "dat
     except KeyboardInterrupt:
         print("\nBerhenti.")
     finally:
+        if opener:
+            opener.cancel()
+        if tun:
+            tun.stop()
         app.close()
-        server.server_close()

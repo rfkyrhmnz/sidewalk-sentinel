@@ -35,21 +35,33 @@ gambar kamera dan pemantauan langsung berjalan. Tidak ada langkah menandai troto
 ### Memakai HP sebagai kamera
 
 ```powershell
-python main.py --https
+python main.py --hp
 ```
 
-Terminal mencetak tautan `https://<IP-laptop>:8000/?k=...`. Buka tautan itu di HP yang tersambung ke Wi-Fi yang sama
-dengan laptop. Kunci pada tautan berlaku selama server berjalan; permintaan tanpa kunci ditolak.
+Satu perintah. Browser laptop terbuka di halaman **Hubungkan HP** yang menampilkan kode QR besar (kode yang sama juga
+tercetak di terminal). Buka kamera HP, arahkan ke kode, ketuk tautan yang muncul, izinkan kamera. Selesai: HP langsung
+memantau, dan halaman di laptop berubah menjadi "HP tersambung".
 
-Browser hanya mengizinkan kamera pada HTTPS atau `localhost`, sehingga alamat Wi-Fi biasa seperti
-`http://192.168.1.23:8000` tidak bisa dipakai. Sertifikat dibuat otomatis dan ditandatangani sendiri
-(tersimpan di `data/tls/`, memuat IP Wi-Fi saat itu, dibuat ulang bila IP berubah), jadi browser memberi
-peringatan satu kali:
+Cara ini memakai tunnel Cloudflare, jadi tidak bergantung pada Wi-Fi, firewall, atau peringatan sertifikat, dan HP bisa
+memakai data seluler. Syaratnya `cloudflared` terpasang sekali:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+Buka terminal baru sesudah memasang agar `cloudflared` dikenali. Server tetap hanya terbuka di laptop
+(`127.0.0.1`); HP masuk lewat tunnel dengan tautan berkunci acak, dan permintaan tanpa kunci ditolak. Alamat tunnel dan
+kuncinya berganti setiap `--hp` dijalankan ulang.
+
+Bila `cloudflared` tidak ditemukan, `--hp` otomatis memakai jalur Wi-Fi: HTTPS lokal dengan kode QR di terminal. HP dan
+laptop harus satu Wi-Fi, firewall Windows harus mengizinkan Python (pilih **Allow** saat ditanya), dan browser memberi
+peringatan sertifikat sekali (sertifikat dibuat otomatis dan ditandatangani sendiri, tersimpan di `data/tls/`):
 
 - Chrome: **Lanjutan**, lalu **Lanjutkan ke situs**.
 - Safari: **Tampilkan Detail**, lalu **buka situs web ini**.
 
-Sesudah itu izinkan kamera, tambahkan ke layar utama bila perlu, dan taruh HP di dudukan.
+Jalur Wi-Fi yang sama bisa dipanggil langsung dengan `python main.py --https`; tautannya dicetak di terminal tanpa kode QR.
+Di HP, taruh di dudukan dan colok ke pengisi daya: layar harus tetap menyala agar kamera tidak berhenti.
 
 ### Model sendiri
 
@@ -154,6 +166,8 @@ Aplikasi web dan API dilayani pustaka standar Python. Titik akhir utama:
 
 | Titik akhir | Fungsi |
 |---|---|
+| `GET /hp` | halaman kode QR di laptop (mode `--hp`) |
+| `GET /api/connect` | keadaan sambungan HP: tautan berkunci, gambar QR (SVG), dan perangkat yang sedang mengirim |
 | `GET /api/info` | versi, nilai bawaan, dan status model (`state`: belum, memuat, siap, galat) |
 | `POST /api/detector/retry` | memuat ulang model kendaraan setelah galat |
 | `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya |
@@ -172,11 +186,11 @@ Excel, dan semua teks dari pengguna ditampilkan sebagai teks, bukan HTML.
 Opsi baris perintah:
 
 ```powershell
-python main.py [--host H] [--port P] [--https] [--lan] [--data DIR] [--no-open] [--retention-days 30]
+python main.py [--host H] [--port P] [--hp] [--https] [--lan] [--data DIR] [--no-open] [--retention-days 30]
                [--weights W] [--sidewalk-weights W] [--device D]
 ```
 
-`--https` otomatis ikut `--lan`. Kejadian yang lebih tua dari `--retention-days` dan yang melebihi 5000 per perangkat
+`--hp` memakai tunnel Cloudflare bila `cloudflared` ada, selain itu `--https`. `--https` otomatis ikut `--lan`. Kejadian yang lebih tua dari `--retention-days` dan yang melebihi 5000 per perangkat
 dihapus bersama fotonya.
 
 ## Struktur
@@ -185,12 +199,14 @@ dihapus bersama fotonya.
 main.py                     titik masuk
 models/trotoar.pt           model segmentasi trotoar (YOLO11n-seg) untuk zona otomatis
 sidewalk_sentinel/          detector (YOLO kendaraan, model trotoar, mask ke poligon); engine (kotak -> pelacak ->
-                            keputusan); config, features, tracker, decision, render; cameras (kamera perangkat,
-                            manajer); store (kejadian, lama kejadian); report (laporan); server; tls (sertifikat
-                            untuk --https); util
+                            keputusan); zone (zona trotoar otomatis); config, features, tracker, decision, render;
+                            cameras (kamera perangkat, manajer); store (kejadian, lama kejadian); report (laporan);
+                            server; tls (sertifikat untuk jalur Wi-Fi); tunnel (cloudflared); qr (pembuat kode QR
+                            tanpa pustaka luar); util
 web/                        aplikasi web (PWA): index.html, app.css, app.js (kerangka dan navigasi), device.js (kamera),
                             pantau.js (layar pantau), overlay.js (zona dan kotak deteksi), views.js (Kejadian, Laporan,
-                            Setelan), laporan.js (grafik dan ringkasan), api.js, core.js, sw.js, manifest, ikon
+                            Setelan), laporan.js (grafik dan ringkasan), hp.html dan hp.js (halaman kode QR),
+                            api.js, core.js, sw.js, manifest, ikon
 tools/make_icons.py         membuat ikon PNG dari desain SVG
 tests/                      pytest
 ```
@@ -213,6 +229,13 @@ dan detektor diganti tiruan (`tests/support.py`).
   yang terlewat sebentar, kendaraan yang pergi, ukuran minimum, dan pengaturan yang diteruskan ke detektor.
 - `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart (termasuk setelan
   versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, dan pelacak lama kejadian.
+- `test_qr.py`: pembuat QR dibaca dekoder QR OpenCV, dan semua panjang teks dibaca balik oleh pembaca mandiri yang
+  memeriksa syndrome Reed-Solomon tiap blok.
+- `test_hp.py`: tunnel dengan `cloudflared` tiruan (alamat dari log, gagal, putus, batas waktu), `--hp` dari ujung ke
+  ujung (server hanya di laptop, berkunci, kode QR terminal terbaca kembali menjadi tautan, cadangan jalur Wi-Fi), dan
+  API `/api/connect`.
+- `test_ui_hp.py`: halaman `/hp` di Chrome; kode QR di layar dibaca kembali dari tangkapan layar dan harus sama dengan
+  tautan berkunci.
 - `test_server.py` dan `test_tls.py`: API, kunci LAN, keamanan masukan, sertifikat HTTPS, dan cookie `Secure`.
 - `test_laporan.py`: agregasi laporan dengan data buatan (batas tengah malam, zona waktu, jam puncak, lama yang belum
   terukur, keadaan kosong).
@@ -225,12 +248,14 @@ dan detektor diganti tiruan (`tests/support.py`).
 ## Privasi
 
 Gambar kamera dan foto bukti hanya diproses dan disimpan di folder `data/` pada komputer yang menjalankan server;
-aplikasi ini tidak mengirimnya ke layanan lain. Dua hal di luar kendali aplikasi: ultralytics mengunduh bobot model
+aplikasi ini tidak mengirimnya ke layanan lain. Pengecualian: dengan `--hp` lewat tunnel, gambar dari HP melewati
+server Cloudflare dalam perjalanan ke laptop; jalur Wi-Fi tidak melewati pihak luar. Dua hal di luar kendali aplikasi: ultralytics mengunduh bobot model
 pada jalan pertama, dan secara bawaan (`sync=True`) mengirim statistik pemakaian anonim ke Ultralytics (bukan gambar).
 Matikan statistik itu dengan `yolo settings sync=False` di terminal yang memakai lingkungan Python proyek ini.
 Foto bukti memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days` sesuai kebutuhan dan jangan
-arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan`, server hanya menerima koneksi dari komputer itu
-sendiri. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
+arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan` atau `--https`, server hanya menerima koneksi dari komputer itu
+sendiri; dengan tunnel (`--hp`) server tetap hanya di komputer itu dan siapa pun yang memegang tautan berkunci bisa
+masuk lewat tunnel, jadi jangan bagikan kode QR atau tautannya. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
 
 ## Riwayat repositori
 
