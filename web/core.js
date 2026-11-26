@@ -108,23 +108,59 @@ export function dur(s) {
   return mm ? `${j}${N}jam ${mm}${N}mnt` : `${j}${N}jam`;
 }
 
-/** Satu baris kejadian: foto bukti, jenis, waktu, perangkat, dan lamanya bila sudah terukur. */
-export function eventRow(e, { fresh = false } = {}) {
-  const row = document.createElement('button');
-  row.type = 'button';
-  row.className = `event${fresh ? ' fresh' : ''}`;
+/** Satu baris kejadian: foto bukti, jenis, waktu, perangkat, dan lamanya bila sudah terukur.
+ *  Dengan `onDelete` baris mendapat tombol hapus: ketukan pertama meminta konfirmasi, ketukan kedua memanggil
+ *  `onDelete(e)`. Pemanggil yang menggambar ulang daftarnya; galat ditampilkan sebagai toast dan tombol pulih. */
+export function eventRow(e, { fresh = false, onDelete = null } = {}) {
+  const row = document.createElement('div');
+  row.className = `event${fresh ? ' fresh' : ''}${onDelete ? ' has-del' : ''}`;
   row.dataset.k = e.kind;
   row.dataset.no = e.no;
+  const open = document.createElement('button');        // tombol hapus bersaudara, bukan anak: tombol tidak boleh bersarang
+  open.type = 'button';
+  open.className = 'ev-open';
   const thumb = e.snapshot_url
     ? `<img src="${esc(e.snapshot_url)}" alt="" loading="lazy" width="320" height="180">`
     : '<span class="noimg" aria-hidden="true"></span>';
   const d = dur(e.durasi_s);
-  row.innerHTML = `${thumb}<span class="ev-body">
+  open.innerHTML = `${thumb}<span class="ev-body">
     <b>${esc(KIND[e.kind] || e.label || '')}</b>
     <span class="ev-meta"><span>${esc(ago(e.ts))}</span>${e.camera ? `<span>${esc(e.camera.name)}</span>` : ''}</span>
     ${d ? `<span class="ev-dur">Berlangsung ${esc(d)}</span>` : ''}
     <span class="ev-why">${esc(e.reason || '')}</span></span>`;
-  if (e.snapshot_url) row.addEventListener('click', () => lightbox(e.snapshot_url));
-  else row.disabled = true;
+  if (e.snapshot_url) open.addEventListener('click', () => lightbox(e.snapshot_url));
+  else open.disabled = true;
+  row.append(open);
+  if (onDelete) row.append(deleteButton(e, onDelete));
   return row;
+}
+
+function deleteButton(e, onDelete) {
+  const what = `${KIND[e.kind] || 'kejadian'} ${ago(e.ts)}`.trim();
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ev-del';
+  let timer = 0;
+  const idle = () => {
+    btn.dataset.armed = '';
+    btn.disabled = false;
+    btn.innerHTML = ICON.trash;
+    btn.setAttribute('aria-label', `Hapus kejadian: ${what}`);
+  };
+  idle();
+  btn.addEventListener('click', async () => {
+    if (!timer) {                                      // ketukan pertama: minta konfirmasi, batal sendiri setelah 4 detik
+      btn.dataset.armed = '1';
+      btn.textContent = 'Hapus?';
+      btn.setAttribute('aria-label', `Ketuk lagi untuk menghapus: ${what}`);
+      timer = setTimeout(() => { timer = 0; idle(); }, 4000);
+      return;
+    }
+    clearTimeout(timer);
+    timer = 0;
+    btn.disabled = true;
+    try { await onDelete(e); }
+    catch (err) { toast('Gagal menghapus', err.message || '', 'error'); idle(); }
+  });
+  return btn;
 }

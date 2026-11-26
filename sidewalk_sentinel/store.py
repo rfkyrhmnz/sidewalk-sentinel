@@ -106,6 +106,31 @@ class EventStore:
             self.records[i] = {**self.records[i], **clean}
             return True
 
+    def delete(self, no: int) -> bool:
+        """Hapus satu kejadian beserta foto buktinya. False bila nomornya tidak ada.
+
+        Berkas ditulis ulang utuh lewat berkas sementara lalu diganti (seperti `prune`), jadi mati listrik di tengah
+        jalan meninggalkan berkas lama yang masih utuh. Nomor berikutnya tidak mundur: `next_no` dicatat dulu di
+        meta.json, sehingga kejadian baru tidak memakai ulang nomor (dan foto di cache peramban) milik yang dihapus.
+        Kejadian yang lamanya masih dihitung `DurationTracker` aman: `patch` untuk nomor yang sudah tidak ada diabaikan."""
+        with self._lock:
+            i = next((j for j, r in enumerate(self.records) if r["no"] == no), None)
+            if i is None:
+                return False
+            keep = [j for j in range(len(self.records)) if j != i]
+            tmp = self._file.with_suffix(".tmp")
+            try:
+                self._meta.write_text(json.dumps({"next_no": self.next_no}), encoding="utf-8")
+                tmp.write_text("".join(json.dumps(self.records[j], ensure_ascii=False) + "\n" for j in keep),
+                               encoding="utf-8")
+                tmp.replace(self._file)
+            except OSError:                                    # folder perangkat sudah dihapus
+                return False
+            (self.events_dir / f"{no}.jpg").unlink(missing_ok=True)
+            self.records = [self.records[j] for j in keep]
+            self._dts = [self._dts[j] for j in keep]
+            return True
+
     def snapshot_path(self, no: int) -> Path | None:
         p = self.events_dir / f"{int(no)}.jpg"
         return p if p.is_file() else None

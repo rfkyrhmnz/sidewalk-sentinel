@@ -199,3 +199,68 @@ def test_append_dengan_waktu_tertentu_tercatat_dan_dimuat_ulang(tmp_path):
     assert store.counts_since(when - timedelta(minutes=1))["parkir"] == 1
     assert store.counts_since(when + timedelta(minutes=1))["parkir"] == 0, "waktu yang diberikan dipakai, bukan jam sekarang"
     assert EventStore(tmp_path).pairs()[0][0] == when
+
+
+# ===================================================================== hapus kejadian
+def test_hapus_kejadian_membuang_rekaman_foto_dan_bertahan_setelah_restart(tmp_path):
+    s = EventStore(tmp_path / "c")
+    for i in range(3):
+        s.append(_ev(track_id=i), b"jpg%d" % i)
+    s.patch(1, durasi_s=12.0)                              # keterangan susulan pada yang tidak dihapus
+    assert s.delete(2) is True
+    assert [r["no"] for r in s.records] == [1, 3] and len(s._dts) == 2
+    assert s.snapshot_path(2) is None and s.snapshot_path(1) is not None and s.snapshot_path(3) is not None
+    assert [json.loads(x)["no"] for x in _lines(tmp_path / "c")] == [1, 3], "berkas ditulis ulang tanpa kejadian itu"
+    assert not (tmp_path / "c" / "events.tmp").exists()
+    assert s.counts_since(s._dts[0] - timedelta(minutes=1))["parkir"] == 2
+    assert [r["no"] for r in s.latest(10)] == [3, 1] and [r["no"] for r in s.after(0)] == [1, 3]
+    back = EventStore(tmp_path / "c")                      # restart: tetap hilang, keterangan susulan tetap ada
+    assert [r["no"] for r in back.records] == [1, 3] and back.records[0]["durasi_s"] == 12.0
+
+
+def test_hapus_kejadian_yang_tidak_ada_mengembalikan_false_dan_tidak_mengubah_apa_pun(tmp_path):
+    s = EventStore(tmp_path / "c")
+    s.append(_ev(), b"jpg")
+    before = _lines(tmp_path / "c")
+    assert s.delete(99) is False and s.delete(0) is False
+    assert s.delete(1) is True and s.delete(1) is False, "dihapus dua kali: yang kedua tidak ada"
+    assert before and _lines(tmp_path / "c") == []
+
+
+def test_nomor_kejadian_yang_dihapus_tidak_dipakai_ulang_bahkan_yang_terakhir(tmp_path):
+    s = EventStore(tmp_path / "c")
+    for _ in range(3):
+        s.append(_ev(), b"jpg")
+    assert s.delete(3) is True                             # yang terbaru: nomor 3 jangan dipakai lagi
+    assert s.append(_ev(), None)["no"] == 4
+    assert s.delete(4) is True
+    assert EventStore(tmp_path / "c").append(_ev(), None)["no"] == 5, "setelah restart nomor tetap maju (cache foto peramban)"
+
+
+def test_kejadian_yang_dihapus_saat_lamanya_masih_dihitung_tidak_hidup_lagi(tmp_path):
+    s = EventStore(tmp_path / "c")
+    rec = s.append(_ev(), b"jpg")
+    d = DurationTracker(s, grace=3.0)
+    d.begin(1, "parkir", rec["no"], t_start=0.0, t=0.0)
+    d.update({1}, 4.0)
+    assert s.delete(rec["no"]) is True
+    d.update(set(), 20.0)                                  # lewat masa jeda: durasi hendak ditulis
+    d.finish_all()
+    assert s.records == [] and _lines(tmp_path / "c") == [], "patch untuk kejadian yang sudah dihapus diabaikan"
+
+
+def test_hapus_kejadian_saat_folder_perangkat_sudah_dihapus_tidak_melempar(tmp_path):
+    import shutil
+    s = EventStore(tmp_path / "c")
+    s.append(_ev(), b"jpg")
+    shutil.rmtree(tmp_path / "c")
+    assert s.delete(1) is False and len(s.records) == 1, "gagal menulis: ingatan tidak diubah"
+
+
+def test_nomor_tidak_mundur_walau_meta_json_tidak_ada_pada_data_lama(tmp_path):
+    s = EventStore(tmp_path / "c")
+    for _ in range(3):
+        s.append(_ev(), b"jpg")
+    (tmp_path / "c" / "meta.json").unlink()                # data dari versi lama: belum ada penanda nomor berikutnya
+    assert s.delete(3) is True
+    assert EventStore(tmp_path / "c").append(_ev(), None)["no"] == 4, "tanpa meta.json nomor 3 akan dipakai ulang"

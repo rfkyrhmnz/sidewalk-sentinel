@@ -81,7 +81,8 @@ python main.py --device 0                                # GPU pertama (bawaan: 
    Tanpa model trotoar, layar pantau langsung meminta zona manual.
    Di HP, kamera belakang dipakai lebih dulu dan **Balik kamera** menukar depan dan belakang.
 2. Kendaraan yang parkir atau naik trotoar diberi kotak berlabel di gambar, dihitung pada meter, dan masuk ke
-   **Kejadian**. Pemberitahuan muncul di semua halaman, disertai getar di HP.
+   **Kejadian**. Pemberitahuan muncul di semua halaman, disertai getar di HP. Kejadian yang keliru (misalnya
+   terpicu benda lain di depan kamera) bisa dihapus dengan ikon tempat sampah, dua ketukan; foto buktinya ikut terhapus.
 3. **Laporan** merangkum hari ini, 7 hari, atau 30 hari: total kejadian per jenis, lama di trotoar (rata-rata,
    terlama, tersingkat, total), grafik per jam dan per hari, bukti foto terbaru, unduhan CSV, dan cetak ke PDF.
 4. **Setelan**: nama perangkat, lama diam sampai dianggap parkir, kepekaan (ambang keyakinan YOLO), ukuran minimum
@@ -175,6 +176,7 @@ Aplikasi web dan API dilayani pustaka standar Python. Titik akhir utama:
 | `POST /api/cams/<id>/propose-zone` | usulan poligon trotoar dari gambar terbaru perangkat (titik awal penyunting zona manual) |
 | `GET/POST/DELETE /api/cams/<id>` | informasi, setelan, dan penghapusan data perangkat |
 | `GET /api/cams/<id>/events` | kejadian perangkat (`?after=<no>`) |
+| `DELETE /api/cams/<id>/events/<no>` | hapus satu kejadian beserta foto buktinya (nomor tidak dipakai ulang) |
 | `GET /api/events` | semua kejadian (`kind`, `limit`, `offset`) |
 | `GET /api/events.csv` | unduhan CSV, kolom `durasi_detik` ikut |
 | `GET /api/report` | laporan (`periode=hari_ini\|7_hari\|30_hari`, `kamera=<id>` opsional) |

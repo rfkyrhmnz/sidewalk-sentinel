@@ -590,3 +590,117 @@ def test_laporan_dicetak_putih_dengan_tabel_dan_tanpa_menu(server, api, page, tm
     for needle in ("Laporan Sidewalk Sentinel", "Kejadian per jam", "Pukul 07.00", "Pukul 17.00", "Bukti terbaru"):
         assert needle in text, needle
     assert "Setelan" not in text, "menu navigasi tidak boleh ikut tercetak"
+
+
+# ============================================================ hapus kejadian
+def hapus(page, scope, nth=0):
+    """Dua ketukan pada tombol hapus baris ke-`nth` di `scope`. Mengembalikan baris yang dihapus."""
+    row = page.locator(f"{scope} .event").nth(nth)
+    no = row.get_attribute("data-no")
+    btn = row.locator(".ev-del")
+    btn.click()
+    assert btn.inner_text() == "Hapus?" and "Ketuk lagi" in btn.get_attribute("aria-label")
+    btn.click()
+    return no
+
+
+def test_kejadian_dihapus_dengan_dua_ketukan_beserta_fotonya(server, api, page):
+    app, url = server
+    cid = add_device(api, "Depan toko")
+    m = midnight()
+    a = seed(app, cid, "parkir", m + timedelta(seconds=5))["no"]
+    b = seed(app, cid, "naik_trotoar", m + timedelta(seconds=6))["no"]
+    c = seed(app, cid, "parkir", m + timedelta(seconds=7))["no"]
+    page.goto(url + "#/kejadian")
+    page.wait_for_selector("#feed .event")
+    assert [n.get_attribute("data-no") for n in page.locator("#feed .event").all()] == [str(c), str(b), str(a)]
+    assert page.locator("#feed .ev-del").count() == 3
+    assert page.locator("#feed button button").count() == 0, "tombol tidak boleh bersarang di dalam tombol"
+
+    row = page.locator(f"#feed .event[data-no='{b}']")
+    row.locator(".ev-del").click()                                    # ketukan pertama hanya meminta konfirmasi
+    assert row.locator(".ev-del").inner_text() == "Hapus?"
+    assert page.locator("#feed .event").count() == 3 and cam_events(api, cid) == [c, b, a]
+    row.locator(".ev-del").click()
+    page.wait_for_function("() => document.querySelectorAll('#feed .event').length === 2")
+    assert "Kejadian dihapus" in page.inner_text("#toasts")
+    assert [n.get_attribute("data-no") for n in page.locator("#feed .event").all()] == [str(c), str(a)]
+    assert cam_events(api, cid) == [c, a], "terhapus di server, bukan hanya disembunyikan"
+    assert api.req("GET", f"/api/cams/{cid}/events/{b}.jpg", raw=True)[0].status == 404
+
+    page.wait_for_timeout(4600)                                       # lebih dari satu putaran polling: tidak muncul lagi
+    assert page.locator(f"#feed .event[data-no='{b}']").count() == 0
+
+
+def test_konfirmasi_hapus_batal_sendiri_dan_ketukan_pertama_tidak_menghapus(server, api, page):
+    app, url = server
+    cid = add_device(api, "Depan toko")
+    no = seed(app, cid, "parkir", midnight() + timedelta(seconds=5))["no"]
+    page.goto(url + "#/kejadian")
+    page.wait_for_selector("#feed .event")
+    btn = page.locator("#feed .ev-del")
+    btn.click()
+    assert btn.inner_text() == "Hapus?"
+    page.wait_for_function("() => !document.querySelector('#feed .ev-del').textContent.includes('Hapus?')", timeout=8000)
+    assert btn.get_attribute("aria-label").startswith("Hapus kejadian")
+    btn.click()                                                        # setelah batal, ketukan berikutnya kembali meminta konfirmasi
+    assert btn.inner_text() == "Hapus?" and cam_events(api, cid) == [no]
+
+
+def test_hapus_kejadian_yang_sudah_hilang_di_perangkat_lain_tidak_menjadi_galat(server, api, page):
+    app, url = server
+    cid = add_device(api, "Depan toko")
+    seed(app, cid, "parkir", midnight() + timedelta(seconds=5))
+    keep_no = seed(app, cid, "naik_trotoar", midnight() + timedelta(seconds=6))["no"]
+    page.goto(url + "#/kejadian")
+    page.wait_for_selector("#feed .event")
+    gone_no = int(page.locator("#feed .event").nth(1).get_attribute("data-no"))
+    assert api.req("DELETE", f"/api/cams/{cid}/events/{gone_no}")[0] == 200   # dihapus dari tab/perangkat lain
+    hapus(page, "#feed", nth=1)
+    page.wait_for_function("() => document.querySelectorAll('#feed .event').length === 1")
+    assert page.locator("#toasts [data-k='error']").count() == 0
+    assert cam_events(api, cid) == [keep_no]
+
+
+def test_laporan_menghapus_bukti_terbaru_dan_menghitung_ulang(server, api, page):
+    app, url = server
+    cid = add_device(api, "Depan toko")
+    m = midnight()
+    seed(app, cid, "parkir", m + timedelta(seconds=5), 60)
+    seed(app, cid, "naik_trotoar", m + timedelta(seconds=6), 20)
+    page.goto(url + "#/laporan")
+    page.wait_for_selector(".rp-total")
+    assert page.inner_text(".rp-total") == "2" and page.locator("#rpEv .event").count() == 2
+
+    hapus(page, "#rpEv", nth=0)                                       # yang terbaru: naik trotoar
+    page.wait_for_function("() => document.querySelector('.rp-total') && document.querySelector('.rp-total').textContent === '1'")
+    assert page.inner_text(".rp-kinds [data-k='naik_trotoar'] b") == "0" and page.inner_text(".rp-kinds [data-k='parkir'] b") == "1"
+    assert page.locator("#rpEv .event").count() == 1
+
+    hapus(page, "#rpEv", nth=0)
+    page.wait_for_selector(".empty")                                  # semuanya habis: keadaan kosong, bukan angka 0 yang menyesatkan
+    assert "Belum ada kejadian pada periode ini" in page.inner_text(".empty")
+    assert cam_events(api, cid) == []
+
+
+@pytest.mark.parametrize("width", [320, 390])
+def test_tombol_hapus_muat_di_layar_hp_dan_tidak_menutupi_foto(server, api, page, width):
+    app, url = server
+    cid = add_device(api, "Gerbang depan perumahan blok C")           # nama panjang: baris paling sempit
+    seed(app, cid, "parkir", midnight() + timedelta(seconds=5), 90)
+    page.set_viewport_size({"width": width, "height": 800})
+    page.goto(url + "#/kejadian")
+    page.wait_for_selector("#feed .event")
+    btn, img = page.locator("#feed .ev-del"), page.locator("#feed .event img")
+    for armed in (False, True):
+        if armed:
+            btn.click()
+        box, pic = btn.bounding_box(), img.bounding_box()
+        assert box["x"] >= pic["x"] + pic["width"], f"tombol menutupi foto (armed={armed})"
+        assert box["x"] + box["width"] <= width + 0.5, f"tombol terpotong di tepi kanan (armed={armed})"
+        assert box["height"] >= 32 and (armed or box["width"] >= 40), "sasaran ketuk terlalu kecil"
+    assert page.evaluate("document.documentElement.scrollWidth") <= width, "muncul gulir mendatar"
+
+
+def cam_events(api, cid):
+    return [e["no"] for e in api.req("GET", f"/api/cams/{cid}/events?limit=50")[1]["events"]]
