@@ -9,6 +9,7 @@ peramban, sehingga membuka aplikasi lagi melanjutkan kamera yang sama beserta ar
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 import logging
@@ -17,13 +18,14 @@ import re
 import shutil
 import threading
 import time
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from .access import parse_ip
 from .config import Config
 from .detector import DetectorUnavailable, SidewalkSegmenter, VehicleDetector
 from .engine import Engine
@@ -121,6 +123,8 @@ class CameraSpec:
     settings: dict = field(default_factory=dict)
     enabled: bool = True
     created: str = ""
+    ip: str = ""                      # IP terakhir yang terlihat: penanda untuk pusat, BUKAN kunci akses
+    ip_since: str = ""                # sejak kapan IP itu dipakai (ISO)
 
     @classmethod
     def from_dict(cls, item: dict) -> "CameraSpec":
@@ -129,6 +133,8 @@ class CameraSpec:
         spec = cls(**{k: v for k, v in item.items() if k in known})
         if not valid_id(spec.id) or not DEVICE_KEY.fullmatch(str(spec.device or "")):
             raise ValueError("id atau kunci perangkat tidak valid")
+        if not isinstance(spec.ip, str) or parse_ip(spec.ip) is None:      # berkas bisa diedit tangan
+            spec.ip = spec.ip_since = ""
         return spec
 
 
@@ -275,12 +281,13 @@ class Camera:
         return out or {"roi": None, "coverage": 0.0,
                        "message": "Trotoar tidak terlihat jelas di gambar ini. Tandai zona secara manual."}
 
-    def info(self) -> dict:
+    def info(self, admin: bool = False) -> dict:
+        """Keadaan kamera. `admin` (pusat) menambahkan IP penanda; perangkat lain tidak pernah melihatnya."""
         counts = self.events.counts_since(now().replace(hour=0, minute=0, second=0, microsecond=0))
         with self._lock:
             spec = self.spec
             last = self.events.records[-1] if self.events.records else None
-            return {
+            out = {
                 "id": spec.id, "name": spec.name, "roi": self._effective_roi(), "zone": self._zone_mode(),
                 "auto_available": self._auto_available(), "settings": spec.settings,
                 "enabled": spec.enabled, "created": spec.created,
@@ -290,6 +297,9 @@ class Camera:
                 "counts_today": counts, "seq": self.events.seq,
                 "last_event": ({"no": last["no"], "kind": last["kind"], "ts": last["ts"]} if last else None),
             }
+            if admin:
+                out["ip"], out["ip_since"] = spec.ip, spec.ip_since
+            return out
 
     # ---------------------------------------------------------------- pekerja
     def _run(self) -> None:
@@ -513,6 +523,30 @@ class CameraManager:
         with self._lock:
             return list(self._cams.values())
 
+    def by_key(self, key: str | None) -> Camera | None:
+        """Kamera milik pemegang kunci perangkat `key`, atau None. Kunci dibandingkan dengan waktu tetap."""
+        if not DEVICE_KEY.fullmatch(str(key or "")):
+            return None
+        found = None
+        with self._lock:
+            for cam in self._cams.values():
+                if hmac.compare_digest(cam.spec.device, key):
+                    found = cam
+        return found
+
+    def note_ip(self, cam: Camera, ip: str) -> None:
+        """Catat IP terakhir perangkat sebagai penanda untuk pusat. Ditulis ke disk hanya saat IP-nya berubah."""
+        if not ip or cam.spec.ip == ip or parse_ip(ip) is None:
+            return
+        with self._lock:
+            if cam.spec.ip == ip or self._cams.get(cam.spec.id) is not cam:    # sudah tercatat, atau baru dihapus
+                return
+            cam.reconfigure(replace(cam.spec, ip=ip, ip_since=now().isoformat(timespec="seconds")), restart=False)
+            try:
+                self._save()
+            except OSError:
+                log.exception("gagal menyimpan IP perangkat %s", cam.spec.name)
+
     def register(self, key: str, name: str = "") -> tuple[Camera, bool]:
         """Kamera milik perangkat dengan kunci `key`; dibuat bila belum ada. Mengembalikan (kamera, baru?).
 
@@ -567,11 +601,11 @@ class CameraManager:
         return True
 
     # ---------------------------------------------------------------- kejadian
-    def feed(self, limit: int = 50, offset: int = 0, kind: str | None = None) -> list[dict]:
-        """Kejadian semua perangkat, terbaru dulu. Paginasi `offset` (kursor waktu bisa melewatkan dua kejadian
-        yang jatuh pada detik yang sama di batas halaman)."""
+    def feed(self, limit: int = 50, offset: int = 0, kind: str | None = None, cams: list[Camera] | None = None) -> list[dict]:
+        """Kejadian perangkat, terbaru dulu (`cams` membatasi perangkat yang boleh dilihat; bawaannya semua). Paginasi
+        `offset` (kursor waktu bisa melewatkan dua kejadian yang jatuh pada detik yang sama di batas halaman)."""
         rows: list[tuple[datetime, dict]] = []
-        for cam in self.list():
+        for cam in (self.list() if cams is None else cams):
             for dt, r in cam.events.pairs():
                 if kind is None or r["kind"] == kind:
                     rows.append((dt, {**r, "camera": {"id": cam.spec.id, "name": cam.spec.name},
@@ -579,9 +613,11 @@ class CameraManager:
         rows.sort(key=lambda x: (x[0], x[1]["no"]), reverse=True)
         return [r for _, r in rows[offset:offset + limit]]
 
-    def report(self, periode: str, camera_id: str | None = None, at: datetime | None = None) -> dict:
-        """Laporan ringkasan. ValueError bila periode tidak dikenal, KeyError bila perangkat tidak ada."""
-        cams = self.list()
+    def report(self, periode: str, camera_id: str | None = None, at: datetime | None = None,
+               cams: list[Camera] | None = None) -> dict:
+        """Laporan ringkasan atas `cams` (bawaannya semua perangkat). ValueError bila periode tidak dikenal, KeyError
+        bila perangkat yang diminta tidak ada di antara `cams`."""
+        cams = self.list() if cams is None else list(cams)
         if camera_id is not None:
             cams = [c for c in cams if c.spec.id == camera_id]
             if not cams:
@@ -589,11 +625,11 @@ class CameraManager:
         entries = [(c.spec.id, c.spec.name, c.events.pairs()) for c in cams]
         return compute_report(entries, periode, at or now(), camera_id)
 
-    def csv(self) -> str:
+    def csv(self, cams: list[Camera] | None = None) -> str:
         out = io.StringIO()
         w = csv.writer(out)
         w.writerow(["waktu", "perangkat", "jenis", "alasan", "nomor", "durasi_detik"])
-        for r in reversed(self.feed(limit=100000)):
+        for r in reversed(self.feed(limit=100000, cams=cams)):
             w.writerow([_cell(c) for c in (r["ts"], r["camera"]["name"], r["label"], r["reason"], r["no"],
                                            r.get("durasi_s", ""))])
         return out.getvalue()

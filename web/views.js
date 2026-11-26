@@ -1,6 +1,6 @@
 // Halaman Laporan, Kejadian, dan Setelan.
 import { ApiError, del, getJSON } from './api.js';
-import { $id, ICON, KIND, esc, eventRow, keep, setText, showError, toast } from './core.js';
+import { $id, ICON, KIND, esc, eventRow, ipLabel, keep, setText, showError, toast } from './core.js';
 import { HOUR_TICKS, dayTicks, daySlots, hourSlots, perCameraHTML, periodText, stackedColumns, summaryHTML } from './laporan.js';
 
 const PERIODS = [['hari_ini', 'Hari ini'], ['7_hari', '7 hari'], ['30_hari', '30 hari']];
@@ -244,6 +244,7 @@ export function viewSetelan({ view, device: D, info }) {
       <a class="btn primary" href="#/">Buka layar pantau</a></div></div>`;
     return { dispose() {} };
   }
+  const center = info.role === 'pusat';
   const s = cam.settings || {};
   const d = info.defaults;
   const det = info.detector || {};
@@ -294,14 +295,23 @@ export function viewSetelan({ view, device: D, info }) {
         <p class="faint small">Tangan, orang, dan benda lain tidak pernah dihitung sebagai kendaraan karena bukan kelas kendaraan model.</p>
       </div></section>
 
+    <section class="stack" aria-labelledby="sPriv"><h2 class="h3" id="sPriv">Privasi</h2>
+      <div class="panel stack" id="sPrivText">${center
+        ? `<p class="small">Anda membuka aplikasi dari komputer pusat, jadi Anda melihat semua perangkat: kejadian, foto bukti, dan alamat IP masing-masing.</p>
+           <p class="faint small">Setiap perangkat lain hanya melihat datanya sendiri.</p>`
+        : `<p class="small">Anda hanya melihat data perangkat ini. Perangkat lain tidak bisa melihat kejadian atau foto bukti Anda.</p>
+           <p class="faint small">Komputer pusat pemantauan melihat semua perangkat, termasuk kejadian, foto bukti, dan alamat IP perangkat ini.</p>`}
+      </div></section>
+
     <section class="stack" aria-labelledby="sData"><h2 class="h3" id="sData">Data</h2>
       <div class="panel stack">
         <p class="dim small">Kejadian dan foto bukti disimpan di komputer yang menjalankan aplikasi, bukan di layanan lain.</p>
-        <div class="row"><a class="btn line" href="/api/events.csv" download>${ICON.dl}<span>Unduh semua kejadian (CSV)</span></a></div>
+        <div class="row"><a class="btn line" href="/api/events.csv" download>${ICON.dl}<span>${center ? 'Unduh semua kejadian (CSV)' : 'Unduh kejadian perangkat ini (CSV)'}</span></a></div>
         <div class="row"><button class="btn danger" id="sDel" type="button">${ICON.trash}<span>Hapus data perangkat ini</span></button></div>
       </div></section>
 
     <section class="stack" id="sOthers" aria-labelledby="sOth" hidden><h2 class="h3" id="sOth">Perangkat lain</h2>
+      <p class="dim small">Hanya terlihat dari komputer pusat.</p>
       <div class="panel"><ul class="devs" id="devs"></ul></div></section>
 
     <p class="faint small">Sidewalk Sentinel ${esc(info.version)}. Gambar kamera diproses di server milik Anda dan tidak dikirim ke layanan lain.</p>
@@ -393,7 +403,9 @@ export function viewSetelan({ view, device: D, info }) {
         const li = document.createElement('li');
         li.innerHTML = `<span class="stack"><b></b><span class="faint small"></span></span><button type="button" class="btn danger">${ICON.trash}<span>Hapus</span></button>`;
         li.querySelector('b').textContent = o.name;
-        li.querySelector('.small').textContent = `${o.counts_today.parkir + o.counts_today.naik_trotoar} kejadian hari ini`;
+        const meta = li.querySelector('.small');
+        meta.textContent = `${ipLabel(o.ip)} · ${o.counts_today.parkir + o.counts_today.naik_trotoar} kejadian hari ini`;
+        if (o.ip_since) meta.title = `IP ini tercatat sejak ${new Date(o.ip_since).toLocaleString('id-ID')}`;
         armed(li.querySelector('button'), async () => { await del(`/api/cams/${o.id}`); li.remove(); toast('Perangkat dihapus'); });
         ul.append(li);
       }
