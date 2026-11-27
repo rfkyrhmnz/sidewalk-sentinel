@@ -12,6 +12,7 @@ Yang dijaga:
 """
 from __future__ import annotations
 
+import json
 import ssl
 import sys
 import threading
@@ -551,6 +552,80 @@ def test_pusat_menutup_kamera_perangkat_dari_jauh_dan_tetap_tertutup(server, api
     page.wait_for_selector("#conn[data-st='ditutup']", timeout=10000)
     assert page.evaluate(SEMUA_BERHENTI) or page.evaluate("window.__streams.length") == 0
     assert page.evaluate("localStorage.getItem('ss_closed')") == "1"
+
+
+def test_server_menolak_perangkat_baru_alasan_tampil_kamera_mati_dan_bisa_dicoba_lagi(server, api, page):
+    """Slot penuh dan semuanya baru dipakai: dulu layar macet di 'menunggu server menjawab' dengan kamera menyala."""
+    from sidewalk_sentinel.cameras import MAX_CAMERAS
+    ids = [add_device(api, f"P{i}") for i in range(MAX_CAMERAS)]
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    sent = _frames(page)
+    page.goto(page.base)
+    page.wait_for_selector("#blocked:not([hidden])", timeout=15000)
+    kartu = page.inner_text("#blocked")
+    assert "Server menolak perangkat ini" in kartu and f"Batas {MAX_CAMERAS} perangkat" in kartu and "Setelan" in kartu, kartu
+    assert page.locator("#bAct").inner_text() == "Coba lagi"
+    assert page.locator("#conn").inner_text().strip() == "Kamera mati" and page.evaluate("document.documentElement.dataset.state") == "off"
+    assert page.evaluate(SEMUA_BERHENTI), "ditolak server: kamera tidak boleh tetap menyala tanpa ada yang menerima gambarnya"
+    page.wait_for_timeout(3500)                                        # tidak mengulang sendiri dan tidak mengirim gambar
+    assert not sent and page.evaluate("window.__streams.length") == 1
+
+    assert api.req("DELETE", f"/api/cams/{ids[0]}")[0] == 200            # pusat menghapus satu perangkat, lalu pemilik mencoba lagi
+    page.click("#bAct")
+    page.wait_for_selector("#vf video", state="attached")
+    page.wait_for_selector("#blocked", state="hidden", timeout=15000)
+    api.wait(lambda: page.evaluate("document.documentElement.dataset.state") not in ("off", "connecting", "idle"), 20, "harus tersambung")
+    for _ in range(150):                                               # pendengar `sent` hanya jalan saat Playwright dipompa, bukan saat tidur
+        if sent:
+            break
+        page.wait_for_timeout(100)
+    assert sent, "gambar harus terkirim lagi setelah tersambung"
+    assert page.evaluate("window.__streams.length") == 2, "kamera menyala lagi"
+    assert len(cams(api)) == MAX_CAMERAS
+
+
+@pytest.mark.parametrize("status,alasan", [
+    (None, "Server tidak terjangkau"),                                  # sambungan putus
+    (503, "Server sedang sibuk."),
+    (429, "Terlalu banyak permintaan."),
+    (408, "Waktu habis."),
+], ids=["jaringan-putus", "503", "429", "408"])
+def test_masalah_sementara_saat_menyambung_menampilkan_alasan_lalu_tersambung_sendiri(server, api, page, status, alasan):
+    gagal = {"sisa": 2, "dicoba": 0}
+
+    def cegat(route):
+        gagal["dicoba"] += 1
+        if gagal["sisa"] <= 0:
+            return route.continue_()
+        gagal["sisa"] -= 1
+        if status is None:
+            return route.abort("connectionrefused")
+        return route.fulfill(status=status, content_type="application/json", body=json.dumps({"error": alasan}))
+
+    page.route("**/api/device", cegat)
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    page.goto(page.base)
+    page.wait_for_function("((document.querySelector('#bTitle') || {}).textContent || '').includes('Belum bisa menyambung')", timeout=10000)
+    isi = page.inner_text("#banner")
+    assert alasan in isi and "Mencoba lagi tiap 3 detik" in isi, isi
+    assert page.locator("#conn").inner_text().strip() == "Menyambung" and page.locator("#bAct").count() == 0, "sementara: tetap mencoba, bukan menolak"
+    assert page.evaluate("window.__streams.length === 1 && !window.__streams[0].getTracks().some(t => t.readyState === 'ended')"), "kamera tetap menyala selama mencoba lagi"
+    page.wait_for_selector("#conn[data-st='memantau'], #conn[data-st='mencari_trotoar']", timeout=30000)
+    assert gagal["dicoba"] >= 3 and len(cams(api)) == 1
+    assert "Belum bisa menyambung" not in page.inner_text("#vf"), "pesan galat hilang begitu tersambung"
+
+
+def test_kunci_akses_salah_ditolak_dengan_alasan_dan_kamera_dimatikan(server, api, page):
+    page.route("**/api/device", lambda r: r.fulfill(status=403, content_type="application/json",
+                                                     body=json.dumps({"error": "Akses ditolak. Buka tautan berkunci dari terminal."})))
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    page.goto(page.base)
+    page.wait_for_selector("#blocked:not([hidden])", timeout=15000)
+    assert "Akses ditolak. Buka tautan berkunci dari terminal." in page.inner_text("#blocked")
+    assert page.evaluate(SEMUA_BERHENTI) and page.locator("#bAct").inner_text() == "Coba lagi"
 
 
 @pytest.mark.parametrize("w,h", [(320, 640), (390, 844), (844, 390), (768, 1024), (1366, 800)])

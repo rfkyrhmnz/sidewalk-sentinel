@@ -65,7 +65,7 @@ function renderChip() {
   if (D.phase === 'asking') [code, text] = ['asking', 'Izin kamera'];
   else if (D.phase === 'connecting') [code, text] = ['connecting', 'Menyambung'];
   else if (D.phase === 'closed') [code, text] = ['ditutup', 'Kamera ditutup'];
-  else if (['insecure', 'denied', 'error', 'taken'].includes(D.phase)) [code, text] = ['off', 'Kamera mati'];
+  else if (['insecure', 'denied', 'error', 'taken', 'refused'].includes(D.phase)) [code, text] = ['off', 'Kamera mati'];
   else if (D.live) {
     const status = D.state ? D.state.status : D.cam.status;
     if (D.error) [code, text] = ['offline', 'Terputus'];

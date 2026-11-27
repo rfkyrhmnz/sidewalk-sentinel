@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import timedelta
 
 import cv2
 import numpy as np
@@ -12,6 +13,7 @@ from support import ColorDetector, Client, FakeSegmenter, Phone, Street, jpeg, n
 
 from sidewalk_sentinel.cameras import (MAX_CAMERAS, CameraManager, CameraSpec, apply_changes, jpeg_size)
 from sidewalk_sentinel.server import make_server
+from sidewalk_sentinel.store import now
 
 ROI = [[0.0, 0.64], [1.0, 0.64], [1.0, 0.99], [0.0, 0.99]]
 
@@ -95,10 +97,92 @@ def test_nama_kembar_diberi_nomor_dan_nama_kosong_diganti_bawaan(mgr):
 def test_batas_jumlah_perangkat(mgr):
     for i in range(MAX_CAMERAS):
         mgr.register(new_key(), f"P{i}")
-    with pytest.raises(ValueError, match="batas"):
+    with pytest.raises(ValueError, match="(?i)batas"):
         mgr.register(new_key(), "kelebihan")
     existing = mgr.list()[0].spec.device
     assert mgr.register(existing, "")[1] is False, "perangkat yang sudah terdaftar tidak terhitung kelebihan"
+
+
+def _isi_penuh(mgr, umur=timedelta(hours=1)):
+    """Semua slot terisi perangkat yang didaftarkan `umur` yang lalu; mengembalikan daftar kamera menurut urutan daftar."""
+    cams = [mgr.register(new_key(), f"P{i}")[0] for i in range(MAX_CAMERAS)]
+    for i, cam in enumerate(cams):
+        cam.spec.created = (now() - umur + timedelta(seconds=i)).isoformat(timespec="seconds")
+    return cams
+
+
+def test_slot_penuh_dipakai_ulang_oleh_perangkat_kosong_tertua_beserta_foldernya(mgr):
+    cams = _isi_penuh(mgr)
+    tertua = cams[0]
+    assert tertua.dir.exists()
+    baru, dibuat = mgr.register(new_key(), "Ponsel baru")
+    assert dibuat and len(mgr.list()) == MAX_CAMERAS
+    ids = {c.spec.id for c in mgr.list()}
+    assert baru.spec.id in ids and tertua.spec.id not in ids, "yang tergusur harus yang paling lama kosong"
+    assert all(c.spec.id in ids for c in cams[1:])
+    assert not tertua.dir.exists() and tertua.removed
+    assert {d["id"] for d in json.loads(mgr.file.read_text())} == ids, "tersimpan ke disk"
+
+
+def test_slot_hanya_digusur_satu_per_pendaftaran_dan_perangkat_lama_tetap_dikenali(mgr):
+    cams = _isi_penuh(mgr)
+    mgr.register(new_key(), "A")
+    mgr.register(new_key(), "B")
+    ids = {c.spec.id for c in mgr.list()}
+    assert len(ids) == MAX_CAMERAS and cams[0].spec.id not in ids and cams[1].spec.id not in ids and cams[2].spec.id in ids
+    assert mgr.register(cams[5].spec.device, "")[1] is False, "perangkat yang sudah terdaftar tidak menggusur siapa pun"
+
+
+def _beri_kejadian(mgr, cam):
+    cam.events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, b"\xff\xd8x")
+
+
+def _beri_zona(mgr, cam):
+    mgr.update(cam.spec.id, {"roi": ROI})
+
+
+def _beri_pengaturan(mgr, cam):
+    mgr.update(cam.spec.id, {"settings": {"park_seconds": 7}})
+
+
+def _tutup(mgr, cam):
+    mgr.update(cam.spec.id, {"closed": True})
+
+
+def _jeda(mgr, cam):
+    mgr.update(cam.spec.id, {"enabled": False})
+
+
+def _sedang_mengirim(mgr, cam):
+    cam.connected_since = time.time()
+    cam._set("memantau")
+
+
+@pytest.mark.parametrize("beri", [_beri_kejadian, _beri_zona, _beri_pengaturan, _tutup, _jeda, _sedang_mengirim],
+                         ids=["punya-kejadian", "punya-zona", "punya-pengaturan", "ditutup-pemilik", "dijeda-pemilik", "sedang-mengirim"])
+def test_slot_tidak_digusur_dari_perangkat_yang_masih_terpakai(mgr, beri):
+    cams = _isi_penuh(mgr)
+    for cam in cams:
+        beri(mgr, cam)
+    with pytest.raises(ValueError, match="(?i)batas.*semuanya masih terpakai"):
+        mgr.register(new_key(), "kelebihan")
+    assert {c.spec.id for c in mgr.list()} == {c.spec.id for c in cams} and all(c.dir.exists() for c in cams)
+
+
+def test_slot_tidak_digusur_dari_perangkat_yang_baru_terdaftar(mgr):
+    cams = _isi_penuh(mgr, umur=timedelta(minutes=2))
+    with pytest.raises(ValueError, match="(?i)batas"):
+        mgr.register(new_key(), "kelebihan")
+    assert len(mgr.list()) == MAX_CAMERAS and all(c.dir.exists() for c in cams)
+
+
+def test_slot_hanya_menggusur_yang_kosong_dan_membiarkan_yang_berisi(mgr):
+    cams = _isi_penuh(mgr)
+    for cam in cams[:7]:
+        _beri_kejadian(mgr, cam)
+    mgr.register(new_key(), "Ponsel baru")
+    ids = {c.spec.id for c in mgr.list()}
+    assert cams[7].spec.id not in ids and all(c.spec.id in ids for c in cams[:7]), "hanya satu-satunya yang kosong yang tergusur"
 
 
 def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):

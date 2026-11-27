@@ -37,6 +37,7 @@ from .util import check_roi, new_id, valid_id
 log = logging.getLogger("sidewalk")
 
 MAX_CAMERAS = 8
+IDLE_SLOT_AFTER = timedelta(minutes=10)         # perangkat kosong yang lebih tua dari ini boleh digusur saat slot habis
 STATUS = ("perlu_area", "mencari_trotoar", "menunggu", "memuat", "model_galat", "memantau", "jeda", "ditutup")
 DEVICE_KEY = re.compile(r"[0-9a-f]{16,64}")
 MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
@@ -229,6 +230,22 @@ class Camera:
         self.channel.close()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
+
+    def idle_slot(self) -> bool:
+        """Perangkat yang jelas ditinggalkan: tidak sedang mengirim, belum punya kejadian, tanpa zona atau pengaturan
+        buatan pemilik, tidak ditutup atau dijeda pemilik, dan sudah terdaftar cukup lama. Biasanya sisa tab yang
+        dibuka sebentar (alamat tunnel berganti tiap dijalankan, jadi tiap alamat dihitung perangkat baru). Menggusurnya
+        tidak menghilangkan data apa pun."""
+        spec = self.spec
+        with self._lock:
+            if self.status != "menunggu" or self.connected_since is not None:
+                return False
+        if spec.closed or not spec.enabled or spec.roi is not None or spec.settings or not self.events.empty:
+            return False
+        try:
+            return now() - datetime.fromisoformat(spec.created) >= IDLE_SLOT_AFTER
+        except ValueError:
+            return False
 
     def reconfigure(self, spec: CameraSpec, restart: bool = True) -> None:
         """Terapkan spesifikasi baru. `restart` = bangun ulang mesin (jejak kendaraan dimulai dari awal)."""
@@ -597,8 +614,13 @@ class CameraManager:
             for cam in self._cams.values():
                 if cam.spec.device == key:
                     return cam, False
+            freed = None
             if len(self._cams) >= MAX_CAMERAS:
-                raise ValueError(f"batas {MAX_CAMERAS} perangkat tercapai; hapus salah satu di Setelan")
+                idle = sorted((c for c in self._cams.values() if c.idle_slot()), key=lambda c: c.spec.created)
+                if not idle:
+                    raise ValueError(f"Batas {MAX_CAMERAS} perangkat tercapai dan semuanya masih terpakai. Di laptop yang "
+                                     "menjalankan server, buka Setelan lalu hapus perangkat yang tidak dipakai, kemudian coba lagi.")
+                freed = self._cams.pop(idle[0].spec.id)       # slot terlama yang kosong dipakai ulang
             try:
                 base = _clean_name(name)
             except ValueError:
@@ -612,6 +634,9 @@ class CameraManager:
             cam = Camera(spec, self.root, self.detector, self.sidewalk)
             self._cams[spec.id] = cam
             self._save()
+        if freed is not None:
+            freed.stop()
+            shutil.rmtree(freed.dir, ignore_errors=True)
         cam.start()
         return cam, True
 
