@@ -64,6 +64,8 @@ sedang mengirim, belum punya kejadian, tanpa zona atau pengaturan buatan pemilik
 terdaftar lebih dari 10 menit. Bila tidak ada yang memenuhi syarat itu, layar menulis alasannya ("Server menolak perangkat
 ini"), kamera dimatikan, dan tombol **Coba lagi** muncul setelah pusat menghapus perangkat di Setelan. Gangguan sementara
 (jaringan putus, server sibuk) tidak menghentikan kamera: alasannya tampil di layar dan sambungan dicoba lagi tiap 3 detik.
+Permintaan yang tidak dijawab juga diputus: 20 detik untuk permintaan biasa, 10 detik untuk satu gambar, 120 detik untuk usulan
+zona (model trotoar bisa lama di CPU), lalu dianggap gangguan sementara.
 Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara memperbaikinya.
 
 Bila `cloudflared` tidak ditemukan, `--hp` otomatis memakai jalur Wi-Fi: HTTPS lokal dengan kode QR di terminal. HP dan
@@ -287,7 +289,7 @@ dan detektor diganti tiruan (`tests/support.py`).
   HP dan desktop, 12 ukuran layar dari 320 px sampai 2560 px (tanpa gulir mendatar, menu tidak menutupi isi, teks tidak
   keluar dari tombol), bahan kaca, tutup kamera (semua aliran berhenti, tidak ada gambar terkirim, bertahan setelah muat ulang,
   ditutup dari pusat, kartu muat di kotak bidik), sambungan ditolak (perangkat penuh, kunci salah: alasan tampil dan
-  kamera mati) atau terganggu sementara (alasan tampil, tersambung sendiri), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  kamera mati) atau terganggu sementara (alasan tampil, tersambung sendiri, permintaan yang menggantung diputus), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 

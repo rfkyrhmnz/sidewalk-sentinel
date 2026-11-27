@@ -2,7 +2,7 @@
 // Halaman mengambil gambar dari kamera lokal sekitar lima kali per detik, mengirimnya ke server, dan menerima
 // balik status serta posisi kendaraan untuk digambar. Objek ini hidup selama aplikasi terbuka (bukan selama satu
 // halaman), jadi pindah ke Laporan atau Kejadian tidak mematikan kamera.
-import { ApiError, getJSON, postBlob, postJSON } from './api.js';
+import { ApiError, getJSON, postBlob, postJSON, timeouts } from './api.js';
 import { keep } from './core.js';
 
 export const cameraSupported = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
@@ -265,7 +265,7 @@ export class Device {
   // Usulan zona trotoar dari model segmentasi. Mengembalikan {roi, coverage} atau {roi: null, message}.
   async proposeZone() {
     if (!this.cam) throw new ApiError('Perangkat belum tersambung ke server.', 0);
-    return postJSON(`/api/cams/${this.cam.id}/propose-zone`);
+    return postJSON(`/api/cams/${this.cam.id}/propose-zone`, {}, timeouts.slow);        // model segmentasi bisa lama di CPU
   }
 
   async retryModel() { await postJSON('/api/detector/retry'); }

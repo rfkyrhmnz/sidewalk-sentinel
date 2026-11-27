@@ -617,6 +617,81 @@ def test_masalah_sementara_saat_menyambung_menampilkan_alasan_lalu_tersambung_se
     assert "Belum bisa menyambung" not in page.inner_text("#vf"), "pesan galat hilang begitu tersambung"
 
 
+def _batas_waktu_singkat(page, **ms):
+    """Ganti batas waktu di api.js yang dilayani ke halaman ini, supaya tes tidak menunggu 20 detik sungguhan."""
+    def ganti(route):
+        r = route.fetch()
+        isi = r.text()
+        for nama, nilai in ms.items():
+            lama = {"call": "call: 20000", "frame": "frame: 10000"}[nama]
+            assert lama in isi, f"api.js tidak lagi memuat {lama}"
+            isi = isi.replace(lama, f"{nama}: {nilai}")
+        route.fulfill(response=r, body=isi)
+    page.route("**/api.js*", ganti)
+
+
+def test_permintaan_yang_tak_pernah_dijawab_menjadi_galat_terlihat_lalu_dicoba_lagi(server, api, page):
+    """Dulu satu permintaan yang menggantung membekukan layar di 'menunggu server menjawab' selamanya."""
+    _batas_waktu_singkat(page, call=700)
+    ditahan = {"n": 0}
+
+    def tahan(route):
+        ditahan["n"] += 1
+        if ditahan["n"] <= 2:
+            return                                                     # tidak dijawab, tidak ditolak: menggantung
+        route.continue_()
+
+    page.route("**/api/device", tahan)
+    page.add_init_script(SCENE)
+    page.add_init_script(TRACK)
+    page.goto(page.base)
+    page.wait_for_function("((document.querySelector('#bTitle') || {}).textContent || '').includes('Belum bisa menyambung')", timeout=10000)
+    isi = page.inner_text("#banner")
+    assert "Server tidak menjawab" in isi and "Mencoba lagi tiap 3 detik" in isi, isi
+    assert page.evaluate("window.__streams.length === 1 && !window.__streams[0].getTracks().some(t => t.readyState === 'ended')")
+    page.wait_for_selector("#conn[data-st='memantau'], #conn[data-st='mencari_trotoar']", timeout=30000)
+    assert ditahan["n"] >= 3 and len(cams(api)) == 1
+
+
+def test_usulan_zona_yang_lama_tidak_terpotong_batas_waktu_permintaan_biasa(server, api, page):
+    """Model trotoar di CPU bisa lebih lama dari permintaan biasa; usulan zona punya batas waktu sendiri yang longgar."""
+    _batas_waktu_singkat(page, call=700)
+
+    def lambat(route):
+        time.sleep(1.6)
+        route.continue_()
+
+    page.route("**/propose-zone", lambat)
+    page.add_init_script(SCENE)
+    start_monitoring(page, api)
+    page.click("#zoneBtn")
+    page.wait_for_selector("#vf[data-st='edit']")
+    page.click("#zAuto")
+    page.wait_for_selector("#hint:has-text('Usulan dari model')", timeout=20000)
+
+
+def test_pengiriman_gambar_yang_menggantung_tidak_membekukan_pelacakan(server, api, page):
+    _batas_waktu_singkat(page, frame=600)
+    ditahan = {"n": 0, "lolos": 0}
+
+    def tahan(route):
+        ditahan["n"] += 1
+        if ditahan["n"] == 1:
+            return                                                     # satu gambar tidak pernah dijawab
+        ditahan["lolos"] += 1
+        route.continue_()
+
+    page.route("**/frame", tahan)
+    page.add_init_script(SCENE)
+    page.goto(page.base)
+    page.wait_for_selector("#conn[data-st='memantau'], #conn[data-st='mencari_trotoar']", timeout=30000)
+    for _ in range(100):                                               # pompa Playwright sambil menunggu gambar berikutnya lolos
+        if ditahan["lolos"] >= 3:
+            break
+        page.wait_for_timeout(100)
+    assert ditahan["lolos"] >= 3, "setelah satu gambar menggantung, pengiriman harus lanjut sendiri"
+
+
 def test_kunci_akses_salah_ditolak_dengan_alasan_dan_kamera_dimatikan(server, api, page):
     page.route("**/api/device", lambda r: r.fulfill(status=403, content_type="application/json",
                                                      body=json.dumps({"error": "Akses ditolak. Buka tautan berkunci dari terminal."})))
