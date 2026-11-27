@@ -19,6 +19,13 @@ const BLOCKED = {
     html: 'Satu perangkat hanya bisa dipantau dari satu tab. Tutup tab yang lain, atau pindahkan pemantauan ke tab ini.',
     action: ['takeover', 'Pakai kamera di tab ini'],
   },
+  closed: {
+    title: 'Kamera ditutup',
+    icon: 'cameraOff',
+    html: 'Kamera mati sepenuhnya. Tidak ada gambar yang direkam, dikirim, atau disimpan selama ditutup. Kejadian lama tetap tersimpan.',
+    action: ['open', 'Buka kamera'],
+  },
+  refused: { title: 'Server menolak perangkat ini', action: ['retry', 'Coba lagi'] },
   denied: { title: 'Izin kamera ditolak', action: ['retry', 'Coba lagi'] },
   error: { title: 'Kamera belum bisa dipakai', action: ['retry', 'Coba lagi'] },
 };
@@ -197,6 +204,7 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     }
     host.innerHTML = button('toggle', enabled ? ICON.pause : ICON.play, enabled ? 'Jeda' : 'Lanjut')
       + button('zoneBtn', ICON.zone, auto ? 'Zona manual' : 'Atur zona')
+      + button('closeCam', ICON.cameraOff, 'Tutup kamera')
       + (modelErr ? button('retryModel', ICON.sync, 'Muat ulang model') : '')
       + (D.cameras > 1 ? button('flip', ICON.flip, 'Balik kamera') : '');
     $id('toggle').onclick = async (e) => {
@@ -204,6 +212,7 @@ export function viewPantau({ view, device: D, info, onEvent }) {
       try { await D.save({ enabled: !enabled }); } catch (err) { showError($id('err'), err); }
     };
     $id('zoneBtn').onclick = enterEdit;
+    $id('closeCam').onclick = () => { D.close(); toast('Kamera ditutup', 'Kamera mati dan tidak ada gambar yang dikirim.'); };
     if (modelErr) {
       $id('retryModel').onclick = async () => {
         try { await D.retryModel(); toast('Memuat ulang model'); } catch (err) { showError($id('err'), err); }
@@ -218,7 +227,9 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     const dmsg = (st && st.detector && st.detector.message) || '';
     switch (code) {
       case 'asking': return ['Menunggu izin', 'Pilih Izinkan pada pesan browser', 'Menunggu izin kamera', 'Pilih Izinkan pada pesan browser agar pemantauan bisa mulai.'];
-      case 'connecting': return ['Menyambung', 'Menghubungi server', 'Menyambung ke server', 'Kamera sudah menyala. Menunggu server menjawab.'];
+      case 'connecting': return D.error
+        ? ['Menyambung', 'Belum berhasil, mencoba lagi', 'Belum bisa menyambung ke server', `${D.error} Mencoba lagi tiap 3 detik.`]
+        : ['Menyambung', 'Menghubungi server', 'Menyambung ke server', 'Kamera sudah menyala. Menunggu server menjawab.'];
       case 'offline': return ['Terputus', D.error, 'Koneksi bermasalah', `${D.error} Pemantauan lanjut sendiri begitu server terjangkau.`];
       case 'edit': return ['Tandai trotoar', 'Zona belum disimpan', 'Tandai trotoar', EDIT_HINT];
       case 'perlu_area': return ['Tandai trotoar', 'Zona otomatis tidak tersedia', 'Tandai trotoar',
@@ -230,6 +241,7 @@ export function viewPantau({ view, device: D, info, onEvent }) {
       case 'model_galat': return ['Model belum siap', 'Deteksi kendaraan belum bisa jalan', 'Model deteksi belum siap', dmsg || 'Model YOLO tidak bisa dimuat.'];
       case 'memantau': return ['Memantau', zoneMode() === 'manual' ? 'Mengawasi zona manual' : 'Mengawasi zona trotoar otomatis', '', ''];
       case 'jeda': return ['Dijeda', 'Tekan Lanjut untuk memantau', 'Pemantauan dijeda', 'Tidak ada kejadian yang dicatat selama dijeda.'];
+      case 'ditutup': return ['Ditutup', 'Kamera mati, tidak ada gambar dikirim', '', ''];
       default: return ['Menunggu', 'Server menunggu gambar', 'Menunggu gambar', 'Server sedang menunggu gambar dari kamera ini.'];
     }
   };
@@ -242,14 +254,14 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     const key = `${D.phase}|${D.error}`;
     if (host.dataset.key !== key) {
       host.dataset.key = key;
-      host.innerHTML = `<div class="blocked-card"><b></b><p></p>${b.action ? `<button type="button" class="btn primary" id="bAct"></button>` : ''}</div>`;
+      host.innerHTML = `<div class="blocked-card">${b.icon ? `<span class="bc-icon">${ICON[b.icon]}</span>` : ''}<b></b><p></p>${b.action ? `<button type="button" class="btn primary" id="bAct"></button>` : ''}</div>`;
       host.querySelector('b').textContent = b.title;
       const p = host.querySelector('p');
       if (b.html) p.innerHTML = b.html; else p.textContent = D.error;
       if (b.action) {
         const act = $id('bAct');
         act.textContent = b.action[1];
-        act.onclick = () => D.start({ takeOver: b.action[0] === 'takeover' });
+        act.onclick = () => (b.action[0] === 'open' ? D.open() : D.start({ takeOver: b.action[0] === 'takeover' }));
       }
     }
     return true;
@@ -257,6 +269,7 @@ export function viewPantau({ view, device: D, info, onEvent }) {
 
   const render = () => {
     if (dead) return;
+    if (D.phase === 'closed' && editing) { leaveEdit(); return; }     // kamera ditutup (mungkin dari pusat) saat zona sedang ditata
     const blocked = renderBlocked();
     const st = D.state;
     const cam = D.cam;
@@ -267,8 +280,9 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     let code = 'idle';
     if (D.phase === 'asking') code = 'asking';
     else if (D.phase === 'connecting') code = 'connecting';
+    else if (D.phase === 'closed') code = 'ditutup';
     else if (D.live) code = editing ? 'edit' : (D.error ? 'offline' : (st ? st.status : cam.status));
-    if (blocked) code = 'idle';
+    if (blocked && code !== 'ditutup') code = 'idle';
 
     const [stT, stS, bTitle, bText] = describe(code, st);
     vf.dataset.st = code;

@@ -8,6 +8,7 @@ import { keep } from './core.js';
 export const cameraSupported = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
 const isMobile = () => /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent || '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const CLOSED = 'ss_closed';                      // '1' bila pemilik menutup kamera; bertahan setelah muat ulang dan buka ulang aplikasi
 const toBlob = (canvas, quality) => new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
 
 function randomKey() {
@@ -65,7 +66,8 @@ async function openCamera(video, facing) {
 
 /**
  * Fase: idle, insecure (konteks tidak aman), taken (tab lain memakai kamera ini), asking (menunggu izin),
- * denied, error, connecting (kamera menyala, server belum menjawab), live.
+ * denied, error, connecting (kamera menyala, server belum menjawab), live, closed (pemilik menutup kamera: tidak ada
+ * aliran kamera, tidak ada gambar yang dikirim; tetap tertutup sampai pemilik membukanya).
  */
 export class Device {
   constructor({ fps = 5, width = 640 } = {}) {
@@ -97,6 +99,8 @@ export class Device {
   get running() { return !!this.stream; }
   get live() { return this.phase === 'live' && !!this.cam; }
   get id() { return this.cam ? this.cam.id : null; }
+  get closed() { return this.phase === 'closed'; }
+  get linked() { return !!this.cam && (this.phase === 'live' || this.phase === 'closed'); }     // data perangkat tersedia
 
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
 
@@ -128,8 +132,14 @@ export class Device {
 
   _free() { if (this.release) { this.release(); this.release = null; } }
 
-  async start({ takeOver = false } = {}) {
+  async start({ takeOver = false, reopen = false } = {}) {
     this.stop(false);
+    if (reopen) keep.del(CLOSED);
+    if (keep.get(CLOSED) === '1') {                        // ditutup pemilik: jangan menyentuh kamera sama sekali
+      this._set('closed');
+      this._syncClosed();
+      return;
+    }
     if (!cameraSupported()) { this._set('insecure'); return; }
     if (!(await this._acquire(takeOver))) { this._set('taken'); return; }
     this._set('asking');
@@ -143,35 +153,81 @@ export class Device {
     this._countCameras();
     this._holdScreen();
     this._set('connecting');
-    this._connect();
+    this._connect(reopen);
   }
 
-  async _connect() {
+  open() { return this.start({ reopen: true }); }
+
+  /** Tutup kamera: aliran dimatikan sekarang juga (lampu kamera padam), lalu server diberi tahu. */
+  async close() {
+    if (this.phase === 'closed') return;
+    this._shut();
+    await this._syncClosed();
+  }
+
+  _shut() {
+    keep.set(CLOSED, '1');                                 // tertutup sampai pemilik membukanya, juga setelah muat ulang
+    this._halt();
+    this._set('closed');
+  }
+
+  // Beri tahu server (dan pusat) bahwa kamera ini tertutup. Diulang sampai berhasil: kamera sudah mati, jadi gagal
+  // menghubungi server tidak membahayakan privasi, hanya membuat status di pusat tertinggal.
+  async _syncClosed() {
+    while (this.phase === 'closed') {
+      try {
+        let cam = await postJSON('/api/device', { key: this.key, name: guessName() });
+        if (!cam.closed) cam = await postJSON(`/api/cams/${cam.id}`, { closed: true });
+        if (this.phase === 'closed') { this.cam = cam; this._emit(); }
+        return;
+      } catch { await sleep(3000); }
+    }
+  }
+
+  async _connect(reopen = false) {
     const stream = this.stream;
     while (this.stream === stream && stream) {
       try {
-        this.cam = await postJSON('/api/device', { key: this.key, name: guessName() });
+        let cam = await postJSON('/api/device', { key: this.key, name: guessName() });
+        if (cam.closed) {
+          if (!reopen) { this._shut(); return; }           // server menandai tertutup (mis. dari pusat): yang lebih ketat menang
+          cam = await postJSON(`/api/cams/${cam.id}`, { closed: false });
+        }
+        if (this.stream !== stream) return;                // ditutup selagi menyambung
+        this.cam = cam;
         this.state = null;
         this._set('live');
         this._tick();
         return;
       } catch (e) {
-        this.error = e.message;
+        if (this.stream !== stream) return;
+        if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+          this._halt();                                    // server menjawab dan menolak (mis. perangkat penuh, kunci salah): mengulang tidak menolong
+          this._set('refused', e.message);                 // dan kamera tidak perlu menyala tanpa ada yang menerima gambarnya
+          return;
+        }
+        this.error = e.message;                            // jaringan atau server sedang bermasalah: tampilkan alasannya dan coba lagi
         this._emit();
         await sleep(3000);
       }
     }
   }
 
-  stop(emit = true) {
+  // Matikan kamera dan hentikan pengiriman. Data perangkat (this.cam) dibiarkan.
+  _halt() {
     clearTimeout(this.timer);
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
-    this.cam = null;
     this.state = null;
     this.video.srcObject = null;
+    try { this.video.load(); } catch { /* beberapa browser menyisakan gambar terakhir sampai elemen disetel ulang */ }
     if (this.wake) { this.wake.release().catch(() => {}); this.wake = null; }
     this._free();
+  }
+
+  stop(emit = true) {
+    this._halt();
+    this.cam = null;
     if (emit) this._set('idle');
   }
 
@@ -260,11 +316,17 @@ export class Device {
         this.canvas.height = Math.round((v.videoHeight * w) / v.videoWidth);
         this.canvas.getContext('2d').drawImage(v, 0, 0, this.canvas.width, this.canvas.height);
         const blob = await toBlob(this.canvas, 0.7);
+        if (!this.live) return;                            // ditutup selagi gambar disiapkan: jangan kirim
         const data = await postBlob(`/api/cams/${id}/frame`, blob, 'image/jpeg');
-        if (this.cam && this.cam.id === id) { this.state = data; this.error = ''; slow = data.enabled === false; this._emit(); }
+        if (this.live && this.cam.id === id) { this.state = data; this.error = ''; slow = data.enabled === false; this._emit(); }
       }
     } catch (e) {
-      if (!this.cam || this.cam.id !== id) return;
+      if (!this.live || this.cam.id !== id) return;
+      if (e instanceof ApiError && e.status === 409) {     // server menutup kamera ini (mis. dari pusat): ikut mati dan tetap tertutup
+        this._shut();
+        this._syncClosed();
+        return;
+      }
       if (e instanceof ApiError && e.status === 404) {     // perangkat dihapus dari server: daftar lagi, mulai bersih
         this.cam = null;
         this.state = null;

@@ -37,7 +37,8 @@ from .util import check_roi, new_id, valid_id
 log = logging.getLogger("sidewalk")
 
 MAX_CAMERAS = 8
-STATUS = ("perlu_area", "mencari_trotoar", "menunggu", "memuat", "model_galat", "memantau", "jeda")
+IDLE_SLOT_AFTER = timedelta(minutes=10)         # perangkat kosong yang lebih tua dari ini boleh digusur saat slot habis
+STATUS = ("perlu_area", "mencari_trotoar", "menunggu", "memuat", "model_galat", "memantau", "jeda", "ditutup")
 DEVICE_KEY = re.compile(r"[0-9a-f]{16,64}")
 MAX_FRAME_PIXELS = 8_000_000                   # sekitar 4K; lebih besar dari ini bukan frame kamera yang wajar
 _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
@@ -70,6 +71,10 @@ def jpeg_size(data: bytes) -> tuple[int, int] | None:
             return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
         i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
     return None
+
+
+class CameraClosed(Exception):
+    """Kamera perangkat ditutup pemiliknya: tidak ada frame yang diterima, diproses, atau disimpan."""
 
 
 class PushCapture:
@@ -107,6 +112,12 @@ class PushCapture:
     def retrieve(self) -> np.ndarray | None:
         return self._cur
 
+    def clear(self) -> None:
+        """Buang frame yang masih tersimpan di memori (kamera ditutup). Frame yang belum diambil ikut hilang."""
+        with self._cond:
+            self._frame = self._cur = None
+            self._taken = self._seq
+
     def latest(self) -> np.ndarray | None:
         """Salinan frame terbaru yang diterima (untuk usulan zona), atau None bila belum ada."""
         with self._cond:
@@ -122,6 +133,7 @@ class CameraSpec:
     roi: list | None = None
     settings: dict = field(default_factory=dict)
     enabled: bool = True
+    closed: bool = False              # kamera ditutup pemiliknya (privasi): tetap tertutup sampai pemilik membukanya
     created: str = ""
     ip: str = ""                      # IP terakhir yang terlihat: penanda untuk pusat, BUKAN kunci akses
     ip_since: str = ""                # sejak kapan IP itu dipakai (ISO)
@@ -135,6 +147,7 @@ class CameraSpec:
             raise ValueError("id atau kunci perangkat tidak valid")
         if not isinstance(spec.ip, str) or parse_ip(spec.ip) is None:      # berkas bisa diedit tangan
             spec.ip = spec.ip_since = ""
+        spec.closed = bool(spec.closed)             # nilai aneh dibaca sebagai tertutup: salah ke arah yang melindungi privasi
         return spec
 
 
@@ -160,6 +173,10 @@ def apply_changes(spec: CameraSpec, data: dict) -> CameraSpec:
         new.settings = dict(overrides)
     if "enabled" in data:
         new.enabled = bool(data["enabled"])
+    if "closed" in data:
+        if not isinstance(data["closed"], bool):
+            raise ValueError("closed harus true atau false")
+        new.closed = data["closed"]
     return new
 
 
@@ -214,6 +231,22 @@ class Camera:
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
+    def idle_slot(self) -> bool:
+        """Perangkat yang jelas ditinggalkan: tidak sedang mengirim, belum punya kejadian, tanpa zona atau pengaturan
+        buatan pemilik, tidak ditutup atau dijeda pemilik, dan sudah terdaftar cukup lama. Biasanya sisa tab yang
+        dibuka sebentar (alamat tunnel berganti tiap dijalankan, jadi tiap alamat dihitung perangkat baru). Menggusurnya
+        tidak menghilangkan data apa pun."""
+        spec = self.spec
+        with self._lock:
+            if self.status != "menunggu" or self.connected_since is not None:
+                return False
+        if spec.closed or not spec.enabled or spec.roi is not None or spec.settings or not self.events.empty:
+            return False
+        try:
+            return now() - datetime.fromisoformat(spec.created) >= IDLE_SLOT_AFTER
+        except ValueError:
+            return False
+
     def reconfigure(self, spec: CameraSpec, restart: bool = True) -> None:
         """Terapkan spesifikasi baru. `restart` = bangun ulang mesin (jejak kendaraan dimulai dari awal)."""
         with self._lock:
@@ -235,6 +268,8 @@ class Camera:
     def push(self, jpeg: bytes) -> dict:
         """Terima satu frame dari halaman web. ValueError bila frame tidak wajar. Mengembalikan keadaan terkini
         (status, jejak kendaraan, hitungan) agar halaman bisa menggambarnya tanpa permintaan kedua."""
+        if self.spec.closed:                          # tertutup: tolak sebelum mendekode atau menyimpan apa pun
+            raise CameraClosed("kamera ditutup")
         size = jpeg_size(jpeg)
         if size is None:
             raise ValueError("frame bukan JPEG yang valid")
@@ -243,13 +278,17 @@ class Camera:
         frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("frame bukan JPEG yang valid")
+        if self.spec.closed:
+            raise CameraClosed("kamera ditutup")
         if self.spec.enabled:
             self.channel.put(frame)
+            if self.spec.closed:                      # ditutup selagi frame ini diproses: jangan biarkan tersimpan
+                self.channel.clear()
         return self.live_state()
 
     def live_state(self) -> dict:
         with self._lock:
-            return {"status": self.status, "message": self.message, "enabled": self.spec.enabled,
+            return {"status": self.status, "message": self.message, "enabled": self.spec.enabled, "closed": self.spec.closed,
                     "roi": self._effective_roi(), "zone": self._zone_mode(),
                     "detector": self._detector_status(),
                     "tracks": list(self._tracks), "seq": self.events.seq,
@@ -290,7 +329,7 @@ class Camera:
             out = {
                 "id": spec.id, "name": spec.name, "roi": self._effective_roi(), "zone": self._zone_mode(),
                 "auto_available": self._auto_available(), "settings": spec.settings,
-                "enabled": spec.enabled, "created": spec.created,
+                "enabled": spec.enabled, "closed": spec.closed, "created": spec.created,
                 "status": self.status, "message": self.message, "detector": self._detector_status(),
                 "fps": round(self.fps, 1), "size": list(self.size) if self.size else None,
                 "uptime_s": round(time.time() - self.connected_since) if self.connected_since else None,
@@ -304,6 +343,12 @@ class Camera:
     # ---------------------------------------------------------------- pekerja
     def _run(self) -> None:
         while not self._stop.is_set():
+            if self.spec.closed:
+                self._blank()
+                self._set("ditutup", "Kamera ditutup oleh pemilik perangkat")
+                self._wake.wait(0.5)
+                self._wake.clear()
+                continue
             if not self.spec.enabled:
                 self._set("jeda", "Dijeda")
                 self._wake.wait(0.5)
@@ -313,6 +358,18 @@ class Camera:
             if outcome == "stop":
                 return
             self._wake.clear()
+
+    def _blank(self) -> None:
+        """Kamera ditutup: buang gambar terakhir dan semua turunannya dari memori. Dipanggil berulang selagi tertutup,
+        jadi frame yang terlambat tiba pun terhapus dalam setengah detik."""
+        self.channel.clear()
+        with self._lock:
+            self._tracks = []
+            self._auto_roi = None
+            self.connected_since = None
+            self.size = None
+            self.fps = 0.0
+            self._last_proc = None
 
     def _session(self) -> str:
         """Satu rangkaian pemantauan dengan satu Engine. Berakhir saat konfigurasi berubah atau dijeda."""
@@ -354,7 +411,7 @@ class Camera:
         while True:
             if self._stop.is_set():
                 return "stop"
-            if not self.spec.enabled or self._take("reconf"):
+            if not self.spec.enabled or self.spec.closed or self._take("reconf"):
                 return "ulang"
             if not cap.grab():
                 # Perangkat berhenti mengirim (layar terkunci, tab ditutup): tunggu. Bila perangkat kembali,
@@ -557,8 +614,13 @@ class CameraManager:
             for cam in self._cams.values():
                 if cam.spec.device == key:
                     return cam, False
+            freed = None
             if len(self._cams) >= MAX_CAMERAS:
-                raise ValueError(f"batas {MAX_CAMERAS} perangkat tercapai; hapus salah satu di Setelan")
+                idle = sorted((c for c in self._cams.values() if c.idle_slot()), key=lambda c: c.spec.created)
+                if not idle:
+                    raise ValueError(f"Batas {MAX_CAMERAS} perangkat tercapai dan semuanya masih terpakai. Di laptop yang "
+                                     "menjalankan server, buka Setelan lalu hapus perangkat yang tidak dipakai, kemudian coba lagi.")
+                freed = self._cams.pop(idle[0].spec.id)       # slot terlama yang kosong dipakai ulang
             try:
                 base = _clean_name(name)
             except ValueError:
@@ -572,6 +634,9 @@ class CameraManager:
             cam = Camera(spec, self.root, self.detector, self.sidewalk)
             self._cams[spec.id] = cam
             self._save()
+        if freed is not None:
+            freed.stop()
+            shutil.rmtree(freed.dir, ignore_errors=True)
         cam.start()
         return cam, True
 
@@ -585,7 +650,7 @@ class CameraManager:
                 raise ValueError("sudah ada perangkat dengan nama itu")
             old, new = asdict(cam.spec), asdict(spec)
             if new != old:
-                light = {"name", "enabled"}               # tidak perlu membangun ulang mesin
+                light = {"name", "enabled", "closed"}     # tidak perlu membangun ulang mesin; pekerja memeriksa tiap putaran
                 cam.reconfigure(spec, restart=any(new[k] != old[k] for k in new if k not in light))
                 self._save()
             return cam

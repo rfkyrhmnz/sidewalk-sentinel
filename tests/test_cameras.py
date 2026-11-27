@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import timedelta
 
 import cv2
 import numpy as np
@@ -12,6 +13,7 @@ from support import ColorDetector, Client, FakeSegmenter, Phone, Street, jpeg, n
 
 from sidewalk_sentinel.cameras import (MAX_CAMERAS, CameraManager, CameraSpec, apply_changes, jpeg_size)
 from sidewalk_sentinel.server import make_server
+from sidewalk_sentinel.store import now
 
 ROI = [[0.0, 0.64], [1.0, 0.64], [1.0, 0.99], [0.0, 0.99]]
 
@@ -95,10 +97,92 @@ def test_nama_kembar_diberi_nomor_dan_nama_kosong_diganti_bawaan(mgr):
 def test_batas_jumlah_perangkat(mgr):
     for i in range(MAX_CAMERAS):
         mgr.register(new_key(), f"P{i}")
-    with pytest.raises(ValueError, match="batas"):
+    with pytest.raises(ValueError, match="(?i)batas"):
         mgr.register(new_key(), "kelebihan")
     existing = mgr.list()[0].spec.device
     assert mgr.register(existing, "")[1] is False, "perangkat yang sudah terdaftar tidak terhitung kelebihan"
+
+
+def _isi_penuh(mgr, umur=timedelta(hours=1)):
+    """Semua slot terisi perangkat yang didaftarkan `umur` yang lalu; mengembalikan daftar kamera menurut urutan daftar."""
+    cams = [mgr.register(new_key(), f"P{i}")[0] for i in range(MAX_CAMERAS)]
+    for i, cam in enumerate(cams):
+        cam.spec.created = (now() - umur + timedelta(seconds=i)).isoformat(timespec="seconds")
+    return cams
+
+
+def test_slot_penuh_dipakai_ulang_oleh_perangkat_kosong_tertua_beserta_foldernya(mgr):
+    cams = _isi_penuh(mgr)
+    tertua = cams[0]
+    assert tertua.dir.exists()
+    baru, dibuat = mgr.register(new_key(), "Ponsel baru")
+    assert dibuat and len(mgr.list()) == MAX_CAMERAS
+    ids = {c.spec.id for c in mgr.list()}
+    assert baru.spec.id in ids and tertua.spec.id not in ids, "yang tergusur harus yang paling lama kosong"
+    assert all(c.spec.id in ids for c in cams[1:])
+    assert not tertua.dir.exists() and tertua.removed
+    assert {d["id"] for d in json.loads(mgr.file.read_text())} == ids, "tersimpan ke disk"
+
+
+def test_slot_hanya_digusur_satu_per_pendaftaran_dan_perangkat_lama_tetap_dikenali(mgr):
+    cams = _isi_penuh(mgr)
+    mgr.register(new_key(), "A")
+    mgr.register(new_key(), "B")
+    ids = {c.spec.id for c in mgr.list()}
+    assert len(ids) == MAX_CAMERAS and cams[0].spec.id not in ids and cams[1].spec.id not in ids and cams[2].spec.id in ids
+    assert mgr.register(cams[5].spec.device, "")[1] is False, "perangkat yang sudah terdaftar tidak menggusur siapa pun"
+
+
+def _beri_kejadian(mgr, cam):
+    cam.events.append({"kind": "parkir", "label": "P", "reason": "uji", "track_id": 1}, b"\xff\xd8x")
+
+
+def _beri_zona(mgr, cam):
+    mgr.update(cam.spec.id, {"roi": ROI})
+
+
+def _beri_pengaturan(mgr, cam):
+    mgr.update(cam.spec.id, {"settings": {"park_seconds": 7}})
+
+
+def _tutup(mgr, cam):
+    mgr.update(cam.spec.id, {"closed": True})
+
+
+def _jeda(mgr, cam):
+    mgr.update(cam.spec.id, {"enabled": False})
+
+
+def _sedang_mengirim(mgr, cam):
+    cam.connected_since = time.time()
+    cam._set("memantau")
+
+
+@pytest.mark.parametrize("beri", [_beri_kejadian, _beri_zona, _beri_pengaturan, _tutup, _jeda, _sedang_mengirim],
+                         ids=["punya-kejadian", "punya-zona", "punya-pengaturan", "ditutup-pemilik", "dijeda-pemilik", "sedang-mengirim"])
+def test_slot_tidak_digusur_dari_perangkat_yang_masih_terpakai(mgr, beri):
+    cams = _isi_penuh(mgr)
+    for cam in cams:
+        beri(mgr, cam)
+    with pytest.raises(ValueError, match="(?i)batas.*semuanya masih terpakai"):
+        mgr.register(new_key(), "kelebihan")
+    assert {c.spec.id for c in mgr.list()} == {c.spec.id for c in cams} and all(c.dir.exists() for c in cams)
+
+
+def test_slot_tidak_digusur_dari_perangkat_yang_baru_terdaftar(mgr):
+    cams = _isi_penuh(mgr, umur=timedelta(minutes=2))
+    with pytest.raises(ValueError, match="(?i)batas"):
+        mgr.register(new_key(), "kelebihan")
+    assert len(mgr.list()) == MAX_CAMERAS and all(c.dir.exists() for c in cams)
+
+
+def test_slot_hanya_menggusur_yang_kosong_dan_membiarkan_yang_berisi(mgr):
+    cams = _isi_penuh(mgr)
+    for cam in cams[:7]:
+        _beri_kejadian(mgr, cam)
+    mgr.register(new_key(), "Ponsel baru")
+    ids = {c.spec.id for c in mgr.list()}
+    assert cams[7].spec.id not in ids and all(c.spec.id in ids for c in cams[:7]), "hanya satu-satunya yang kosong yang tergusur"
 
 
 def test_perangkat_dan_kejadian_dipulihkan_setelah_restart(tmp_path):
@@ -541,3 +625,102 @@ def test_api_hapus_kejadian_perangkat_lain_atau_tak_dikenal_ditolak(srv):
     assert c.req("DELETE", "/api/cams/tidakada/events/1")[0] == 404
     assert c.req("GET", "/api/report?periode=hari_ini")[1]["total"] == 1
     assert c.req("POST", f"/api/cams/{ph.id}/events/1")[0] == 404, "hanya DELETE dan GET yang dikenal"
+
+
+# ======================================================================== tutup kamera (privasi)
+@pytest.mark.parametrize("nilai", ["false", "true", 1, 0, None, "", [], {}])
+def test_closed_harus_benar_benar_boolean(nilai):
+    with pytest.raises(ValueError):
+        apply_changes(_spec(), {"closed": nilai})
+
+
+def test_closed_diterapkan_dan_nilai_aneh_di_berkas_dibaca_sebagai_tertutup():
+    assert apply_changes(_spec(), {"closed": True}).closed is True
+    assert apply_changes(_spec(closed=True), {"closed": False}).closed is False
+    assert apply_changes(_spec(closed=True), {"name": "Baru"}).closed is True, "yang tidak disebut tidak berubah"
+    item = {"id": "a" * 12, "device": "b" * 24, "name": "X"}
+    assert CameraSpec.from_dict(item).closed is False, "berkas lama tanpa kolom ini: terbuka seperti biasa"
+    assert CameraSpec.from_dict({**item, "closed": "salah-ketik"}).closed is True, "ragu berarti tertutup"
+
+
+def test_tutup_menolak_frame_menghapus_gambar_di_memori_dan_buka_melanjutkan(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    cam = app.cams.get(ph.id)
+    assert cam.channel.latest() is not None, "syarat awal: ada gambar terakhir di memori"
+
+    st, info = c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    assert st == 200 and info["closed"] is True
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5, "status harus ditutup")
+
+    st, body = c.req("POST", f"/api/cams/{ph.id}/frame", jpeg(street.frame()), {"Content-Type": "image/jpeg"})
+    assert st == 409 and body == {"error": "kamera ditutup"}, "frame ditolak, bukan diterima lalu diabaikan"
+    st, body = c.req("POST", f"/api/cams/{ph.id}/frame", b"bukan jpeg sama sekali", {"Content-Type": "image/jpeg"})
+    assert st == 409 and body == {"error": "kamera ditutup"}, "ditolak sebelum isinya dibaca: isi rusak pun dijawab tertutup, bukan 400"
+    assert cam.channel.latest() is None, "gambar terakhir harus hilang dari memori server"
+    now = c.req("GET", f"/api/cams/{ph.id}")[1]
+    assert now["fps"] == 0 and now["size"] is None and now["uptime_s"] is None
+    assert cam.live_state()["tracks"] == [] and cam.live_state()["closed"] is True
+    assert c.req("POST", f"/api/cams/{ph.id}/propose-zone")[0] == 409, "tanpa gambar tidak ada usulan zona"
+
+    assert c.req("POST", f"/api/cams/{ph.id}", {"closed": False})[1]["closed"] is False
+    ph.stream(street.frame, 20, until=lambda s: s["status"] == "memantau" and not s["closed"])
+
+
+def test_tutup_tidak_mengubah_jeda_dan_membuka_kembali_ke_keadaan_semula(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    assert c.req("POST", f"/api/cams/{ph.id}", {"enabled": False})[0] == 200
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "jeda", 5)
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5, "tertutup menang atas jeda")
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": False})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "jeda", 5, "dibuka: kembali ke jeda, bukan memantau")
+    assert c.req("GET", f"/api/cams/{ph.id}")[1]["enabled"] is False
+
+
+def test_frame_yang_terlambat_tiba_setelah_tutup_ikut_terhapus(srv):
+    app, c = srv
+    ph, street = _siapkan(c)
+    cam = app.cams.get(ph.id)
+    c.req("POST", f"/api/cams/{ph.id}", {"closed": True})
+    c.wait(lambda: c.req("GET", f"/api/cams/{ph.id}")[1]["status"] == "ditutup", 5)
+    cam.channel.put(street.frame())                          # menyusup lewat jalur yang tidak melewati push()
+    c.wait(lambda: cam.channel.latest() is None, 3, "pekerja harus membuang gambar yang tersisa")
+
+
+def test_tutup_bertahan_setelah_server_dimulai_ulang(tmp_path):
+    m = CameraManager(tmp_path, detector=ColorDetector())
+    m.start()
+    cam, _ = m.register(new_key(), "Ponsel")
+    m.update(cam.spec.id, {"closed": True})
+    m.shutdown()
+    m2 = CameraManager(tmp_path, detector=ColorDetector())
+    m2.start()
+    try:
+        (again,) = m2.list()
+        assert again.spec.closed is True, "tertutup harus tetap tertutup sampai pemilik membukanya"
+        deadline = time.time() + 5
+        while again.status != "ditutup" and time.time() < deadline:
+            time.sleep(0.05)
+        assert again.status == "ditutup"
+    finally:
+        m2.shutdown()
+
+
+def test_frame_yang_berpapasan_dengan_penutupan_tidak_tertinggal_di_memori(tmp_path):
+    """Penutupan masuk di antara 'frame diterima' dan 'frame disimpan'. Pekerja tidak dijalankan di sini, jadi hanya
+    pemeriksaan sesudah penyimpanan di push() yang bisa menghapusnya (tanpa menunggu putaran pekerja berikutnya)."""
+    from dataclasses import replace
+
+    from sidewalk_sentinel.cameras import Camera
+    cam = Camera(_spec(), tmp_path, ColorDetector())
+    asli = cam.channel.put
+
+    def put_lalu_ditutup(frame):
+        asli(frame)
+        cam.spec = replace(cam.spec, closed=True)           # pemilik menekan Tutup tepat sesudah frame disimpan
+
+    cam.channel.put = put_lalu_ditutup
+    cam.push(jpeg(Street().frame()))
+    assert cam.channel.latest() is None, "frame yang tersimpan sesudah penutupan harus langsung dihapus"

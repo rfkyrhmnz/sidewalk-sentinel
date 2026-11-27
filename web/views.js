@@ -301,6 +301,7 @@ export function viewSetelan({ view, device: D, info }) {
            <p class="faint small">Setiap perangkat lain hanya melihat datanya sendiri.</p>`
         : `<p class="small">Anda hanya melihat data perangkat ini. Perangkat lain tidak bisa melihat kejadian atau foto bukti Anda.</p>
            <p class="faint small">Komputer pusat pemantauan melihat semua perangkat, termasuk kejadian, foto bukti, dan alamat IP perangkat ini.</p>`}
+        <p class="faint small">Tombol <b>Tutup kamera</b> di layar Pantau mematikan kamera sepenuhnya. Kamera tetap tertutup, juga setelah aplikasi dimuat ulang, sampai Anda membukanya lagi.</p>
       </div></section>
 
     <section class="stack" aria-labelledby="sData"><h2 class="h3" id="sData">Data</h2>
@@ -408,7 +409,7 @@ export function viewSetelan({ view, device: D, info }) {
         li.innerHTML = `<span class="stack"><b></b><span class="faint small"></span></span><button type="button" class="btn danger">${ICON.trash}<span>Hapus</span></button>`;
         li.querySelector('b').textContent = o.name;
         const meta = li.querySelector('.small');
-        meta.textContent = `${ipLabel(o.ip)} · ${o.counts_today.parkir + o.counts_today.naik_trotoar} kejadian hari ini`;
+        meta.textContent = `${ipLabel(o.ip)} · ${o.counts_today.parkir + o.counts_today.naik_trotoar} kejadian hari ini${o.closed ? ' · Kamera ditutup' : ''}`;
         if (o.ip_since) meta.title = `IP ini tercatat sejak ${new Date(o.ip_since).toLocaleString('id-ID')}`;
         armed(li.querySelector('button'), async () => { await del(`/api/cams/${o.id}`); li.remove(); toast('Perangkat dihapus'); });
         ul.append(li);

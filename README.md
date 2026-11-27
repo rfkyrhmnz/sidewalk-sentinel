@@ -58,8 +58,13 @@ pemindai QR di iPhone dan Safari menyimpan cookie secara terpisah, jadi bila ala
 alamatnya yang ikut. Selama alamatnya lengkap, browser mana pun yang membukanya langsung masuk. Akibatnya kunci terlihat
 di bilah alamat dan riwayat HP: jangan bagikan tangkapan layarnya, dan jangan menyalin alamat itu ke tempat lain.
 Setiap browser yang dipakai terdaftar sebagai perangkat sendiri, jadi pindah browser menambah satu perangkat di Setelan
-(hapus yang lama di sana). Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara
-memperbaikinya.
+(hapus yang lama di sana). Alamat tunnel berganti tiap `--hp` dijalankan, dan tiap alamat dihitung sebagai browser baru.
+Server menerima paling banyak 8 perangkat. Saat penuh, perangkat kosong yang paling lama dipakai ulang otomatis: tidak
+sedang mengirim, belum punya kejadian, tanpa zona atau pengaturan buatan pemilik, tidak ditutup atau dijeda pemilik, dan
+terdaftar lebih dari 10 menit. Bila tidak ada yang memenuhi syarat itu, layar menulis alasannya ("Server menolak perangkat
+ini"), kamera dimatikan, dan tombol **Coba lagi** muncul setelah pusat menghapus perangkat di Setelan. Gangguan sementara
+(jaringan putus, server sibuk) tidak menghentikan kamera: alasannya tampil di layar dan sambungan dicoba lagi tiap 3 detik.
+Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara memperbaikinya.
 
 Bila `cloudflared` tidak ditemukan, `--hp` otomatis memakai jalur Wi-Fi: HTTPS lokal dengan kode QR di terminal. HP dan
 laptop harus satu Wi-Fi, firewall Windows harus mengizinkan Python (pilih **Allow** saat ditanya), dan browser memberi
@@ -201,9 +206,9 @@ perangkat yang tidak ada. Titik akhir utama:
 | `GET /api/info` | versi, peran peminta (`pusat` atau `perangkat`), nilai bawaan, dan status model |
 | `POST /api/detector/retry` | memuat ulang model kendaraan setelah galat |
 | `POST /api/device` | mendaftarkan perangkat (kunci acak dari browser) atau mengambil kembali kameranya; menjawab dengan cookie `ss_dev` |
-| `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini |
+| `POST /api/cams/<id>/frame` | satu frame JPEG; dijawab status, kotak deteksi, dan hitungan hari ini. Dijawab `409` bila kamera ditutup (isinya tidak dibaca) |
 | `POST /api/cams/<id>/propose-zone` | usulan poligon trotoar dari gambar terbaru perangkat (titik awal penyunting zona manual) |
-| `GET/POST/DELETE /api/cams/<id>` | informasi, setelan, dan penghapusan data perangkat |
+| `GET/POST/DELETE /api/cams/<id>` | informasi, setelan (`name`, `roi`, `settings`, `enabled` untuk Jeda, `closed` untuk Tutup kamera), dan penghapusan data perangkat |
 | `GET /api/cams/<id>/events` | kejadian perangkat (`?after=<no>`) |
 | `DELETE /api/cams/<id>/events/<no>` | hapus satu kejadian beserta foto buktinya (nomor tidak dipakai ulang) |
 | `GET /api/events` | semua kejadian (`kind`, `limit`, `offset`) |
@@ -259,7 +264,8 @@ dan detektor diganti tiruan (`tests/support.py`).
 - `test_engine.py`: mesin dengan detektor berskrip: parkir, naik trotoar, kendaraan di luar zona, getar kotak, deteksi
   yang terlewat sebentar, kendaraan yang pergi, ukuran minimum, dan pengaturan yang diteruskan ke detektor.
 - `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart (termasuk setelan
-  versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, dan pelacak lama kejadian.
+  versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, pelacak lama kejadian, dan pemakaian ulang slot
+  perangkat (hanya yang kosong, tua, dan tidak dipakai pemilik yang boleh tergusur).
 - `test_access.py` dan `test_isolation.py`: aturan peran (sambungan lokal sungguhan, header proxy, Host, DNS rebinding,
   IP penanda) dan pemisahan data di setiap jalur API: perangkat A tidak bisa membaca, mengubah, atau menghapus milik B,
   tamu tanpa perangkat tidak melihat apa pun, pusat melihat semuanya, dan IP tidak pernah sampai ke perangkat.
@@ -279,7 +285,9 @@ dan detektor diganti tiruan (`tests/support.py`).
   mencari trotoar, alur sampai parkir terdeteksi dan lamanya masuk
   Laporan, model memuat atau galat, izin kamera ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak
   HP dan desktop, 12 ukuran layar dari 320 px sampai 2560 px (tanpa gulir mendatar, menu tidak menutupi isi, teks tidak
-  keluar dari tombol), bahan kaca, serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  keluar dari tombol), bahan kaca, tutup kamera (semua aliran berhenti, tidak ada gambar terkirim, bertahan setelah muat ulang,
+  ditutup dari pusat, kartu muat di kotak bidik), sambungan ditolak (perangkat penuh, kunci salah: alasan tampil dan
+  kamera mati) atau terganggu sementara (alasan tampil, tersambung sendiri), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 
@@ -292,6 +300,21 @@ Foto bukti memuat kendaraan dan orang di sekitarnya, jadi atur `--retention-days
 arahkan kamera ke area yang tidak boleh direkam. Tanpa `--lan` atau `--https`, server hanya menerima koneksi dari komputer itu
 sendiri; dengan tunnel (`--hp`) server tetap hanya di komputer itu dan siapa pun yang memegang tautan berkunci bisa
 masuk lewat tunnel, jadi jangan bagikan kode QR atau tautannya. Folder `data/` dari versi lama aplikasi tidak dipakai lagi dan aman dihapus.
+
+### Tutup kamera
+
+Tombol **Tutup kamera** di layar Pantau mematikan kamera sepenuhnya, berbeda dari **Jeda** yang hanya berhenti mencatat
+sementara kamera dan pengiriman gambar tetap berjalan. Selama ditutup:
+
+- aliran kamera dimatikan seketika (lampu kamera padam) dan halaman tidak mengirim gambar apa pun;
+- server menolak frame dengan `409` tanpa membaca isinya, dan gambar terakhir yang tersimpan di memori dibuang;
+- status perangkat menjadi **Ditutup**, juga di pusat (Setelan, Perangkat lain);
+- kamera tetap tertutup setelah halaman dimuat ulang, aplikasi dibuka lagi, atau server dimulai ulang, sampai pemilik menekan
+  **Buka kamera**. Nilai yang meragukan dibaca sebagai tertutup.
+
+Pusat juga bisa menutup kamera perangkat lain lewat API (`closed: true`); perangkat itu mematikan kameranya pada gambar
+berikutnya dan tetap tertutup. Hanya perangkat itu sendiri yang menyalakan kameranya lagi, dengan menekan Buka kamera.
+Kejadian dan foto bukti yang sudah tercatat tidak ikut terhapus; hapus lewat halaman Kejadian bila perlu.
 
 ### Pusat dan perangkat
 

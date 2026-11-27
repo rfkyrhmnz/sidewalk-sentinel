@@ -235,7 +235,13 @@ def terminal_qr_to_text(output: str) -> str:
     img = np.array(px, np.uint8)
     img = cv2.resize(img, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
     img = cv2.copyMakeBorder(img, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
-    return cv2.QRCodeDetector().detectAndDecode(img)[0]
+    # Detektor klasik OpenCV gagal menemukan sebagian kode yang sebenarnya sah (sekitar 7% dari token acak, versi 4);
+    # detektor ArUco membacanya semua. Teks yang dibaca tetap harus sama persis dengan tautan, jadi kode yang rusak tetap gagal.
+    for detektor in (cv2.QRCodeDetector, getattr(cv2, "QRCodeDetectorAruco", None)):
+        teks = detektor().detectAndDecode(img)[0] if detektor else ""
+        if teks:
+            return teks
+    return ""
 
 
 def test_hp_dengan_cloudflared_hanya_di_laptop_berkunci_dan_qr_terminal_terbaca(monkeypatch, tmp_path, capsys):

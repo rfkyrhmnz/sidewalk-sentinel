@@ -64,7 +64,8 @@ function renderChip() {
   let code = 'idle', text = 'Standby';
   if (D.phase === 'asking') [code, text] = ['asking', 'Izin kamera'];
   else if (D.phase === 'connecting') [code, text] = ['connecting', 'Menyambung'];
-  else if (['insecure', 'denied', 'error', 'taken'].includes(D.phase)) [code, text] = ['off', 'Kamera mati'];
+  else if (D.phase === 'closed') [code, text] = ['ditutup', 'Kamera ditutup'];
+  else if (['insecure', 'denied', 'error', 'taken', 'refused'].includes(D.phase)) [code, text] = ['off', 'Kamera mati'];
   else if (D.live) {
     const status = D.state ? D.state.status : D.cam.status;
     if (D.error) [code, text] = ['offline', 'Terputus'];
@@ -90,11 +91,11 @@ async function announce(from) {
   } catch { /* pengumuman berikutnya akan menyusul */ }
 }
 
-let wasLive = false;
+let wasLinked = false;
 function onDevice() {
   renderChip();
-  if (D.live && !wasLive && /^#\/setelan/.test(location.hash)) route();     // setelan menunggu perangkat tersambung
-  wasLive = D.live;
+  if (D.linked && !wasLinked && /^#\/setelan/.test(location.hash)) route();     // setelan menunggu perangkat tersambung (kamera boleh tertutup)
+  wasLinked = D.linked;
   const st = D.state;
   if (!st || !D.cam) return;
   if (P.camId !== D.cam.id || P.lastSeq === null) {      // pertama tersambung: kejadian lama tidak diumumkan ulang
