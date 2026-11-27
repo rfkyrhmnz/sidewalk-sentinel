@@ -85,6 +85,33 @@ python main.py --sidewalk-weights models\trotoar.pt      # model segmentasi trot
 python main.py --device 0                                # GPU pertama (bawaan: ditentukan ultralytics)
 ```
 
+### Bila kendaraan tidak terdeteksi
+
+Tanda utamanya: status **Memantau** tetapi tidak ada kotak sama sekali. Setiap kendaraan yang dilacak selalu digambar
+(kotak pucat di luar zona), jadi tanpa kotak berarti model tidak melihat kendaraan pada gambar itu. Penyebab yang paling
+sering, berurutan dari yang paling murah dicoba:
+
+1. **Orientasi.** YOLO dilatih pada kendaraan yang tegak. HP yang dipegang berdiri memfilmkan layar landscape melihat
+   semuanya miring 90°. Pegang HP mendatar, atau putar videonya.
+2. **Kepekaan.** Setelan, **Kepekaan** 5 menurunkan ambang keyakinan dari 0,30 ke 0,15.
+3. **Ukuran.** Kendaraan yang kecil di gambar sering terlewat, dan HP yang berdiri membuat gambar diperkecil lebih
+   banyak sebelum masuk model. Dekatkan kamera.
+4. **Model.** `yolo11n` adalah yang terkecil. Coba `python main.py --weights yolo11s.pt` (atau `yolo11m.pt`).
+5. **Isi gambar.** Model dilatih pada foto nyata. Render 3D, kartun, dan layar dengan pantulan atau garis moire sering
+   tidak dikenali. Uji pada kendaraan sungguhan sebelum menyimpulkan apa pun tentang akurasi.
+
+Untuk membuktikan penyebabnya, bukan menebak, ambil foto (atau rekam beberapa detik) dengan HP dan cara memegang yang
+sama saat gagal, lalu jalankan di komputer Anda:
+
+```powershell
+python tools\uji_deteksi.py foto_layar.jpg
+python tools\uji_deteksi.py rekaman.mp4 --frames 8 --weights yolo11s.pt --keluar hasil_uji
+```
+
+Skrip memakai detektor dan penyiapan gambar yang sama dengan aplikasi, mencoba empat putaran (0°, 90°, 180°, 270°) dan
+tiga ukuran masukan (640, 960, 1280), menghitung kotak pada keyakinan 0,30 (bawaan), 0,15, dan 0,05, lalu menulis
+kesimpulan dan menyimpan gambar berkotak dari kombinasi terbaik. Ia tidak mengubah apa pun di aplikasi.
+
 ## Cara memakai
 
 1. **Pantau**: kamera menyala sendiri dan zona trotoar dicari otomatis. Selama trotoar belum terlihat, status
@@ -244,6 +271,7 @@ web/                        aplikasi web (PWA): index.html, app.css, app.js (ker
                             Setelan), laporan.js (grafik dan ringkasan), hp.html dan hp.js (halaman kode QR),
                             api.js, core.js, sw.js, manifest, ikon
 tools/make_icons.py         membuat ikon PNG dari desain SVG
+tools/uji_deteksi.py        mengukur apa yang dilihat YOLO pada foto atau video (putar, ukuran masukan, ambang)
 tests/                      pytest
 ```
 
@@ -259,6 +287,8 @@ dan detektor diganti tiruan (`tests/support.py`).
 
 - `test_detector.py`: penyaring kelas (tangan, orang, ponsel, dan benda lain dibuang), konversi mask ke poligon, status
   pemuatan model (memuat, galat, coba lagi), dan usulan zona dari keluaran model trotoar tiruan.
+- `test_uji_deteksi.py`: alat diagnosis deteksi dengan detektor tiruan yang perilakunya diketahui (hanya terlihat bila
+  tegak, hanya pada ukuran besar, ragu, nyaris pasti salah): putaran, penyiapan, hitungan per ambang, kesimpulan, berkas.
 - `test_zone.py`: zona otomatis: perataan mask, jadwal pembaruan, ditunda saat ada kendaraan, dilepas setelah beberapa
   kali tak terlihat, dan tidak diterbitkan ulang untuk perubahan kecil.
 - `test_engine.py`: mesin dengan detektor berskrip: parkir, naik trotoar, kendaraan di luar zona, getar kotak, deteksi
