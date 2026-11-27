@@ -200,7 +200,13 @@ export class Device {
         this._tick();
         return;
       } catch (e) {
-        this.error = e.message;
+        if (this.stream !== stream) return;
+        if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) {
+          this._halt();                                    // server menjawab dan menolak (mis. perangkat penuh, kunci salah): mengulang tidak menolong
+          this._set('refused', e.message);                 // dan kamera tidak perlu menyala tanpa ada yang menerima gambarnya
+          return;
+        }
+        this.error = e.message;                            // jaringan atau server sedang bermasalah: tampilkan alasannya dan coba lagi
         this._emit();
         await sleep(3000);
       }

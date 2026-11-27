@@ -58,8 +58,13 @@ pemindai QR di iPhone dan Safari menyimpan cookie secara terpisah, jadi bila ala
 alamatnya yang ikut. Selama alamatnya lengkap, browser mana pun yang membukanya langsung masuk. Akibatnya kunci terlihat
 di bilah alamat dan riwayat HP: jangan bagikan tangkapan layarnya, dan jangan menyalin alamat itu ke tempat lain.
 Setiap browser yang dipakai terdaftar sebagai perangkat sendiri, jadi pindah browser menambah satu perangkat di Setelan
-(hapus yang lama di sana). Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara
-memperbaikinya.
+(hapus yang lama di sana). Alamat tunnel berganti tiap `--hp` dijalankan, dan tiap alamat dihitung sebagai browser baru.
+Server menerima paling banyak 8 perangkat. Saat penuh, perangkat kosong yang paling lama dipakai ulang otomatis: tidak
+sedang mengirim, belum punya kejadian, tanpa zona atau pengaturan buatan pemilik, tidak ditutup atau dijeda pemilik, dan
+terdaftar lebih dari 10 menit. Bila tidak ada yang memenuhi syarat itu, layar menulis alasannya ("Server menolak perangkat
+ini"), kamera dimatikan, dan tombol **Coba lagi** muncul setelah pusat menghapus perangkat di Setelan. Gangguan sementara
+(jaringan putus, server sibuk) tidak menghentikan kamera: alasannya tampil di layar dan sambungan dicoba lagi tiap 3 detik.
+Halaman "Akses ditolak" muncul bila alamat tidak memuat kunci yang berlaku, dan menunjuk cara memperbaikinya.
 
 Bila `cloudflared` tidak ditemukan, `--hp` otomatis memakai jalur Wi-Fi: HTTPS lokal dengan kode QR di terminal. HP dan
 laptop harus satu Wi-Fi, firewall Windows harus mengizinkan Python (pilih **Allow** saat ditanya), dan browser memberi
@@ -259,7 +264,8 @@ dan detektor diganti tiruan (`tests/support.py`).
 - `test_engine.py`: mesin dengan detektor berskrip: parkir, naik trotoar, kendaraan di luar zona, getar kotak, deteksi
   yang terlewat sebentar, kendaraan yang pergi, ukuran minimum, dan pengaturan yang diteruskan ke detektor.
 - `test_cameras.py` dan `test_store.py`: kamera perangkat, pendaftaran, pemulihan setelah restart (termasuk setelan
-  versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, dan pelacak lama kejadian.
+  versi lama), validasi frame, status model, usulan zona, penyimpanan kejadian, pelacak lama kejadian, dan pemakaian ulang slot
+  perangkat (hanya yang kosong, tua, dan tidak dipakai pemilik yang boleh tergusur).
 - `test_access.py` dan `test_isolation.py`: aturan peran (sambungan lokal sungguhan, header proxy, Host, DNS rebinding,
   IP penanda) dan pemisahan data di setiap jalur API: perangkat A tidak bisa membaca, mengubah, atau menghapus milik B,
   tamu tanpa perangkat tidak melihat apa pun, pusat melihat semuanya, dan IP tidak pernah sampai ke perangkat.
@@ -280,7 +286,8 @@ dan detektor diganti tiruan (`tests/support.py`).
   Laporan, model memuat atau galat, izin kamera ditolak, konteks tidak aman, tab kedua, jalur HTTPS, grafik, tata letak
   HP dan desktop, 12 ukuran layar dari 320 px sampai 2560 px (tanpa gulir mendatar, menu tidak menutupi isi, teks tidak
   keluar dari tombol), bahan kaca, tutup kamera (semua aliran berhenti, tidak ada gambar terkirim, bertahan setelah muat ulang,
-  ditutup dari pusat, kartu muat di kotak bidik), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
+  ditutup dari pusat, kartu muat di kotak bidik), sambungan ditolak (perangkat penuh, kunci salah: alasan tampil dan
+  kamera mati) atau terganggu sementara (alasan tampil, tersambung sendiri), serta hasil cetak PDF. Tes ini dilewati otomatis bila Playwright atau Chrome tidak terpasang.
 
 ## Privasi
 

@@ -25,6 +25,7 @@ const BLOCKED = {
     html: 'Kamera mati sepenuhnya. Tidak ada gambar yang direkam, dikirim, atau disimpan selama ditutup. Kejadian lama tetap tersimpan.',
     action: ['open', 'Buka kamera'],
   },
+  refused: { title: 'Server menolak perangkat ini', action: ['retry', 'Coba lagi'] },
   denied: { title: 'Izin kamera ditolak', action: ['retry', 'Coba lagi'] },
   error: { title: 'Kamera belum bisa dipakai', action: ['retry', 'Coba lagi'] },
 };
@@ -226,7 +227,9 @@ export function viewPantau({ view, device: D, info, onEvent }) {
     const dmsg = (st && st.detector && st.detector.message) || '';
     switch (code) {
       case 'asking': return ['Menunggu izin', 'Pilih Izinkan pada pesan browser', 'Menunggu izin kamera', 'Pilih Izinkan pada pesan browser agar pemantauan bisa mulai.'];
-      case 'connecting': return ['Menyambung', 'Menghubungi server', 'Menyambung ke server', 'Kamera sudah menyala. Menunggu server menjawab.'];
+      case 'connecting': return D.error
+        ? ['Menyambung', 'Belum berhasil, mencoba lagi', 'Belum bisa menyambung ke server', `${D.error} Mencoba lagi tiap 3 detik.`]
+        : ['Menyambung', 'Menghubungi server', 'Menyambung ke server', 'Kamera sudah menyala. Menunggu server menjawab.'];
       case 'offline': return ['Terputus', D.error, 'Koneksi bermasalah', `${D.error} Pemantauan lanjut sendiri begitu server terjangkau.`];
       case 'edit': return ['Tandai trotoar', 'Zona belum disimpan', 'Tandai trotoar', EDIT_HINT];
       case 'perlu_area': return ['Tandai trotoar', 'Zona otomatis tidak tersedia', 'Tandai trotoar',

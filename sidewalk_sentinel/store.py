@@ -154,6 +154,11 @@ class EventStore:
         return out
 
     @property
+    def empty(self) -> bool:
+        with self._lock:
+            return not self.records
+
+    @property
     def seq(self) -> int:
         with self._lock:
             return self.records[-1]["no"] if self.records else 0
